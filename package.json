@@ -1,0 +1,16 @@
+{
+  "name": "rfc",
+  "private": true,
+  "scripts": {
+    "format": "oxfmt",
+    "format:check": "oxfmt --check",
+    "lint": "oxlint --no-error-on-unmatched-pattern",
+    "hooks:install": "lefthook install"
+  },
+  "devDependencies": {
+    "lefthook": "^2.1.14",
+    "oxfmt": "^0.68.0",
+    "oxlint": "^1.83.0"
+  },
+  "packageManager": "bun@1.4.2"
+}
