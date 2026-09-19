@@ -3,8 +3,10 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
-import { Effect, Schema } from "effect";
+import { Duration, Effect, Schema } from "effect";
+import * as AiError from "effect/unstable/ai/AiError";
 import * as DecisionModel from "effect/unstable/ai/DecisionModel";
+import { TestClock } from "effect/testing";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 import {
   EvidenceBundleSchema,
@@ -12,6 +14,7 @@ import {
   RfcSourceFetchError,
   RfcSourceServiceTag,
   createRfcClient,
+  DecisionModelError,
   hashRfcSource,
   makeRfcSourceHttpLayer,
   parseSourceBlocks,
@@ -63,6 +66,7 @@ const makeDecisionModel = (
     | "irrelevant" = "direct_answer",
   relationProbability = 0.9,
   relationConfidence = 0.95,
+  selectionProbability = 0.95,
 ): DecisionModel.DecisionModel => {
   const model = {
     [DecisionModel.TypeId]: DecisionModel.TypeId,
@@ -71,7 +75,7 @@ const makeDecisionModel = (
       const answers = Object.fromEntries(
         Object.entries(definition.decisions).map(([key, decision]) =>
           decision._tag === "Probability"
-            ? [key, { probability: 0.95 }]
+            ? [key, { probability: selectionProbability }]
             : "atomic" in decision.criteria
               ? [
                   key,
@@ -246,6 +250,47 @@ describe("known RFC research", () => {
     expect(calls).toHaveLength(4);
   });
 
+  test("does not persist semantic inputs, judgments, or provider responses", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const question = "PRIVACY_SENTINEL_question_must_not_be_cached";
+    const model = makeDecisionModel([]);
+    const providerResponseModel = {
+      [DecisionModel.TypeId]: DecisionModel.TypeId,
+      decide: (...args: Parameters<typeof model.decide>) =>
+        model.decide(...args).pipe(
+          Effect.map((response) => ({
+            ...response,
+            providerSecret: "PRIVACY_SENTINEL_provider_response_must_not_be_cached",
+          })),
+        ),
+    } as unknown as DecisionModel.DecisionModel;
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [catalogDocument],
+      rfcSourceFetcher: makeSourceFetcher(sourceText),
+      decisionModel: providerResponseModel,
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    await client.research({ schemaVersion: 1, question, rfc: "RFC9110" });
+
+    const sourceFiles = await readdir(join(cacheDirectory, "sources"));
+    const persisted = await Promise.all([
+      readFile(join(cacheDirectory, "catalog.json"), "utf8"),
+      ...sourceFiles.map((file) => readFile(join(cacheDirectory, "sources", file), "utf8")),
+    ]);
+    const cacheContents = persisted.join("\\n");
+    expect(cacheContents).not.toContain(question);
+    expect(cacheContents).not.toContain("PRIVACY_SENTINEL_provider_response_must_not_be_cached");
+    expect(cacheContents).not.toContain("direct_answer");
+    expect(cacheContents).not.toContain("evidence_bundle");
+  });
+
   test("records the provider-resolved model identifier", async () => {
     const cacheDirectory = await makeCacheDirectory();
     const typeSafe = makeTypeSafeHttpClient();
@@ -299,6 +344,353 @@ describe("known RFC research", () => {
     expect(result.evidence).toEqual([]);
     expect(result.diagnostics.atomicity.label).toBe("compound");
     expect(calls).toHaveLength(1);
+  });
+
+  test("returns unsupported when every passage candidate is confidently negative", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [catalogDocument],
+      rfcSourceFetcher: makeSourceFetcher(sourceText),
+      decisionModel: makeDecisionModel([], "atomic", "irrelevant", 0.9, 0.95, 0.1),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 1,
+      question: "What does the server cache?",
+      rfc: "RFC9110",
+    });
+
+    expect(result.status).toBe("unsupported");
+    expect(result.evidence).toEqual([]);
+    expect(result.diagnostics.selection).toEqual([{ candidateId: "block-1", probability: 0.1 }]);
+    expect(result.diagnostics.classification).toEqual([]);
+  });
+
+  test("returns needs_review when a negative relation is low confidence", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [catalogDocument],
+      rfcSourceFetcher: makeSourceFetcher(sourceText),
+      decisionModel: makeDecisionModel([], "atomic", "irrelevant", 0.9, 0.5),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 1,
+      question: "What does the server cache?",
+      rfc: "RFC9110",
+    });
+
+    expect(result.status).toBe("needs_review");
+  });
+
+  test("rejects invalid provider probability distributions as typed failures", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const model = {
+      [DecisionModel.TypeId]: DecisionModel.TypeId,
+      decide: (definition: { readonly decisions: Readonly<Record<string, Decision.Any>> }) => {
+        const answers = Object.fromEntries(
+          Object.entries(definition.decisions).map(([key, decision]) =>
+            decision._tag === "Probability"
+              ? [key, { probability: 0.1 }]
+              : "atomic" in decision.criteria
+                ? [
+                    key,
+                    {
+                      label: "atomic",
+                      probabilities: { atomic: 0.8, compound: 0.1 },
+                      confidence: 0.95,
+                    },
+                  ]
+                : [
+                    key,
+                    {
+                      label: "background_only",
+                      probabilities: {
+                        direct_answer: 0.05,
+                        partial_answer: 0.05,
+                        background_only: 0.8,
+                        contradictory: 0.05,
+                        irrelevant: 0.05,
+                      },
+                      confidence: 0.95,
+                    },
+                  ],
+          ),
+        );
+        return Effect.succeed({
+          answers,
+          usage: { inputTokens: 1, outputTokens: 1 },
+        });
+      },
+    } as unknown as DecisionModel.DecisionModel;
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [catalogDocument],
+      rfcSourceFetcher: makeSourceFetcher(sourceText),
+      decisionModel: model,
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    await expect(
+      client.research({
+        schemaVersion: 1,
+        question: "What must the client send?",
+        rfc: "RFC9110",
+      }),
+    ).rejects.toBeInstanceOf(DecisionModelError);
+  });
+
+  test("retries retryable provider errors and succeeds without retrying non-retryable errors", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const successful = makeDecisionModel([]);
+    let attempts = 0;
+    const model = {
+      [DecisionModel.TypeId]: DecisionModel.TypeId,
+      decide: (...args: Parameters<typeof successful.decide>) => {
+        attempts += 1;
+        if (attempts === 1) {
+          return Effect.fail(
+            AiError.make({
+              module: "test",
+              method: "decide",
+              reason: new AiError.RateLimitError({ retryAfter: Duration.millis(0) }),
+            }),
+          );
+        }
+        return successful.decide(...args);
+      },
+    } as unknown as DecisionModel.DecisionModel;
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [catalogDocument],
+      rfcSourceFetcher: makeSourceFetcher(sourceText),
+      decisionModel: model,
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    await expect(
+      client.research({
+        schemaVersion: 1,
+        question: "What must the client send?",
+        rfc: "RFC9110",
+      }),
+    ).resolves.toMatchObject({ status: "answered" });
+    expect(attempts).toBe(3);
+
+    const nonRetryingCacheDirectory = await makeCacheDirectory();
+    let nonRetryingAttempts = 0;
+    const nonRetryingModel = {
+      [DecisionModel.TypeId]: DecisionModel.TypeId,
+      decide: (..._args: Parameters<typeof successful.decide>) => {
+        nonRetryingAttempts += 1;
+        return Effect.fail(
+          AiError.make({
+            module: "test",
+            method: "decide",
+            reason: new AiError.InvalidRequestError({ description: "bad request" }),
+          }),
+        );
+      },
+    } as unknown as DecisionModel.DecisionModel;
+    const nonRetryingClient = await createRfcClient({
+      cacheDirectory: nonRetryingCacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [catalogDocument],
+      rfcSourceFetcher: makeSourceFetcher(sourceText),
+      decisionModel: nonRetryingModel,
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(nonRetryingClient);
+
+    await expect(
+      nonRetryingClient.research({
+        schemaVersion: 1,
+        question: "What must the client send?",
+        rfc: "RFC9110",
+      }),
+    ).rejects.toBeInstanceOf(DecisionModelError);
+    expect(nonRetryingAttempts).toBe(1);
+  });
+
+  test("stops before a retry that would exceed the elapsed-time budget", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const successful = makeDecisionModel([]);
+    let attempts = 0;
+    const model = {
+      [DecisionModel.TypeId]: DecisionModel.TypeId,
+      decide: (..._args: Parameters<typeof successful.decide>) => {
+        attempts += 1;
+        return Effect.fail(
+          AiError.make({
+            module: "test",
+            method: "decide",
+            reason: new AiError.RateLimitError({ retryAfter: Duration.seconds(60) }),
+          }),
+        );
+      },
+    } as unknown as DecisionModel.DecisionModel;
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [catalogDocument],
+      rfcSourceFetcher: makeSourceFetcher(sourceText),
+      decisionModel: model,
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    await expect(
+      client.research({
+        schemaVersion: 1,
+        question: "What must the client send?",
+        rfc: "RFC9110",
+      }),
+    ).rejects.toMatchObject({
+      _tag: "DecisionModelError",
+      reason: expect.stringContaining("retry"),
+    });
+    expect(attempts).toBe(1);
+  });
+
+  test("times out a never-completing provider attempt at the elapsed-time budget", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const clock = await Effect.runPromise(
+      Effect.scoped(TestClock.make({ warningDelay: Duration.seconds(30) })),
+    );
+    let attempts = 0;
+    let startedResolve: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      startedResolve = resolve;
+    });
+    const successful = makeDecisionModel([]);
+    const model = {
+      [DecisionModel.TypeId]: DecisionModel.TypeId,
+      decide: (..._args: Parameters<typeof successful.decide>) => {
+        attempts += 1;
+        startedResolve?.();
+        return Effect.never;
+      },
+    } as unknown as DecisionModel.DecisionModel;
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [catalogDocument],
+      rfcSourceFetcher: makeSourceFetcher(sourceText),
+      decisionModel: model,
+      clock,
+    });
+    clients.push(client);
+
+    const research = client.research({
+      schemaVersion: 1,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+    });
+    const researchOutcome = research.then(
+      () => ({ kind: "success" as const }),
+      (error) => ({ kind: "error" as const, error }),
+    );
+    const startedInTime = await Promise.race([
+      started.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 250)),
+    ]);
+    expect(startedInTime).toBe(true);
+    if (!startedInTime) return;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await Effect.runPromise(clock.adjust(Duration.seconds(10)));
+    const outcome = await Promise.race([
+      researchOutcome,
+      new Promise<{ readonly kind: "guard" }>((resolve) =>
+        setTimeout(() => resolve({ kind: "guard" }), 250),
+      ),
+    ]);
+
+    expect(outcome.kind).toBe("error");
+    if (outcome.kind === "error") {
+      expect(outcome.error).toMatchObject({
+        _tag: "DecisionModelError",
+        stage: "selection",
+        reason: expect.stringContaining("elapsed-time budget"),
+        attempts: 1,
+      });
+    }
+    expect(attempts).toBe(1);
+  });
+
+  test("fails with a typed provider error after retry exhaustion", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const successful = makeDecisionModel([]);
+    let attempts = 0;
+    const model = {
+      [DecisionModel.TypeId]: DecisionModel.TypeId,
+      decide: (..._args: Parameters<typeof successful.decide>) => {
+        attempts += 1;
+        return Effect.fail(
+          AiError.make({
+            module: "test",
+            method: "decide",
+            reason: new AiError.InternalProviderError({ description: "temporarily unavailable" }),
+          }),
+        );
+      },
+    } as unknown as DecisionModel.DecisionModel;
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [catalogDocument],
+      rfcSourceFetcher: makeSourceFetcher(sourceText),
+      decisionModel: model,
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    await expect(
+      client.research({
+        schemaVersion: 1,
+        question: "What must the client send?",
+        rfc: "RFC9110",
+      }),
+    ).rejects.toMatchObject({
+      _tag: "DecisionModelError",
+      reason: expect.stringContaining("retry"),
+    });
+    expect(attempts).toBe(3);
   });
 
   test("fails closed for partial, unsupported, uncertain, and contradictory evidence", async () => {

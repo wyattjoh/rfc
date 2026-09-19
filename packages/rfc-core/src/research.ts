@@ -1,5 +1,17 @@
 import MiniSearch from "minisearch";
-import { Clock, Context, Effect, FileSystem, Ref, Schema } from "effect";
+import {
+  Cause,
+  Clock,
+  Context,
+  Duration,
+  Effect,
+  FileSystem,
+  Predicate,
+  Ref,
+  Result,
+  Schema,
+} from "effect";
+import * as AiError from "effect/unstable/ai/AiError";
 import * as Decision from "effect/unstable/ai/Decision";
 import * as DecisionModel from "effect/unstable/ai/DecisionModel";
 import {
@@ -68,7 +80,11 @@ export const knownRfcPolicy = {
   sourceBlockMaxCharacters: 4_000,
   sourceBlockOverlapCharacters: 200,
   selectionProbabilityThreshold: 0.65,
+  unsupportedProbabilityThreshold: 0.35,
   relationConfidenceThreshold: 0.65,
+  providerMaxAttempts: 3,
+  providerMaxElapsedMilliseconds: 10_000,
+  providerDefaultRetryDelayMilliseconds: 100,
   directAnswerProbabilityThreshold: 0.65,
   partialAnswerProbabilityThreshold: 0.6,
   contradictoryProbabilityThreshold: 0.65,
@@ -132,7 +148,7 @@ export const EvidenceProvenanceSchema = Schema.Struct({
  */
 export type EvidenceProvenance = Schema.Schema.Type<typeof EvidenceProvenanceSchema>;
 
-const ProbabilityMapSchema = Schema.Record(Schema.String, Schema.Number);
+const ProbabilityMapSchema = Schema.Record(Schema.String, Schema.Finite);
 
 /**
  * A selected exact quotation and its independent semantic judgments.
@@ -254,6 +270,7 @@ export class DecisionModelError extends Schema.TaggedError<DecisionModelError>()
   {
     stage: Schema.Literals(["selection", "relation"]),
     reason: Schema.String,
+    attempts: Schema.optionalKey(Schema.Natural),
   },
 ) {}
 
@@ -356,6 +373,222 @@ type RelationResult = {
 
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : "The DecisionModel request failed";
+
+type DecisionStage = "selection" | "relation";
+
+const providerErrorTag = (error: unknown): string =>
+  AiError.isAiError(error) ? error.reason._tag : "UnknownProviderError";
+
+const retryDelayMilliseconds = (error: unknown, policy: ResearchPolicy): number => {
+  if (!AiError.isAiError(error) || error.retryAfter === undefined) {
+    return policy.providerDefaultRetryDelayMilliseconds;
+  }
+
+  const delay = Duration.toMillis(error.retryAfter);
+  return Number.isFinite(delay) && delay >= 0
+    ? delay
+    : policy.providerDefaultRetryDelayMilliseconds;
+};
+
+const providerFailure = (
+  stage: DecisionStage,
+  error: unknown,
+  attempts: number,
+  exhausted: boolean,
+): DecisionModelError =>
+  new DecisionModelError({
+    stage,
+    reason: exhausted
+      ? `DecisionModel retry budget exhausted after ${attempts} attempts (${providerErrorTag(error)})`
+      : `DecisionModel provider failure (${providerErrorTag(error)})`,
+    attempts,
+  });
+
+const decodeProbabilityMap = (
+  stage: DecisionStage,
+  candidateId: string,
+  value: unknown,
+  labels: ReadonlyArray<string>,
+): Effect.Effect<Readonly<Record<string, number>>, DecisionModelError> =>
+  Effect.try({
+    try: () => {
+      const probabilities = Schema.decodeUnknownSync(ProbabilityMapSchema)(value);
+      const keys = Object.keys(probabilities);
+      const total = labels.reduce((sum, label) => sum + (probabilities[label] ?? Number.NaN), 0);
+      const hasExpectedLabels =
+        keys.length === labels.length &&
+        labels.every((label) => Object.prototype.hasOwnProperty.call(probabilities, label));
+      const hasUnitValues = labels.every((label) => {
+        const probability = probabilities[label];
+        return probability !== undefined && probability >= 0 && probability <= 1;
+      });
+      if (!hasExpectedLabels || !hasUnitValues || Math.abs(total - 1) > 1e-6) {
+        throw new Error("invalid probability distribution");
+      }
+      return probabilities;
+    },
+    catch: () =>
+      new DecisionModelError({
+        stage,
+        reason: `Provider returned an invalid probability distribution for ${candidateId}`,
+      }),
+  });
+
+const decodeConfidence = (
+  stage: DecisionStage,
+  candidateId: string,
+  value: unknown,
+): Effect.Effect<number | undefined, DecisionModelError> =>
+  value === undefined
+    ? Effect.succeed(undefined)
+    : Effect.try({
+        try: () => {
+          const confidence = Schema.decodeUnknownSync(Schema.Finite)(value);
+          if (confidence < 0 || confidence > 1) {
+            throw new Error("invalid confidence");
+          }
+          return confidence;
+        },
+        catch: () =>
+          new DecisionModelError({
+            stage,
+            reason: `Provider returned invalid confidence for ${candidateId}`,
+          }),
+      });
+
+const decodeProbability = (
+  stage: DecisionStage,
+  candidateId: string,
+  value: unknown,
+): Effect.Effect<number, DecisionModelError> =>
+  Effect.try({
+    try: () => {
+      const probability = Schema.decodeUnknownSync(Schema.Finite)(value);
+      if (probability < 0 || probability > 1) {
+        throw new Error("invalid probability");
+      }
+      return probability;
+    },
+    catch: () =>
+      new DecisionModelError({
+        stage,
+        reason: `Provider returned an invalid probability for ${candidateId}`,
+      }),
+  });
+
+const decodeUsage = (
+  stage: DecisionStage,
+  value: unknown,
+): Effect.Effect<DecisionModel.DecisionUsage, DecisionModelError> =>
+  Effect.try({
+    try: () => {
+      const usage = Schema.decodeUnknownSync(
+        Schema.Struct({
+          inputTokens: Schema.optionalKey(Schema.Finite),
+          outputTokens: Schema.optionalKey(Schema.Finite),
+        }),
+      )(value);
+      if (
+        (usage.inputTokens !== undefined && usage.inputTokens < 0) ||
+        (usage.outputTokens !== undefined && usage.outputTokens < 0)
+      ) {
+        throw new Error("invalid token usage");
+      }
+      return new DecisionModel.DecisionUsage(usage);
+    },
+    catch: () =>
+      new DecisionModelError({
+        stage,
+        reason: "Provider returned invalid token usage",
+      }),
+  });
+
+const providerAnswers = (
+  stage: DecisionStage,
+  response: unknown,
+): Effect.Effect<Readonly<Record<string, unknown>>, DecisionModelError> =>
+  Effect.try({
+    try: () => {
+      if (!Predicate.isObject(response) || !Predicate.isObject(response.answers)) {
+        throw new Error("missing answers");
+      }
+      return response.answers;
+    },
+    catch: () =>
+      new DecisionModelError({
+        stage,
+        reason: "Provider returned a response without answers",
+      }),
+  });
+
+const decideWithRetry = Effect.fnUntraced(function* <A>(
+  stage: DecisionStage,
+  operation: () => Effect.Effect<A, AiError.AiError>,
+  policy: ResearchPolicy,
+): Effect.fn.Return<A, DecisionModelError> {
+  const startedAt = yield* Clock.currentTimeMillis;
+  let scheduledDelay = 0;
+
+  for (let attempt = 1; attempt <= policy.providerMaxAttempts; attempt += 1) {
+    const attemptStartedAt = yield* Clock.currentTimeMillis;
+    const elapsedBeforeAttempt = Math.max(0, attemptStartedAt - startedAt, scheduledDelay);
+    if (elapsedBeforeAttempt >= policy.providerMaxElapsedMilliseconds) {
+      return yield* new DecisionModelError({
+        stage,
+        reason: `DecisionModel elapsed-time budget exhausted before attempt ${attempt}`,
+        attempts: attempt - 1,
+      });
+    }
+
+    const remainingTime = policy.providerMaxElapsedMilliseconds - elapsedBeforeAttempt;
+    const result = yield* Effect.result(
+      operation().pipe(Effect.timeout(Duration.millis(remainingTime))),
+    );
+    if (Result.isSuccess(result)) {
+      const completedAt = yield* Clock.currentTimeMillis;
+      const elapsedAtCompletion = Math.max(0, completedAt - startedAt, scheduledDelay);
+      if (elapsedAtCompletion <= policy.providerMaxElapsedMilliseconds) {
+        return result.success;
+      }
+      return yield* new DecisionModelError({
+        stage,
+        reason: `DecisionModel elapsed-time budget exhausted during attempt ${attempt}`,
+        attempts: attempt,
+      });
+    }
+
+    const error = result.failure;
+    if (Cause.isTimeoutError(error)) {
+      return yield* new DecisionModelError({
+        stage,
+        reason: `DecisionModel elapsed-time budget exhausted during attempt ${attempt}`,
+        attempts: attempt,
+      });
+    }
+    if (!AiError.isAiError(error) || !error.isRetryable) {
+      return yield* providerFailure(stage, error, attempt, false);
+    }
+
+    const delay = retryDelayMilliseconds(error, policy);
+    const now = yield* Clock.currentTimeMillis;
+    const elapsedMs = Math.max(0, now - startedAt, scheduledDelay);
+    if (
+      attempt >= policy.providerMaxAttempts ||
+      elapsedMs + delay > policy.providerMaxElapsedMilliseconds
+    ) {
+      return yield* providerFailure(stage, error, attempt, true);
+    }
+
+    yield* Effect.sleep(Duration.millis(delay));
+    scheduledDelay += delay;
+  }
+
+  return yield* new DecisionModelError({
+    stage,
+    reason: "DecisionModel retry policy ended without a provider result",
+    attempts: policy.providerMaxAttempts,
+  });
+});
 
 const policyFor = (policyPreset: string): Effect.Effect<ResearchPolicy, ResearchPolicyError> => {
   const policy = researchPolicyPresets[policyPreset];
@@ -508,11 +741,6 @@ export const shortlistPassageCandidates = (
     });
 };
 
-const selectionProbability = (answer: Decision.Answer<Decision.Any>): number => {
-  if ("probability" in answer) return answer.probability;
-  return 0;
-};
-
 const selectionStage = Effect.fnUntraced(function* (
   question: string,
   candidates: ReadonlyArray<SourceBlock>,
@@ -540,47 +768,78 @@ const selectionStage = Effect.fnUntraced(function* (
     ]),
   ]) as Record<string, Decision.Any>;
   const definition = Decision.make({ input: PassageBatchInputSchema, decisions });
-  const response = yield* DecisionModel.decide(definition, {
-    input: {
-      question,
-      passages: candidates.map((candidate) => ({
-        id: candidate.id,
-        section: candidate.section,
-        text: candidate.text,
-      })),
-    },
-  }).pipe(
-    Effect.mapError(
-      (error) => new DecisionModelError({ stage: "selection", reason: errorMessage(error) }),
-    ),
+  const model = yield* DecisionModel.DecisionModel;
+  const response = yield* decideWithRetry(
+    "selection",
+    () =>
+      model.decide(definition, {
+        input: {
+          question,
+          passages: candidates.map((candidate) => ({
+            id: candidate.id,
+            section: candidate.section,
+            text: candidate.text,
+          })),
+        },
+      }),
+    policy,
   );
-  const atomicityAnswer = response.answers.question_atomicity;
-  const atomicity =
-    atomicityAnswer !== undefined &&
-    "label" in atomicityAnswer &&
-    "probabilities" in atomicityAnswer
-      ? {
-          label: atomicityAnswer.label as AtomicityLabel,
-          probabilities: atomicityAnswer.probabilities,
-          confidence: atomicityAnswer.confidence,
-        }
-      : {
-          label: "compound" as const,
-          probabilities: { atomic: 0, compound: 1 },
-          confidence: undefined,
-        };
+  const answers = yield* providerAnswers("selection", response);
+  const atomicityAnswer = answers.question_atomicity;
+  if (!Predicate.isObject(atomicityAnswer)) {
+    return yield* new DecisionModelError({
+      stage: "selection",
+      reason: "Provider omitted the question atomicity answer",
+    });
+  }
+  const label = atomicityAnswer.label;
+  if (
+    !Predicate.isString(label) ||
+    !Object.prototype.hasOwnProperty.call(atomicityCriteria, label)
+  ) {
+    return yield* new DecisionModelError({
+      stage: "selection",
+      reason: "Provider returned an unknown question atomicity label",
+    });
+  }
+  const atomicity = {
+    label: label as AtomicityLabel,
+    probabilities: yield* decodeProbabilityMap(
+      "selection",
+      "question_atomicity",
+      atomicityAnswer.probabilities,
+      Object.keys(atomicityCriteria),
+    ),
+    confidence: yield* decodeConfidence(
+      "selection",
+      "question_atomicity",
+      atomicityAnswer.confidence,
+    ),
+  };
+  const diagnostics: Array<{ readonly candidateId: string; readonly probability: number }> = [];
+  for (const [index, candidate] of candidates.entries()) {
+    const candidateId = `passage_${index}`;
+    const answer = answers[candidateId];
+    if (!Predicate.isObject(answer)) {
+      return yield* new DecisionModelError({
+        stage: "selection",
+        reason: `Provider omitted the passage probability for ${candidate.id}`,
+      });
+    }
+    diagnostics.push({
+      candidateId: candidate.id,
+      probability: yield* decodeProbability("selection", candidate.id, answer.probability),
+    });
+  }
+  const usage = yield* decodeUsage(
+    "selection",
+    Predicate.isObject(response) ? response.usage : undefined,
+  );
   const atomic =
     atomicity.label === "atomic" &&
     (atomicity.probabilities.atomic ?? 0) >= policy.relationConfidenceThreshold &&
     atomicity.confidence !== undefined &&
     atomicity.confidence >= policy.relationConfidenceThreshold;
-  const diagnostics = candidates.map((candidate, index) => {
-    const answer = response.answers[`passage_${index}`];
-    return {
-      candidateId: candidate.id,
-      probability: answer === undefined ? 0 : selectionProbability(answer),
-    };
-  });
   return {
     selected: atomic
       ? candidates.flatMap((candidate, index) => {
@@ -592,13 +851,14 @@ const selectionStage = Effect.fnUntraced(function* (
       : [],
     atomicity,
     diagnostics,
-    usage: response.usage,
+    usage,
   };
 });
 
 const relationStage = Effect.fnUntraced(function* (
   question: string,
   selected: ReadonlyArray<{ readonly block: SourceBlock; readonly probability: number }>,
+  policy: ResearchPolicy,
 ): Effect.fn.Return<RelationResult, DecisionModelError, DecisionModel.DecisionModel> {
   if (selected.length === 0) {
     return {
@@ -618,42 +878,69 @@ const relationStage = Effect.fnUntraced(function* (
     ]),
   ) as Record<string, Decision.Any>;
   const definition = Decision.make({ input: PassageBatchInputSchema, decisions });
-  const response = yield* DecisionModel.decide(definition, {
-    input: {
-      question,
-      passages: selected.map(({ block }) => ({
-        id: block.id,
-        section: block.section,
-        text: block.text,
-      })),
-    },
-  }).pipe(
-    Effect.mapError(
-      (error) => new DecisionModelError({ stage: "relation", reason: errorMessage(error) }),
-    ),
+  const model = yield* DecisionModel.DecisionModel;
+  const response = yield* decideWithRetry(
+    "relation",
+    () =>
+      model.decide(definition, {
+        input: {
+          question,
+          passages: selected.map(({ block }) => ({
+            id: block.id,
+            section: block.section,
+            text: block.text,
+          })),
+        },
+      }),
+    policy,
   );
-  const answers = selected.flatMap((candidate, index) => {
-    const answer = response.answers[`passage_${index}`];
-    if (answer === undefined || !("label" in answer) || !("probabilities" in answer)) return [];
-    return [
-      {
-        block: candidate.block,
-        selectionProbability: candidate.probability,
-        relation: answer.label as AnswerRelation,
-        probabilities: answer.probabilities,
-        confidence: answer.confidence,
-      },
-    ];
-  });
+  const answers = yield* providerAnswers("relation", response);
+  const decodedAnswers: Array<RelationResult["answers"][number]> = [];
+  for (const [index, candidate] of selected.entries()) {
+    const candidateId = `passage_${index}`;
+    const answer = answers[candidateId];
+    if (!Predicate.isObject(answer)) {
+      return yield* new DecisionModelError({
+        stage: "relation",
+        reason: `Provider omitted the answer relation for ${candidate.block.id}`,
+      });
+    }
+    const relation = answer.label;
+    if (
+      !Predicate.isString(relation) ||
+      !Object.prototype.hasOwnProperty.call(answerRelationCriteria, relation)
+    ) {
+      return yield* new DecisionModelError({
+        stage: "relation",
+        reason: `Provider returned an unknown answer relation for ${candidate.block.id}`,
+      });
+    }
+    decodedAnswers.push({
+      block: candidate.block,
+      selectionProbability: candidate.probability,
+      relation: relation as AnswerRelation,
+      probabilities: yield* decodeProbabilityMap(
+        "relation",
+        candidate.block.id,
+        answer.probabilities,
+        Object.keys(answerRelationCriteria),
+      ),
+      confidence: yield* decodeConfidence("relation", candidate.block.id, answer.confidence),
+    });
+  }
+  const usage = yield* decodeUsage(
+    "relation",
+    Predicate.isObject(response) ? response.usage : undefined,
+  );
   return {
-    answers,
-    diagnostics: answers.map((answer) => ({
+    answers: decodedAnswers,
+    diagnostics: decodedAnswers.map((answer) => ({
       candidateId: answer.block.id,
       relation: answer.relation,
       probabilities: answer.probabilities,
       confidence: answer.confidence ?? null,
     })),
-    usage: response.usage,
+    usage,
   };
 });
 
@@ -783,17 +1070,14 @@ const confidentNegativeRelation = (
 const statusFromRelations = (
   answers: ReadonlyArray<RelationResult["answers"][number]>,
   atomicity: SelectionResult["atomicity"],
+  selectionDiagnostics: ReadonlyArray<SelectionResult["diagnostics"][number]>,
   policy: ResearchPolicy,
 ): ResearchStatus => {
   const atomicityConfident =
     atomicity.confidence !== undefined &&
     atomicity.confidence >= policy.relationConfidenceThreshold &&
     (atomicity.probabilities[atomicity.label] ?? 0) >= policy.relationConfidenceThreshold;
-  if (
-    atomicity.label === "compound" &&
-    atomicityConfident &&
-    (atomicity.probabilities.compound ?? 0) >= policy.relationConfidenceThreshold
-  ) {
+  if (atomicity.label === "compound" && atomicityConfident) {
     return "needs_split";
   }
   if (!atomicityConfident) return "needs_review";
@@ -804,10 +1088,8 @@ const statusFromRelations = (
   const contradictory = answers.some((answer) => answer.relation === "contradictory");
   const uncertainAnswer = answers.some(
     (answer) =>
-      (answer.relation === "direct_answer" ||
-        answer.relation === "partial_answer" ||
-        answer.relation === "contradictory") &&
-      !acceptedRelation(answer.relation, answer.probabilities, answer.confidence, policy),
+      !acceptedRelation(answer.relation, answer.probabilities, answer.confidence, policy) &&
+      !confidentNegativeRelation(answer, policy),
   );
   const direct = accepted.some((answer) => answer.relation === "direct_answer");
   const partial = accepted.some((answer) => answer.relation === "partial_answer");
@@ -815,6 +1097,15 @@ const statusFromRelations = (
   if (direct) return "answered";
   if (partial) return "partial";
   if (answers.length > 0 && answers.every((answer) => confidentNegativeRelation(answer, policy))) {
+    return "unsupported";
+  }
+  if (
+    answers.length === 0 &&
+    selectionDiagnostics.length > 0 &&
+    selectionDiagnostics.every(
+      (candidate) => candidate.probability <= policy.unsupportedProbabilityThreshold,
+    )
+  ) {
     return "unsupported";
   }
   return "needs_review";
@@ -865,7 +1156,7 @@ export const researchKnownRfc = Effect.fnUntraced(function* (
   const selection = yield* selectionStage(question, candidates, policy);
   const selectionFinished = yield* Clock.currentTimeMillis;
   const relationStarted = selectionFinished;
-  const relation = yield* relationStage(question, selection.selected);
+  const relation = yield* relationStage(question, selection.selected, policy);
   const relationFinished = yield* Clock.currentTimeMillis;
   const resolvedModel = yield* Ref.get(resolvedModelRef);
   const usage = combineUsage(selection.usage, relation.usage);
@@ -895,7 +1186,12 @@ export const researchKnownRfc = Effect.fnUntraced(function* (
         },
       } satisfies EvidencePassage;
     });
-  const status = statusFromRelations(relation.answers, selection.atomicity, policy);
+  const status = statusFromRelations(
+    relation.answers,
+    selection.atomicity,
+    selection.diagnostics,
+    policy,
+  );
   const finishedAt = yield* Clock.currentTimeMillis;
   const diagnostics = {
     schemaVersion: 1 as const,

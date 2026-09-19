@@ -2,7 +2,18 @@ import { TypeSafeClient as TypeSafeClientApi, TypeSafeDecisionModel } from "@eff
 import { NodeFileSystem, NodePath } from "@effect/platform-node";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { Clock, Context, Effect, Layer, ManagedRuntime, Path, Redacted, Ref, Schema } from "effect";
+import {
+  Clock,
+  Context,
+  Duration,
+  Effect,
+  Layer,
+  ManagedRuntime,
+  Path,
+  Redacted,
+  Ref,
+  Schema,
+} from "effect";
 import * as DecisionModel from "effect/unstable/ai/DecisionModel";
 import { FetchHttpClient, HttpClient } from "effect/unstable/http";
 import {
@@ -103,7 +114,12 @@ export interface RfcClientOptions {
    */
   readonly typeSafeHttpClient?: HttpClient.HttpClient | undefined;
   /**
+   * Optional clock service used by deterministic tests and embedded callers.
+   */
+  readonly clock?: Clock.Clock | undefined;
+  /**
    * Optional clock function used by deterministic tests and embedded callers.
+   * Ignored when `clock` is provided.
    */
   readonly now?: (() => number) | undefined;
   /**
@@ -332,7 +348,11 @@ const makeClock = (now: () => number): Clock.Clock => ({
   currentTimeNanos: Effect.sync(() => BigInt(now()) * 1_000_000n),
   monotonicTimeNanosUnsafe: () => BigInt(now()) * 1_000_000n,
   monotonicTimeNanos: Effect.sync(() => BigInt(now()) * 1_000_000n),
-  sleep: () => Effect.void,
+  sleep: (duration) =>
+    Effect.callback((resume, signal) => {
+      const timer = setTimeout(() => resume(Effect.void), Duration.toMillis(duration));
+      signal.addEventListener("abort", () => clearTimeout(timer), { once: true });
+    }),
 });
 
 const typeSafeDecisionModelLayer = (options: RfcClientOptions) => {
@@ -393,6 +413,10 @@ const platformLayer = (options: RfcClientOptions) => {
       ? fetchLayer
       : Layer.succeed(HttpClient.HttpClient, options.catalogHttpClient);
   const base = Layer.mergeAll(NodeFileSystem.layer, NodePath.layer, httpLayer);
+  if (options.clock !== undefined) {
+    return Layer.merge(base, Layer.succeed(Clock.Clock, options.clock));
+  }
+
   return options.now === undefined
     ? base
     : Layer.merge(base, Layer.succeed(Clock.Clock, makeClock(options.now)));
