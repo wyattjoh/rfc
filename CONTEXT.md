@@ -8,9 +8,13 @@ The RFC Evidence Engine turns questions about published IETF RFCs into bounded, 
 A single independently answerable question whose evidence can be judged without deciding how to split it further.
 _Avoid_: Compound question, broad prompt
 
-**Catalog**:
-The local collection of published RFC metadata used to discover documents and understand update or obsoletion relationships.
-_Avoid_: Index, registry
+**RFC discovery**:
+The bounded identification of published RFCs relevant to an atomic question from current authoritative metadata.
+_Avoid_: Catalog, index, registry
+
+**RFC source cache**:
+The local collection of exact source text retained only for RFCs that have been individually requested.
+_Avoid_: Catalog, corpus mirror
 
 **RFC currency**:
 The bounded, deterministic traversal from a requested RFC through update and obsoletion relationships to applicable current RFC contexts.
@@ -21,7 +25,7 @@ The requested or applicable current published RFC whose exact source text is res
 _Avoid_: Source alias, version
 
 **Document candidate**:
-A published RFC that remains plausible evidence for an atomic question after catalog discovery.
+A published RFC that remains plausible evidence for an atomic question after RFC discovery.
 _Avoid_: Search result, source
 
 **Source block**:
