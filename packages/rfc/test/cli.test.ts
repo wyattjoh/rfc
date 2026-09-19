@@ -1,12 +1,20 @@
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
-import { hashRfcSource } from "@wyattjoh/rfc-core";
+import {
+  evaluationCorpus,
+  evaluationSchemaVersion,
+  hashRfcSource,
+  makeEvaluationReport,
+} from "@wyattjoh/rfc-core";
+import { automaticAnswerActivationFor, type RfcCliConfig } from "../src/config";
 
 const servers: Array<ReturnType<typeof Bun.serve>> = [];
 
 const repositoryRoot = join(import.meta.dir, "../../..");
+const reviewedReleaseReportPath = join(repositoryRoot, ".scratch/rfc-evaluation-report.json");
 
 const runCli = async (
   args: Array<string>,
@@ -36,6 +44,93 @@ const runCli = async (
   ]);
 
   return { exitCode, stdout, stderr };
+};
+
+const writeUnattestedCalibrationReport = async (path: string): Promise<void> => {
+  const observations = evaluationCorpus.cases.map((evaluationCase) => {
+    const expectedOutcome =
+      evaluationCase.kind === "research"
+        ? evaluationCase.expectedStatus
+        : evaluationCase.expectedVerdict;
+    if (expectedOutcome === null)
+      throw new Error(`Missing expected outcome for ${evaluationCase.id}`);
+    return {
+      schemaVersion: evaluationSchemaVersion,
+      caseId: evaluationCase.id,
+      category: evaluationCase.category,
+      kind: evaluationCase.kind,
+      mode: evaluationCase.mode,
+      expectedOutcome,
+      observedOutcome: expectedOutcome,
+      allowedOutcomes: evaluationCase.allowedOutcomes,
+      acceptedByPolicy:
+        expectedOutcome === "answered" ||
+        (evaluationCase.kind === "citation" && evaluationCase.expectedVerdict === "verified"),
+      unsafeCitationAccepted: false,
+      sourceHashes: ["fixture"],
+      requestedModel: "jev-latest",
+      resolvedModel: "jev-1.13.0",
+      resolvedModels: evaluationCase.category === "fabricated_quotation" ? [] : ["jev-1.13.0"],
+      policyVersion: "precision-v1",
+      usage:
+        evaluationCase.category === "fabricated_quotation"
+          ? { inputTokens: null, outputTokens: null }
+          : { inputTokens: 1, outputTokens: 1 },
+      timings: {
+        catalogMs: 1,
+        documentMs: evaluationCase.kind === "research" ? 1 : null,
+        sourceMs: 1,
+        lexicalMs: evaluationCase.kind === "research" ? 1 : null,
+        selectionMs: evaluationCase.kind === "research" ? 1 : null,
+        relationMs: evaluationCase.kind === "research" ? 1 : null,
+        verificationMs: evaluationCase.kind === "citation" ? 1 : null,
+        totalMs: 1,
+      },
+      totalLatencyMs: 1,
+      probabilities: (expectedOutcome === "answered"
+        ? {
+            "selection.fixture.probability": 0.99,
+            "classification.fixture.direct_answer": 0.99,
+          }
+        : {}) as Readonly<Record<string, number>>,
+      confidence: 1,
+      errorKind: null,
+    };
+  });
+  const timedCorpus = {
+    ...evaluationCorpus,
+    cases: evaluationCorpus.cases.flatMap((evaluationCase) =>
+      Array.from({ length: 3 }, (_, index) => ({
+        ...evaluationCase,
+        id: `${evaluationCase.id}:iteration-${index + 1}`,
+      })),
+    ),
+  };
+  const timedObservations = Array.from({ length: 3 }, (_, index) =>
+    observations.map((observation) => ({
+      ...observation,
+      caseId: `${observation.caseId}:iteration-${index + 1}`,
+    })),
+  ).flat();
+  await writeFile(
+    path,
+    `${JSON.stringify(
+      makeEvaluationReport(timedCorpus, timedObservations, {
+        origin: "live",
+        releaseBuildId: "rfc-evidence-precision-v4",
+        corpusDigest: "fixture-corpus-digest",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        expiresAt: "2026-02-01T00:00:00.000Z",
+        authoritativeSourceHashes: {},
+        policyVersion: "precision-v1",
+        requestedModel: "jev-latest",
+        pinnedModel: "jev-1.13.0",
+        minimumSupportedClaimPrecision: undefined,
+        maxKnownRfcP95LatencyMilliseconds: undefined,
+        maxTopicP95LatencyMilliseconds: undefined,
+      }),
+    )}\n`,
+  );
 };
 
 afterEach(() => {
@@ -130,7 +225,7 @@ describe("rfc process protocol", () => {
     expect(result.stderr).toBe("");
   });
 
-  test("writes successful research evidence as versioned JSON", async () => {
+  test("requires the exact release attestation even when automatic answers are enabled", async () => {
     const cacheDirectory = await mkdtemp(join(tmpdir(), "rfc-cli-research-test-"));
     const sourceText =
       "1. Requirements\n\nThe client MUST send a request containing the target resource.\n";
@@ -182,6 +277,9 @@ describe("rfc process protocol", () => {
         fetchedAt,
       }),
     );
+
+    const evaluationOutput = join(cacheDirectory, "accepted-evaluation.json");
+    await writeUnattestedCalibrationReport(evaluationOutput);
 
     let modelCalls = 0;
     const server = Bun.serve({
@@ -240,15 +338,17 @@ describe("rfc process protocol", () => {
       {
         ...process.env,
         TYPESAFE_API_KEY: "fixture-key",
-        TYPESAFE_MODEL: "jev-latest",
+        TYPESAFE_MODEL: "jev-1.13.0",
         RFC_POLICY_PRESET: "precision-v1",
+        RFC_AUTOMATIC_ANSWER_ENABLED: "true",
+        RFC_EVALUATION_OUTPUT: evaluationOutput,
       },
     );
 
     expect(result.exitCode).toBe(0);
     expect(result.stderr).toBe("");
     const response = JSON.parse(result.stdout);
-    expect(response.status).toBe("answered");
+    expect(response.status).toBe("needs_review");
     expect(response.rfc.identifier).toBe("RFC9110");
     expect(response.evidence[0].provenance.sourceUrl).toBe(
       "https://www.rfc-editor.org/rfc/rfc9110.txt",
@@ -269,17 +369,40 @@ describe("rfc process protocol", () => {
       {
         ...process.env,
         TYPESAFE_API_KEY: "fixture-key",
-        TYPESAFE_MODEL: "jev-latest",
+        TYPESAFE_MODEL: "jev-1.13.0",
         RFC_POLICY_PRESET: "precision-v1",
+        RFC_AUTOMATIC_ANSWER_ENABLED: "true",
+        RFC_EVALUATION_OUTPUT: evaluationOutput,
       },
     );
     expect(human.exitCode).toBe(0);
     expect(human.stderr).toBe("");
-    expect(human.stdout).toContain("Status: answered");
+    expect(human.stdout).toContain("Status: needs_review");
     expect(human.stdout).toContain("RFC: RFC9110");
     expect(human.stdout).toContain("The client MUST send");
     expect(modelCalls).toBe(4);
   });
+
+  if (existsSync(reviewedReleaseReportPath)) {
+    test("activates the exact measured report only with explicit opt-in", () => {
+      const config = {
+        apiKey: "fixture-key",
+        modelAlias: "jev-1.13.0",
+        policyPreset: "precision-v1",
+        evaluationModel: "jev-latest",
+        pinnedModel: "jev-1.13.0",
+        liveEvaluation: false,
+        automaticAnswerEnabled: true,
+        evaluationCacheDirectory: "/tmp/rfc-evaluation-cache",
+        evaluationOutput: reviewedReleaseReportPath,
+      } satisfies RfcCliConfig;
+
+      expect(
+        automaticAnswerActivationFor({ ...config, automaticAnswerEnabled: false }),
+      ).toBeUndefined();
+      expect(automaticAnswerActivationFor(config)).toBeDefined();
+    });
+  }
 
   test("returns every valid non-answer status successfully through JSON process semantics", async () => {
     const cases = [
@@ -423,8 +546,9 @@ describe("rfc process protocol", () => {
         {
           ...process.env,
           TYPESAFE_API_KEY: "fixture-key",
-          TYPESAFE_MODEL: "jev-latest",
+          TYPESAFE_MODEL: "jev-1.13.0",
           RFC_POLICY_PRESET: "precision-v1",
+          RFC_AUTOMATIC_ANSWER_ENABLED: "true",
         },
       );
 
@@ -520,8 +644,9 @@ describe("rfc process protocol", () => {
     const environment = {
       ...process.env,
       TYPESAFE_API_KEY: "fixture-key",
-      TYPESAFE_MODEL: "jev-latest",
+      TYPESAFE_MODEL: "jev-1.13.0",
       RFC_POLICY_PRESET: "precision-v1",
+      RFC_AUTOMATIC_ANSWER_ENABLED: "true",
     };
 
     const convenience = await runCli(

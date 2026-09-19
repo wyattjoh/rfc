@@ -15,6 +15,7 @@ import * as AiError from "effect/unstable/ai/AiError";
 import * as Decision from "effect/unstable/ai/Decision";
 import * as DecisionModel from "effect/unstable/ai/DecisionModel";
 import { makeUtf8OffsetMap, moveToUtf8Boundary, utf8OffsetUnit } from "./offsets";
+import { isAutomaticAnswerActivation, type AutomaticAnswerActivation } from "./activation";
 import {
   CatalogDocumentSchema,
   CatalogStatusSchema,
@@ -37,6 +38,29 @@ import {
 export class ResolvedModelName extends Context.Service<ResolvedModelName, Ref.Ref<string>>()(
   "@wyattjoh/rfc/ResolvedModelName",
 ) {}
+
+/**
+ * Provider-resolved model identifiers observed across every semantic call.
+ */
+export class ResolvedModelNames extends Context.Service<
+  ResolvedModelNames,
+  Ref.Ref<ReadonlyArray<string>>
+>()("@wyattjoh/rfc/ResolvedModelNames") {}
+
+/**
+ * Collapse provider observations into one safe public model identity.
+ *
+ * @param fallback The configured or last observed model identifier.
+ * @param observed Model identifiers returned by provider calls.
+ * @returns The sole observed model or `mixed` when providers disagree.
+ */
+export const summarizeResolvedModels = (
+  fallback: string,
+  observed: ReadonlyArray<string>,
+): string => {
+  const models = [...new Set(observed)];
+  return models.length === 0 ? fallback : models.length === 1 ? (models[0] ?? fallback) : "mixed";
+};
 
 /**
  * The answer-relation labels assigned to selected evidence passages.
@@ -171,14 +195,19 @@ export const knownRfcPolicy = {
   policyVersion: "precision-v1",
   maxDocumentCandidates: 8,
   maxAcceptedDocumentCandidates: 3,
-  documentProbabilityThreshold: 0.65,
+  // Round-5 calibration showed relevant candidates at or above 0.35; retain
+  // the bounded top-three shortlist and let passage/relation gates decide.
+  documentProbabilityThreshold: 0.35,
   maxPassageCandidates: 8,
   sourceBlockMaxCharacters: 4_000,
   sourceBlockOverlapCharacters: 200,
   maxCurrencyTraversalDepth: 16,
   maxCurrencyContexts: 8,
   currencyCompatibilityOverlapThreshold: 0.6,
-  selectionProbabilityThreshold: 0.65,
+  // The live model placed relevant source blocks at 0.45–0.49. Including
+  // those blocks is safe because relation acceptance remains independently
+  // gated below; excluding them made valid answers impossible to judge.
+  selectionProbabilityThreshold: 0.45,
   unsupportedProbabilityThreshold: 0.35,
   relationConfidenceThreshold: 0.65,
   providerMaxAttempts: 3,
@@ -187,12 +216,29 @@ export const knownRfcPolicy = {
   directAnswerProbabilityThreshold: 0.65,
   partialAnswerProbabilityThreshold: 0.6,
   contradictoryProbabilityThreshold: 0.65,
+  // Calibration gates are part of the named policy so that a threshold,
+  // retry budget, or latency target cannot drift independently of evaluation.
+  minimumSupportedClaimPrecision: 0.98,
+  maxKnownRfcP95LatencyMilliseconds: 2_000,
+  maxTopicP95LatencyMilliseconds: 3_000,
+  evaluationModelAlias: "jev-latest",
+  pinnedModel: "jev-1.13.0",
+  // Release commits must explicitly activate automatic answers only after the
+  // committed evaluation gate has passed; the composition proof is absent by default.
+  automaticAnswerActivation: undefined,
 } as const;
+
+/**
+ * The calibrated precision-first policy used by research and evaluation.
+ */
+export const precisionPolicy = knownRfcPolicy;
 
 /**
  * The acceptance and uncertainty rules for one research policy preset.
  */
-export type ResearchPolicy = typeof knownRfcPolicy;
+export type ResearchPolicy = Omit<typeof knownRfcPolicy, "automaticAnswerActivation"> & {
+  readonly automaticAnswerActivation: AutomaticAnswerActivation | undefined;
+};
 
 /**
  * Named policy presets available to the research pipeline.
@@ -355,6 +401,7 @@ export const ResearchDiagnosticsSchema = Schema.Struct({
   policyVersion: Schema.NonEmptyString,
   requestedModel: Schema.NonEmptyString,
   resolvedModel: Schema.NonEmptyString,
+  resolvedModels: Schema.Array(Schema.NonEmptyString),
   usage: TokenUsageSchema,
   timings: TimingSchema,
   source: Schema.NullOr(SourceDiagnosticSchema),
@@ -437,6 +484,10 @@ export interface KnownRfcResearchOptions {
    * Named policy preset recorded in diagnostics.
    */
   readonly policyPreset: string;
+  /**
+   * Opaque proof supplied by the composition root for automatic answered statuses.
+   */
+  readonly automaticAnswerActivation: AutomaticAnswerActivation | undefined;
   /**
    * Model alias requested from the official provider.
    */
@@ -1713,15 +1764,21 @@ const statusFromRelations = (
     acceptedRelation(answer.relation, answer.probabilities, answer.confidence, policy),
   );
   const contradictory = answers.some((answer) => answer.relation === "contradictory");
-  const uncertainAnswer = answers.some(
-    (answer) =>
-      !acceptedRelation(answer.relation, answer.probabilities, answer.confidence, policy) &&
-      !confidentNegativeRelation(answer, policy),
-  );
+  // Once one or more passages pass the relation gates, rejected distractors
+  // are not evidence and must not suppress an otherwise accepted answer. A
+  // contradictory label remains disqualifying above, so this relaxation does
+  // not permit conflicting evidence to become automatic.
+  const uncertainAnswer =
+    accepted.length === 0 &&
+    answers.some(
+      (answer) =>
+        !acceptedRelation(answer.relation, answer.probabilities, answer.confidence, policy) &&
+        !confidentNegativeRelation(answer, policy),
+    );
   const direct = accepted.some((answer) => answer.relation === "direct_answer");
   const partial = accepted.some((answer) => answer.relation === "partial_answer");
   if (contradictory || uncertainAnswer) return "needs_review";
-  if (direct) return "answered";
+  if (direct && isAutomaticAnswerActivation(policy.automaticAnswerActivation)) return "answered";
   if (partial) return "partial";
   if (answers.length > 0 && answers.every((answer) => confidentNegativeRelation(answer, policy))) {
     return "unsupported";
@@ -2165,18 +2222,42 @@ const combinedCurrencyStatus = (
   unavailable: ReadonlyArray<UnavailableContextResult>,
   report: RfcCurrencyReport,
 ): ResearchStatus => {
-  const statuses = [requested.status, ...current.map(({ status }) => status)];
+  const contextResults = [requested, ...current];
+  const statuses = contextResults.map(({ status }) => status);
   if (statuses.includes("needs_split")) return "needs_split";
   const unsafeIssues = report.issues.some((issue) =>
     ["malformed_relationship", "cycle_detected", "traversal_limit"].includes(issue),
   );
-  if (
-    unsafeIssues ||
-    statuses.includes("needs_review") ||
-    report.compatibility.some((comparison) => comparison.outcome !== "compatible")
-  ) {
+  const contradictoryContext = contextResults.some(({ diagnostics }) =>
+    diagnostics.classification.some(({ relation }) => relation === "contradictory"),
+  );
+  const compatibilityNeedsReview = report.compatibility.some((comparison) => {
+    if (comparison.outcome === "compatible" || comparison.outcome === "conflicting") {
+      return comparison.outcome === "conflicting";
+    }
+    const requestedContext = contextResults.find(
+      ({ context }) => context.document.identifier === comparison.requested,
+    );
+    const currentContext = contextResults.find(
+      ({ context }) => context.document.identifier === comparison.current,
+    );
+    // If one side has no accepted evidence, an uncertain overlap is a
+    // coverage gap and is represented as partial below. If both sides have
+    // accepted evidence, uncertainty still fails closed.
+    return (
+      (requestedContext?.evidence.length ?? 0) > 0 && (currentContext?.evidence.length ?? 0) > 0
+    );
+  });
+  if (unsafeIssues || contradictoryContext || compatibilityNeedsReview) {
     return "needs_review";
   }
+  // An ambiguous requested/current context alongside accepted evidence is a
+  // bounded partial result, not an automatic answer. Preserve review for an
+  // operation with no accepted context at all.
+  const hasAcceptedContext = statuses.some(
+    (status) => status === "answered" || status === "partial",
+  );
+  if (statuses.includes("needs_review") && !hasAcceptedContext) return "needs_review";
   const incomplete = !report.complete || unavailable.length > 0;
   if (incomplete) return "partial";
   if (statuses.every((status) => status === "answered")) return "answered";
@@ -2223,9 +2304,15 @@ export const researchKnownRfc = Effect.fnUntraced(function* (
   | RfcSourceServiceTag
   | DecisionModel.DecisionModel
   | ResolvedModelName
+  | ResolvedModelNames
 > {
-  const policy = yield* policyFor(options.policyPreset);
+  const policyPreset = yield* policyFor(options.policyPreset);
+  const policy: ResearchPolicy = {
+    ...policyPreset,
+    automaticAnswerActivation: options.automaticAnswerActivation,
+  };
   const resolvedModelRef = yield* ResolvedModelName;
+  const resolvedModelsRef = yield* ResolvedModelNames;
   const requested = resolveKnownRfc(options.catalog, hint);
   const resolution = resolveRfcCurrencyFromDocument(options.catalog, requested);
   const plannedContexts: Array<PlannedRfcContext> = resolution.contexts.map((context) => ({
@@ -2330,11 +2417,17 @@ export const researchKnownRfc = Effect.fnUntraced(function* (
       reason: "The requested RFC context did not produce atomicity diagnostics",
     });
   }
+  const fallbackResolvedModel = yield* Ref.get(resolvedModelRef);
+  const observedResolvedModels = yield* Ref.get(resolvedModelsRef);
+  const resolvedModel = summarizeResolvedModels(fallbackResolvedModel, observedResolvedModels);
+  const resolvedModels =
+    observedResolvedModels.length === 0 ? [fallbackResolvedModel] : observedResolvedModels;
   const diagnostics = {
     schemaVersion: 1 as const,
     policyVersion: policy.policyVersion,
     requestedModel: options.modelAlias,
-    resolvedModel: yield* Ref.get(resolvedModelRef),
+    resolvedModel,
+    resolvedModels,
     usage: {
       inputTokens: usage.inputTokens ?? null,
       outputTokens: usage.outputTokens ?? null,
@@ -2392,9 +2485,15 @@ export const researchTopic = Effect.fnUntraced(function* (
   | RfcSourceServiceTag
   | DecisionModel.DecisionModel
   | ResolvedModelName
+  | ResolvedModelNames
 > {
-  const policy = yield* policyFor(options.policyPreset);
+  const policyPreset = yield* policyFor(options.policyPreset);
+  const policy: ResearchPolicy = {
+    ...policyPreset,
+    automaticAnswerActivation: options.automaticAnswerActivation,
+  };
   const resolvedModelRef = yield* ResolvedModelName;
+  const resolvedModelsRef = yield* ResolvedModelNames;
   const documentLexicalStarted = yield* Clock.currentTimeMillis;
   const documentCandidates = rankDocumentCandidates(
     options.catalog.documents,
@@ -2409,11 +2508,13 @@ export const researchTopic = Effect.fnUntraced(function* (
   const makeEmptyDiagnostics = (
     finishedAt: number,
     resolvedModel: string,
+    resolvedModels: ReadonlyArray<string>,
   ): ResearchDiagnostics => ({
     schemaVersion: 1,
     policyVersion: policy.policyVersion,
     requestedModel: options.modelAlias,
     resolvedModel,
+    resolvedModels,
     usage: {
       inputTokens: documentSelection.usage.inputTokens ?? null,
       outputTokens: documentSelection.usage.outputTokens ?? null,
@@ -2451,8 +2552,12 @@ export const researchTopic = Effect.fnUntraced(function* (
   if (documentSelection.accepted.length === 0) {
     const finishedAt = yield* Clock.currentTimeMillis;
     const status = statusFromRelations([], documentSelection.atomicity, [], policy);
-    const resolvedModel = yield* Ref.get(resolvedModelRef);
-    const diagnostics = makeEmptyDiagnostics(finishedAt, resolvedModel);
+    const fallbackResolvedModel = yield* Ref.get(resolvedModelRef);
+    const observedResolvedModels = yield* Ref.get(resolvedModelsRef);
+    const resolvedModel = summarizeResolvedModels(fallbackResolvedModel, observedResolvedModels);
+    const resolvedModels =
+      observedResolvedModels.length === 0 ? [fallbackResolvedModel] : observedResolvedModels;
+    const diagnostics = makeEmptyDiagnostics(finishedAt, resolvedModel, resolvedModels);
     return Schema.decodeUnknownSync(EvidenceBundleSchema)({
       schemaVersion: 1,
       kind: "evidence_bundle",
@@ -2517,7 +2622,11 @@ export const researchTopic = Effect.fnUntraced(function* (
   const relation = yield* relationStage(question, selection.selected, policy);
   const relationFinished = yield* Clock.currentTimeMillis;
   const finishedAt = yield* Clock.currentTimeMillis;
-  const resolvedModel = yield* Ref.get(resolvedModelRef);
+  const fallbackResolvedModel = yield* Ref.get(resolvedModelRef);
+  const observedResolvedModels = yield* Ref.get(resolvedModelsRef);
+  const resolvedModel = summarizeResolvedModels(fallbackResolvedModel, observedResolvedModels);
+  const resolvedModels =
+    observedResolvedModels.length === 0 ? [fallbackResolvedModel] : observedResolvedModels;
   const usage = combineUsages([documentSelection.usage, selection.usage, relation.usage]);
   const evidence = evidenceFromRelations(relation.answers, blockSources, policy);
   const status = statusFromRelations(
@@ -2531,6 +2640,7 @@ export const researchTopic = Effect.fnUntraced(function* (
     policyVersion: policy.policyVersion,
     requestedModel: options.modelAlias,
     resolvedModel,
+    resolvedModels,
     usage: {
       inputTokens: usage.inputTokens ?? null,
       outputTokens: usage.outputTokens ?? null,

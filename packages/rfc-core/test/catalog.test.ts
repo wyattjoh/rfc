@@ -10,12 +10,21 @@ import {
   CatalogRefreshError,
   CatalogStore,
   catalogStoreLayer,
-  createRfcClient,
+  createRfcClient as createCoreRfcClient,
   makeCatalog,
   type RfcClient,
+  type RfcClientOptions,
 } from "../src/index";
 
 const clients: Array<RfcClient> = [];
+type TestClientOptions = Omit<RfcClientOptions, "automaticAnswerActivation"> & {
+  readonly automaticAnswerActivation?: RfcClientOptions["automaticAnswerActivation"];
+};
+const createRfcClient = (options: TestClientOptions) =>
+  createCoreRfcClient({
+    ...options,
+    automaticAnswerActivation: options.automaticAnswerActivation,
+  });
 
 const makeCacheDirectory = async () => mkdtemp(join(tmpdir(), "rfc-core-catalog-test-"));
 
@@ -143,6 +152,158 @@ describe("catalog refresh", () => {
     );
   });
 
+  test("uses stable upstream ordering to retain RFC1034 across pagination", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const orderByValues: Array<string | null> = [];
+    const http = makeHttpClient((url) => {
+      if (url.pathname.endsWith("/document/")) {
+        orderByValues.push(url.searchParams.get("order_by"));
+        const ordered = url.searchParams.get("order_by") === "id";
+        if (url.searchParams.get("offset") === "0") {
+          return Response.json(
+            page(
+              [document(1, "First")],
+              ordered
+                ? "/api/v1/doc/document/?type__slug=rfc&order_by=id&limit=500&offset=500&format=json"
+                : "/api/v1/doc/document/?type__slug=rfc&limit=500&offset=1&format=json",
+              2,
+            ),
+          );
+        }
+
+        return Response.json(
+          page(
+            [
+              ordered
+                ? document(1034, "Domain Names - Concepts and Facilities")
+                : document(1, "First"),
+            ],
+            null,
+            2,
+          ),
+        );
+      }
+      if (url.pathname.endsWith("/relateddocument/")) {
+        return Response.json(page([], null, 0));
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      datatrackerApiUrl: "https://example.test/api/v1/",
+      catalogHttpClient: http.client,
+      modelAlias: undefined,
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    await expect(client.catalogRefresh()).resolves.toMatchObject({
+      state: "fresh",
+      documentCount: 2,
+    });
+    const cached = JSON.parse(await readFile(join(cacheDirectory, "catalog.json"), "utf8"));
+    expect(cached.documents.map(({ identifier }: { identifier: string }) => identifier)).toEqual([
+      "RFC1",
+      "RFC1034",
+    ]);
+    expect(orderByValues).toEqual(["id", "id"]);
+    expect(
+      http.requests
+        .filter((request) => request.includes("/document/"))
+        .every((request) => new URL(request).searchParams.get("type__slug") === "rfc"),
+    ).toBe(true);
+  });
+
+  test("trusts next-link exhaustion when total_count grows or shrinks", async () => {
+    for (const [firstTotal, secondTotal] of [
+      [2, 3],
+      [3, 2],
+    ] as const) {
+      const cacheDirectory = await makeCacheDirectory();
+      const http = makeHttpClient((url) => {
+        if (url.pathname.endsWith("/document/")) {
+          return Response.json(
+            url.searchParams.get("offset") === "0"
+              ? page(
+                  [document(1, "First")],
+                  "/api/v1/doc/document/?type__slug=rfc&limit=500&offset=500&format=json",
+                  firstTotal,
+                )
+              : page(
+                  [document(1, "First"), document(1034, "Domain Names - Concepts and Facilities")],
+                  null,
+                  secondTotal,
+                ),
+          );
+        }
+        if (url.pathname.endsWith("/relateddocument/")) {
+          return Response.json(page([], null, 0));
+        }
+        return new Response("not found", { status: 404 });
+      });
+
+      const client = await createRfcClient({
+        cacheDirectory,
+        catalogPath: undefined,
+        datatrackerApiUrl: "https://example.test/api/v1/",
+        catalogHttpClient: http.client,
+        modelAlias: undefined,
+        typeSafeApiKey: undefined,
+        typeSafeApiUrl: undefined,
+        now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+      });
+      clients.push(client);
+
+      await expect(client.catalogRefresh()).resolves.toMatchObject({
+        state: "fresh",
+        documentCount: 2,
+      });
+      const documentRequests = http.requests.filter((request) => request.includes("/document/"));
+      expect(documentRequests).toHaveLength(2);
+      expect(
+        documentRequests.every((request) => new URL(request).searchParams.get("order_by") === "id"),
+      ).toBe(true);
+    }
+  });
+
+  test("rejects a non-advancing next offset despite mutable totals", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const http = makeHttpClient((url) => {
+      if (url.pathname.endsWith("/document/")) {
+        return Response.json(
+          page(
+            [document(1, "First")],
+            "/api/v1/doc/document/?type__slug=rfc&limit=500&offset=0&format=json",
+            2,
+          ),
+        );
+      }
+      return Response.json(page([], null, 0));
+    });
+
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      datatrackerApiUrl: "https://example.test/api/v1/",
+      catalogHttpClient: http.client,
+      modelAlias: undefined,
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    await expect(client.catalogRefresh()).rejects.toMatchObject({
+      _tag: "CatalogRefreshError",
+      reason: "Datatracker pagination did not advance its offset",
+    });
+    await expect(client.catalogStatus()).resolves.toMatchObject({ state: "missing" });
+  });
+
   test("rejects malformed upstream metadata without creating a cache", async () => {
     const cacheDirectory = await makeCacheDirectory();
     const http = makeHttpClient((url) => {
@@ -206,6 +367,54 @@ describe("catalog refresh", () => {
       stage: "normalize",
     });
     await expect(client.catalogStatus()).resolves.toMatchObject({ state: "missing" });
+  });
+
+  test("ignores a well-formed relationship outside the published catalog", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const http = makeHttpClient((url) => {
+      if (url.pathname.endsWith("/document/")) {
+        return Response.json(page([document(1, "First")], null, 1));
+      }
+      if (url.pathname.endsWith("/relateddocument/")) {
+        return Response.json(
+          page(
+            [
+              {
+                source: "/api/v1/doc/document/rfc1/",
+                target: "/api/v1/doc/document/rfc2/",
+                relationship: "/api/v1/name/docrelationshipname/updates/",
+              },
+            ],
+            null,
+            1,
+          ),
+        );
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      datatrackerApiUrl: "https://example.test/api/v1/",
+      catalogHttpClient: http.client,
+      modelAlias: undefined,
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    await expect(client.catalogRefresh()).resolves.toMatchObject({
+      state: "fresh",
+      documentCount: 1,
+    });
+    const cached = JSON.parse(await readFile(join(cacheDirectory, "catalog.json"), "utf8"));
+    expect(cached.documents[0]).toMatchObject({
+      identifier: "RFC1",
+      updates: [],
+      updatedBy: [],
+    });
   });
 
   test("rejects cross-origin pagination and preserves the previous cache", async () => {

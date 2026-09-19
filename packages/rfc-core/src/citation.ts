@@ -13,8 +13,10 @@ import { makeUtf8OffsetMap, utf8OffsetUnit } from "./offsets";
 import {
   DecisionModelError,
   ResolvedModelName,
+  ResolvedModelNames,
   RfcNotFoundError,
   parseSourceBlocks,
+  summarizeResolvedModels,
   resolveKnownRfc,
 } from "./research";
 import {
@@ -152,6 +154,7 @@ export const CitationVerificationDiagnosticsSchema = Schema.Struct({
   policyVersion: Schema.NonEmptyString,
   requestedModel: Schema.NonEmptyString,
   resolvedModel: Schema.NonEmptyString,
+  resolvedModels: Schema.Array(Schema.NonEmptyString),
   usage: CitationUsageSchema,
   timings: CitationTimingsSchema,
   catalog: CatalogStatusSchema,
@@ -503,6 +506,7 @@ interface CitationResultInput {
   readonly catalogStatus: CatalogStatus;
   readonly modelAlias: string;
   readonly resolvedModel: string;
+  readonly resolvedModels: ReadonlyArray<string>;
   readonly timings: {
     readonly catalogMs: number;
     readonly sourceMs: number;
@@ -525,6 +529,7 @@ const resultFrom = ({
   catalogStatus,
   modelAlias,
   resolvedModel,
+  resolvedModels,
   timings,
   verdict,
   probabilities,
@@ -551,6 +556,7 @@ const resultFrom = ({
     policyVersion: citationPolicy.policyVersion,
     requestedModel: modelAlias,
     resolvedModel,
+    resolvedModels,
     usage,
     timings,
     catalog: catalogStatus,
@@ -599,8 +605,10 @@ export const verifyCitation = Effect.fnUntraced(function* (
   | RfcSourceServiceTag
   | DecisionModel.DecisionModel
   | ResolvedModelName
+  | ResolvedModelNames
 > {
   const resolvedModelRef = yield* ResolvedModelName;
+  const resolvedModelsRef = yield* ResolvedModelNames;
   const document = yield* Effect.try({
     try: () => resolveKnownRfc(options.catalog, request.rfc),
     catch: (error) =>
@@ -623,6 +631,7 @@ export const verifyCitation = Effect.fnUntraced(function* (
       catalogStatus: options.catalogStatus,
       modelAlias: options.modelAlias,
       resolvedModel: resolvedModelBeforeJudgment,
+      resolvedModels: [],
       timings: {
         catalogMs: options.catalogMs,
         sourceMs,
@@ -681,7 +690,11 @@ export const verifyCitation = Effect.fnUntraced(function* (
     confidence >= citationPolicy.confidenceThreshold &&
     (judgment.probabilities[judgment.verdict] ?? 0) >= citationPolicy.verdictProbabilityThreshold;
   const verdict = accepted ? judgment.verdict : "unsupported";
-  const resolvedModel = yield* Ref.get(resolvedModelRef);
+  const fallbackResolvedModel = yield* Ref.get(resolvedModelRef);
+  const observedResolvedModels = yield* Ref.get(resolvedModelsRef);
+  const resolvedModel = summarizeResolvedModels(fallbackResolvedModel, observedResolvedModels);
+  const resolvedModels =
+    observedResolvedModels.length === 0 ? [fallbackResolvedModel] : observedResolvedModels;
   const finishedAt = yield* Clock.currentTimeMillis;
 
   return resultFrom({
@@ -691,6 +704,7 @@ export const verifyCitation = Effect.fnUntraced(function* (
     catalogStatus: options.catalogStatus,
     modelAlias: options.modelAlias,
     resolvedModel,
+    resolvedModels,
     timings: {
       catalogMs: options.catalogMs,
       sourceMs,

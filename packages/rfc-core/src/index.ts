@@ -16,6 +16,8 @@ import {
 } from "effect";
 import * as DecisionModel from "effect/unstable/ai/DecisionModel";
 import { FetchHttpClient, HttpClient } from "effect/unstable/http";
+import { isAcceptedEvaluationReport } from "./evaluation";
+import { makeArtifactActivation, type AutomaticAnswerActivation } from "./activation";
 import {
   CatalogReadError,
   CatalogRefreshError,
@@ -40,8 +42,10 @@ import {
 import type { CitationVerificationRequest, CitationVerificationResult } from "./citation";
 import {
   DecisionModelError,
+  precisionPolicy,
   ResearchPolicyError,
   ResolvedModelName,
+  ResolvedModelNames,
   RfcNotFoundError,
   researchKnownRfc,
   researchTopic,
@@ -51,6 +55,7 @@ import {
   RfcSourceCacheError,
   RfcSourceFetchError,
   defaultRfcEditorBaseUrl,
+  loadRfcSource,
   makeDefaultRfcSourceLayer,
   makeRfcSourceHttpLayer,
   makeRfcSourceLayer,
@@ -60,8 +65,23 @@ import type { RfcSourceFetcher } from "./source";
 
 export * from "./catalog";
 export * from "./citation";
+export * from "./evaluation";
+export * from "./offsets";
 export * from "./research";
 export * from "./source";
+
+export type { AutomaticAnswerActivation } from "./activation";
+
+/**
+ * Decode a locally accepted calibration artifact into an activation proof.
+ *
+ * @param input Unknown report data from the local calibration artifact.
+ * @returns An activation proof when every current release gate passes.
+ */
+export const automaticAnswerActivationFromReport = (
+  input: unknown,
+): AutomaticAnswerActivation | undefined =>
+  isAcceptedEvaluationReport(input) ? makeArtifactActivation() : undefined;
 
 const defaultCacheDirectoryRoot = (() => {
   if (process.platform === "darwin") {
@@ -159,6 +179,10 @@ export interface RfcClientOptions {
    * Named policy preset recorded in research diagnostics.
    */
   readonly policyPreset?: string | undefined;
+  /**
+   * Opaque activation proof supplied by the validated composition root.
+   */
+  readonly automaticAnswerActivation: AutomaticAnswerActivation | undefined;
   /**
    * A deterministic DecisionModel replacement for tests and embedded callers.
    */
@@ -343,6 +367,10 @@ export interface RfcClient {
    */
   readonly catalogRefresh: () => Promise<CatalogRefreshResult>;
   /**
+   * Fetch and cache exact RFC Editor sources before a timed evaluation.
+   */
+  readonly prefetchSources: (rfcs: ReadonlyArray<string>) => Promise<void>;
+  /**
    * Research one topic or known published RFC and return exact evidence.
    */
   readonly research: (request: ResearchRequest) => Promise<EvidenceBundle>;
@@ -379,7 +407,8 @@ const makeClock = (now: () => number): Clock.Clock => ({
 const typeSafeDecisionModelLayer = (options: RfcClientOptions) => {
   const observedClientLayer = Layer.fromBuildMemo(() =>
     Effect.gen(function* () {
-      const resolvedModel = yield* Ref.make(options.modelAlias ?? "jev-latest");
+      const resolvedModel = yield* Ref.make(options.modelAlias ?? precisionPolicy.pinnedModel);
+      const resolvedModels = yield* Ref.make<ReadonlyArray<string>>([]);
       const client = yield* TypeSafeClientApi.make({
         apiKey:
           options.typeSafeApiKey === undefined ? undefined : Redacted.make(options.typeSafeApiKey),
@@ -390,10 +419,18 @@ const typeSafeDecisionModelLayer = (options: RfcClientOptions) => {
         systemOne: (request: Parameters<typeof client.systemOne>[0]) =>
           client
             .systemOne(request)
-            .pipe(Effect.tap((response) => Ref.set(resolvedModel, response.model))),
+            .pipe(
+              Effect.tap((response) =>
+                Effect.all([
+                  Ref.set(resolvedModel, response.model),
+                  Ref.update(resolvedModels, (models) => [...models, response.model]),
+                ]),
+              ),
+            ),
       };
       return Context.make(TypeSafeClientApi.TypeSafeClient, observedClient).pipe(
         Context.add(ResolvedModelName, resolvedModel),
+        Context.add(ResolvedModelNames, resolvedModels),
       );
     }),
   ).pipe(
@@ -404,7 +441,7 @@ const typeSafeDecisionModelLayer = (options: RfcClientOptions) => {
     ),
   );
 
-  return TypeSafeDecisionModel.model(options.modelAlias ?? "jev-latest").pipe(
+  return TypeSafeDecisionModel.model(options.modelAlias ?? precisionPolicy.pinnedModel).pipe(
     Layer.provideMerge(observedClientLayer),
   );
 };
@@ -414,7 +451,13 @@ const decisionModelLayer = (options: RfcClientOptions) =>
     ? typeSafeDecisionModelLayer(options)
     : Layer.merge(
         Layer.succeed(DecisionModel.DecisionModel, options.decisionModel),
-        Layer.succeed(ResolvedModelName, Ref.makeUnsafe(options.modelAlias ?? "jev-latest")),
+        Layer.merge(
+          Layer.succeed(
+            ResolvedModelName,
+            Ref.makeUnsafe(options.modelAlias ?? precisionPolicy.pinnedModel),
+          ),
+          Layer.succeed(ResolvedModelNames, Ref.makeUnsafe<ReadonlyArray<string>>([])),
+        ),
       );
 
 const platformLayer = (options: RfcClientOptions) => {
@@ -536,13 +579,28 @@ const knownCatalogProgram = (options: RfcClientOptions) =>
     };
   });
 
+const prefetchSourcesProgram = (options: RfcClientOptions, identifiers: ReadonlyArray<string>) =>
+  Effect.gen(function* () {
+    const context = yield* knownCatalogProgram(options);
+    for (const identifier of identifiers) {
+      const document = context.catalog.documents.find(
+        (candidate) => candidate.identifier === identifier,
+      );
+      if (document === undefined) {
+        return yield* new RfcNotFoundError({ rfc: identifier });
+      }
+      yield* loadRfcSource(document, context.sourceDirectory);
+    }
+  });
+
 const researchProgram = (options: RfcClientOptions, request: ResearchRequest) =>
   Effect.gen(function* () {
     const context = yield* knownCatalogProgram(options);
     const researchOptions = {
       ...context,
       policyPreset: options.policyPreset ?? "precision-v1",
-      modelAlias: options.modelAlias ?? "jev-latest",
+      automaticAnswerActivation: options.automaticAnswerActivation,
+      modelAlias: options.modelAlias ?? precisionPolicy.pinnedModel,
     };
     return request.rfc === null
       ? yield* researchTopic(request.question, researchOptions)
@@ -554,8 +612,16 @@ const citationProgram = (options: RfcClientOptions, request: CitationVerificatio
     const context = yield* knownCatalogProgram(options);
     return yield* verifyCitation(request, {
       ...context,
-      modelAlias: options.modelAlias ?? "jev-latest",
+      modelAlias: options.modelAlias ?? precisionPolicy.pinnedModel,
     });
+  });
+
+const resetModelTrackingProgram = (options: RfcClientOptions) =>
+  Effect.gen(function* () {
+    const resolvedModel = yield* ResolvedModelName;
+    const resolvedModels = yield* ResolvedModelNames;
+    yield* Ref.set(resolvedModel, options.modelAlias ?? precisionPolicy.pinnedModel);
+    yield* Ref.set(resolvedModels, []);
   });
 
 /**
@@ -756,6 +822,7 @@ const defaultClientOptions: RfcClientOptions = {
   rfcSourceHttpClient: undefined,
   sourceDirectory: undefined,
   policyPreset: undefined,
+  automaticAnswerActivation: undefined,
   decisionModel: undefined,
 };
 
@@ -770,6 +837,10 @@ export const createRfcClient = async (
 ): Promise<RfcClient> => {
   const runtime = ManagedRuntime.make(clientLayer(options));
   let closed = false;
+  // The provider layer is client-scoped, so model-backed boundaries are
+  // serialized and reset before/after each operation to prevent cross-request
+  // model observations from entering public diagnostics.
+  let modelOperationTail: Promise<void> = Promise.resolve();
 
   const assertOpen = (): void => {
     if (closed) {
@@ -785,6 +856,22 @@ export const createRfcClient = async (
     await runtime.dispose();
   };
 
+  const runModelOperation = <A>(program: Effect.Effect<A, any, any>): Promise<A> => {
+    const operation = modelOperationTail.then(async () => {
+      await runtime.runPromise(resetModelTrackingProgram(options));
+      try {
+        return await runtime.runPromise(program);
+      } finally {
+        await runtime.runPromise(resetModelTrackingProgram(options));
+      }
+    });
+    modelOperationTail = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  };
+
   return {
     catalogStatus: async () => {
       assertOpen();
@@ -794,10 +881,14 @@ export const createRfcClient = async (
       assertOpen();
       return runtime.runPromise(catalogRefreshProgram(options));
     },
+    prefetchSources: async (rfcs) => {
+      assertOpen();
+      return runtime.runPromise(prefetchSourcesProgram(options, rfcs));
+    },
     research: async (request) => {
       assertOpen();
       const decodedRequest = decodeResearchRequest(request);
-      return runtime.runPromise(researchProgram(options, decodedRequest));
+      return runModelOperation(researchProgram(options, decodedRequest));
     },
     verifyCitation: async (request) => {
       assertOpen();
@@ -809,7 +900,7 @@ export const createRfcClient = async (
           reason: "Citation input must use schema version 1",
         });
       }
-      return runtime.runPromise(citationProgram(options, decodedRequest));
+      return runModelOperation(citationProgram(options, decodedRequest));
     },
     close,
     [Symbol.asyncDispose]: close,

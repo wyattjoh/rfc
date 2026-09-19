@@ -11,7 +11,7 @@ import {
 } from "@wyattjoh/rfc-core";
 import { NodeServices } from "@effect/platform-node";
 import { Console, Effect, Option } from "effect";
-import { readCliConfig } from "./config";
+import { automaticAnswerActivationFor, readCliConfig } from "./config";
 import { CliError, Command, Flag } from "effect/unstable/cli";
 
 const format = Flag.Literals("format", ["json", "human"] as const).pipe(
@@ -48,6 +48,7 @@ const catalogStatusCommand = Command.make(
             cacheDirectory,
             catalogPath: undefined,
             modelAlias: undefined,
+            automaticAnswerActivation: undefined,
             typeSafeApiKey: undefined,
             typeSafeApiUrl: undefined,
           }),
@@ -90,6 +91,7 @@ const catalogRefreshCommand = Command.make(
           catalogPath: undefined,
           datatrackerApiUrl: Option.getOrUndefined(datatrackerApiUrl),
           modelAlias: undefined,
+          automaticAnswerActivation: undefined,
           typeSafeApiKey: undefined,
           typeSafeApiUrl: undefined,
         }),
@@ -252,6 +254,7 @@ const verifyCitationCommand = Command.make(
           datatrackerApiUrl: Option.getOrUndefined(flags.datatrackerApiUrl),
           modelAlias: cliConfig.modelAlias,
           policyPreset: cliConfig.policyPreset,
+          automaticAnswerActivation: automaticAnswerActivationFor(cliConfig),
           typeSafeApiKey: cliConfig.apiKey,
           typeSafeApiUrl: Option.getOrUndefined(flags.typeSafeApiUrl),
         }),
@@ -344,6 +347,7 @@ const researchCommand = Command.make(
           datatrackerApiUrl: Option.getOrUndefined(flags.datatrackerApiUrl),
           modelAlias: cliConfig.modelAlias,
           policyPreset: cliConfig.policyPreset,
+          automaticAnswerActivation: automaticAnswerActivationFor(cliConfig),
           typeSafeApiKey: cliConfig.apiKey,
           typeSafeApiUrl: Option.getOrUndefined(flags.typeSafeApiUrl),
         }),

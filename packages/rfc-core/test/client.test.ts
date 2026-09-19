@@ -6,12 +6,21 @@ import {
   CatalogRefreshError,
   InvalidInputError,
   RfcClientClosedError,
-  createRfcClient,
+  createRfcClient as createCoreRfcClient,
   toErrorEnvelope,
   type RfcClient,
+  type RfcClientOptions,
 } from "../src/index";
 
 const clients: Array<RfcClient> = [];
+type TestClientOptions = Omit<RfcClientOptions, "automaticAnswerActivation"> & {
+  readonly automaticAnswerActivation?: RfcClientOptions["automaticAnswerActivation"];
+};
+const createRfcClient = (options: TestClientOptions) =>
+  createCoreRfcClient({
+    ...options,
+    automaticAnswerActivation: options.automaticAnswerActivation,
+  });
 
 const makeCacheDirectory = async () => mkdtemp(join(tmpdir(), "rfc-core-test-"));
 
@@ -43,6 +52,48 @@ describe("createRfcClient", () => {
       documentCount: 0,
     });
 
+    await rm(cacheDirectory, { recursive: true, force: true });
+  });
+
+  test("prefetches and caches authoritative sources through the Promise facade", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    let sourceFetches = 0;
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: undefined,
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [
+        {
+          identifier: "RFC9110",
+          rfcNumber: 9110,
+          title: "HTTP Semantics",
+          abstract: "HTTP semantics.",
+          status: "published",
+          stream: "ietf",
+          canonicalUrl: "https://datatracker.ietf.org/doc/rfc9110/",
+          updates: [],
+          updatedBy: [],
+          obsoletes: [],
+          obsoletedBy: [],
+        },
+      ],
+      rfcSourceFetcher: async () => {
+        sourceFetches += 1;
+        return {
+          sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+          text: "cached source",
+        };
+      },
+    });
+    clients.push(client);
+
+    await client.catalogRefresh();
+    await client.prefetchSources(["RFC9110"]);
+    await client.prefetchSources(["RFC9110"]);
+
+    expect(sourceFetches).toBe(1);
     await rm(cacheDirectory, { recursive: true, force: true });
   });
 

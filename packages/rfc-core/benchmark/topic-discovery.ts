@@ -1,5 +1,5 @@
 import { performance } from "node:perf_hooks";
-import { createRfcClient } from "../src/index";
+import { createRfcClient, evaluationPolicy, pinnedJevModel } from "../src/index";
 
 const parsePositiveInteger = (value: string | undefined, fallback: number): number => {
   const parsed = value === undefined ? Number.NaN : Number(value);
@@ -18,14 +18,15 @@ const main = async (): Promise<void> => {
   }
 
   const iterations = parsePositiveInteger(process.env.RFC_TOPIC_BENCHMARK_ITERATIONS, 20);
-  const targetMs = Number(process.env.RFC_TOPIC_BENCHMARK_TARGET_MS ?? 3_000);
+  const targetMs = evaluationPolicy.maxTopicP95LatencyMilliseconds;
   const question =
     process.env.RFC_TOPIC_BENCHMARK_QUESTION ?? "What does HTTP require of a client?";
   const client = await createRfcClient({
     cacheDirectory,
     catalogPath: undefined,
-    modelAlias: process.env.TYPESAFE_MODEL ?? "jev-latest",
-    policyPreset: process.env.RFC_POLICY_PRESET ?? "precision-v1",
+    modelAlias: pinnedJevModel,
+    policyPreset: evaluationPolicy.policyVersion,
+    automaticAnswerActivation: undefined,
     typeSafeApiKey: process.env.TYPESAFE_API_KEY,
     typeSafeApiUrl: process.env.TYPESAFE_API_URL,
   });

@@ -6,6 +6,7 @@ import { Duration, Effect } from "effect";
 import { TestClock } from "effect/testing";
 import * as AiError from "effect/unstable/ai/AiError";
 import * as DecisionModel from "effect/unstable/ai/DecisionModel";
+import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 import {
   CitationOffsetMismatchError,
   CitationQuoteAmbiguousError,
@@ -13,14 +14,23 @@ import {
   citationPolicy,
   RfcNotFoundError,
   RfcSourceCacheError,
-  createRfcClient,
+  createRfcClient as createCoreRfcClient,
   hashRfcSource,
   type RfcClient,
+  type RfcClientOptions,
   type RfcSourceFetcher,
 } from "../src/index";
 import type * as Decision from "effect/unstable/ai/Decision";
 
 const clients: Array<RfcClient> = [];
+type TestClientOptions = Omit<RfcClientOptions, "automaticAnswerActivation"> & {
+  readonly automaticAnswerActivation?: RfcClientOptions["automaticAnswerActivation"];
+};
+const createRfcClient = (options: TestClientOptions) =>
+  createCoreRfcClient({
+    ...options,
+    automaticAnswerActivation: options.automaticAnswerActivation,
+  });
 
 const makeCacheDirectory = async () => mkdtemp(join(tmpdir(), "rfc-core-citation-test-"));
 
@@ -64,11 +74,41 @@ const makeSourceFetcher =
     text,
   });
 
+const makeTypeSafeCitationHttpClient = (models: ReadonlyArray<string>) => {
+  let calls = 0;
+  const client = HttpClient.make((request) => {
+    const model = models[Math.min(calls, models.length - 1)] ?? "jev-1.13.0";
+    calls += 1;
+    return Effect.succeed(
+      HttpClientResponse.fromWeb(
+        request,
+        new Response(
+          JSON.stringify({
+            model,
+            answers: {
+              citation_verdict: {
+                type: "choice",
+                choice: "verified",
+                probabilities: { verified: 0.95, unsupported: 0.025, contradicted: 0.025 },
+                confidence: 0.95,
+              },
+            },
+            usage: { input_tokens: 12, output_tokens: 8 },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      ),
+    );
+  });
+  return { client, calls: () => calls };
+};
+
 const makeDecisionModel = (
   calls: Array<unknown>,
   verdict: "verified" | "unsupported" | "contradicted" = "verified",
   confidence = 0.95,
   failFirst = false,
+  onAttempt: (() => void) | undefined = undefined,
 ): DecisionModel.DecisionModel => {
   let attempts = 0;
   const model = {
@@ -78,6 +118,7 @@ const makeDecisionModel = (
       options: { readonly input: unknown },
     ) => {
       attempts += 1;
+      onAttempt?.();
       calls.push({ definition, input: options.input });
       if (failFirst && attempts === 1) {
         return Effect.fail(
@@ -154,11 +195,45 @@ describe("citation verification", () => {
     expect(result.diagnostics).toMatchObject({
       requestedModel: "jev-test",
       resolvedModel: "jev-test",
+      resolvedModels: ["jev-test"],
       usage: { inputTokens: 12, outputTokens: 8 },
       confidence: 0.95,
     });
     expect(calls).toHaveLength(1);
     expect(CitationVerificationResultSchema.make(result)).toEqual(result);
+  });
+
+  test("keeps resolved model diagnostics local to each citation operation", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const typeSafe = makeTypeSafeCitationHttpClient(["jev-first", "jev-second"]);
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-latest",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      typeSafeHttpClient: typeSafe.client,
+      catalogSource: async () => [catalogDocument],
+      rfcSourceFetcher: makeSourceFetcher(sourceText),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const request = {
+      schemaVersion: 1 as const,
+      rfc: "RFC9110",
+      claim: "The client must send a request containing the target resource.",
+      quote: "The client MUST send a request containing the target resource.",
+      offset: null,
+    };
+    const first = await client.verifyCitation(request);
+    const second = await client.verifyCitation(request);
+
+    expect(first.diagnostics.resolvedModels).toEqual(["jev-first"]);
+    expect(second.diagnostics.resolvedModels).toEqual(["jev-second"]);
+    expect(first.diagnostics.resolvedModel).toBe("jev-first");
+    expect(second.diagnostics.resolvedModel).toBe("jev-second");
+    expect(typeSafe.calls()).toBe(2);
   });
 
   test("uses UTF-8 byte offsets for Unicode quotations and provenance", async () => {
@@ -381,6 +456,13 @@ describe("citation verification", () => {
   test("retries retryable provider failures and fails after the retry budget", async () => {
     const cacheDirectory = await makeCacheDirectory();
     const calls: Array<unknown> = [];
+    const clock = await Effect.runPromise(
+      Effect.scoped(TestClock.make({ warningDelay: Duration.seconds(30) })),
+    );
+    let resolveFirstAttempt: (() => void) | undefined;
+    const firstAttempt = new Promise<void>((resolve) => {
+      resolveFirstAttempt = resolve;
+    });
     const client = await createRfcClient({
       cacheDirectory,
       catalogPath: undefined,
@@ -389,18 +471,26 @@ describe("citation verification", () => {
       typeSafeApiUrl: undefined,
       catalogSource: async () => [catalogDocument],
       rfcSourceFetcher: makeSourceFetcher(sourceText),
-      decisionModel: makeDecisionModel(calls, "verified", 0.95, true),
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+      decisionModel: makeDecisionModel(calls, "verified", 0.95, true, () => {
+        resolveFirstAttempt?.();
+      }),
+      clock,
     });
     clients.push(client);
 
-    const result = await client.verifyCitation({
+    const verification = client.verifyCitation({
       schemaVersion: 1,
       rfc: "RFC9110",
       claim: "The client sends a request.",
       quote: "The client MUST send a request containing the target resource.",
       offset: null,
     });
+    await firstAttempt;
+    expect(calls).toHaveLength(1);
+    await Effect.runPromise(
+      clock.adjust(Duration.millis(citationPolicy.initialRetryDelayMilliseconds)),
+    );
+    const result = await verification;
 
     expect(result.verdict).toBe("verified");
     expect(calls).toHaveLength(2);
@@ -479,6 +569,18 @@ describe("citation verification", () => {
     ).rejects.toMatchObject({ _tag: "DecisionModelError", stage: "citation" });
     expect(delayedCalls).toBe(1);
 
+    const exhaustedClock = await Effect.runPromise(
+      Effect.scoped(TestClock.make({ warningDelay: Duration.seconds(30) })),
+    );
+    const exhaustedResolvers: Array<() => void> = [];
+    const exhaustedAttempts = Array.from(
+      { length: 3 },
+      (_, index) =>
+        new Promise<void>((resolve) => {
+          exhaustedResolvers[index] = resolve;
+        }),
+    );
+    let exhaustedCalls = 0;
     const exhaustedClient = await createRfcClient({
       cacheDirectory: await makeCacheDirectory(),
       catalogPath: undefined,
@@ -489,28 +591,51 @@ describe("citation verification", () => {
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       decisionModel: {
         [DecisionModel.TypeId]: DecisionModel.TypeId,
-        decide: () =>
-          Effect.fail(
+        decide: () => {
+          exhaustedResolvers[exhaustedCalls]?.();
+          exhaustedCalls += 1;
+          return Effect.fail(
             AiError.make({
               module: "test",
               method: "decide",
               reason: new AiError.InternalProviderError({ description: "down" }),
             }),
-          ),
+          );
+        },
       } as unknown as DecisionModel.DecisionModel,
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+      clock: exhaustedClock,
     });
     clients.push(exhaustedClient);
 
-    await expect(
-      exhaustedClient.verifyCitation({
-        schemaVersion: 1,
-        rfc: "RFC9110",
-        claim: "The client sends a request.",
-        quote: "The client MUST send a request containing the target resource.",
-        offset: null,
-      }),
-    ).rejects.toMatchObject({ _tag: "DecisionModelError", stage: "citation" });
+    const exhaustedVerification = exhaustedClient.verifyCitation({
+      schemaVersion: 1,
+      rfc: "RFC9110",
+      claim: "The client sends a request.",
+      quote: "The client MUST send a request containing the target resource.",
+      offset: null,
+    });
+    const exhaustedOutcome = exhaustedVerification.then(
+      () => ({ kind: "success" as const }),
+      (error) => ({ kind: "error" as const, error }),
+    );
+    for (const [index, attempt] of exhaustedAttempts.entries()) {
+      await attempt;
+      if (index < exhaustedAttempts.length - 1) {
+        await Effect.runPromise(
+          exhaustedClock.adjust(
+            Duration.millis(citationPolicy.initialRetryDelayMilliseconds * 2 ** index),
+          ),
+        );
+      }
+    }
+    const outcome = await exhaustedOutcome;
+    expect(outcome.kind).toBe("error");
+    if (outcome.kind === "error") {
+      expect(outcome.error).toMatchObject({
+        _tag: "DecisionModelError",
+        stage: "citation",
+      });
+    }
   });
 
   test("times out a never-resolving provider at the remaining citation budget", async () => {

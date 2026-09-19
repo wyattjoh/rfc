@@ -13,17 +13,30 @@ import {
   RfcSourceCacheError,
   RfcSourceFetchError,
   RfcSourceServiceTag,
-  createRfcClient,
+  createRfcClient as createCoreRfcClient,
   DecisionModelError,
   hashRfcSource,
   makeRfcSourceHttpLayer,
   parseSourceBlocks,
   type RfcClient,
+  type RfcClientOptions,
   type RfcSourceFetcher,
 } from "../src/index";
 import type * as Decision from "effect/unstable/ai/Decision";
+import { createRfcCalibrationClient as createCalibrationRfcClient } from "../src/internal-calibration";
 
 const clients: Array<RfcClient> = [];
+type TestClientOptions = Omit<RfcClientOptions, "automaticAnswerActivation"> & {
+  readonly automaticAnswerActivation?: RfcClientOptions["automaticAnswerActivation"];
+};
+const createRfcClient = (options: TestClientOptions) =>
+  options.automaticAnswerActivation === undefined
+    ? createCalibrationRfcClient(options)
+    : createCoreRfcClient({
+        ...options,
+        automaticAnswerActivation: options.automaticAnswerActivation,
+      });
+
 type ResearchResult = Awaited<ReturnType<RfcClient["research"]>>;
 type CurrencyReport = NonNullable<ResearchResult["currency"]>;
 type ContextDiagnostics = NonNullable<ResearchResult["diagnostics"]["contexts"]>;
@@ -213,6 +226,120 @@ const makeDecisionModel = (
   return model;
 };
 
+const makeMixedRelationDecisionModel = (): DecisionModel.DecisionModel => {
+  const model = {
+    [DecisionModel.TypeId]: DecisionModel.TypeId,
+    decide: (definition: { readonly decisions: Readonly<Record<string, Decision.Any>> }) => {
+      const answers = Object.fromEntries(
+        Object.entries(definition.decisions).map(([key, decision], index) => {
+          if (decision._tag === "Probability") return [key, { probability: 0.95 }];
+          if ("atomic" in decision.criteria) {
+            return [
+              key,
+              {
+                label: "atomic",
+                probabilities: { atomic: 0.95, compound: 0.05 },
+                confidence: 0.95,
+              },
+            ];
+          }
+          if (index === 0) {
+            return [
+              key,
+              {
+                label: "direct_answer",
+                probabilities: {
+                  direct_answer: 0.9,
+                  partial_answer: 0.05,
+                  background_only: 0.03,
+                  contradictory: 0.01,
+                  irrelevant: 0.01,
+                },
+                confidence: 0.95,
+              },
+            ];
+          }
+          return [
+            key,
+            {
+              label: "partial_answer",
+              probabilities: {
+                direct_answer: 0.2,
+                partial_answer: 0.4,
+                background_only: 0.2,
+                contradictory: 0.1,
+                irrelevant: 0.1,
+              },
+              confidence: 0.4,
+            },
+          ];
+        }),
+      );
+      return Effect.succeed({
+        answers,
+        usage: { inputTokens: 12, outputTokens: 8 },
+      });
+    },
+  } as unknown as DecisionModel.DecisionModel;
+  return model;
+};
+
+const makeUncertainRequestedDecisionModel = (): DecisionModel.DecisionModel => {
+  let relationRequests = 0;
+  const model = {
+    [DecisionModel.TypeId]: DecisionModel.TypeId,
+    decide: (definition: { readonly decisions: Readonly<Record<string, Decision.Any>> }) => {
+      const hasAtomicity = Object.values(definition.decisions).some(
+        (decision) => decision._tag !== "Probability" && "atomic" in decision.criteria,
+      );
+      if (!hasAtomicity) relationRequests += 1;
+      const uncertain = relationRequests === 1;
+      const answers = Object.fromEntries(
+        Object.entries(definition.decisions).map(([key, decision]) => {
+          if (decision._tag === "Probability") return [key, { probability: 0.95 }];
+          if ("atomic" in decision.criteria) {
+            return [
+              key,
+              {
+                label: "atomic",
+                probabilities: { atomic: 0.95, compound: 0.05 },
+                confidence: 0.95,
+              },
+            ];
+          }
+          return [
+            key,
+            {
+              label: "direct_answer",
+              probabilities: uncertain
+                ? {
+                    direct_answer: 0.6,
+                    partial_answer: 0.2,
+                    background_only: 0.1,
+                    contradictory: 0.05,
+                    irrelevant: 0.05,
+                  }
+                : {
+                    direct_answer: 0.9,
+                    partial_answer: 0.05,
+                    background_only: 0.03,
+                    contradictory: 0.01,
+                    irrelevant: 0.01,
+                  },
+              confidence: uncertain ? 0.6 : 0.95,
+            },
+          ];
+        }),
+      );
+      return Effect.succeed({
+        answers,
+        usage: { inputTokens: 12, outputTokens: 8 },
+      });
+    },
+  } as unknown as DecisionModel.DecisionModel;
+  return model;
+};
+
 const makeSourceFetcher =
   (text: string): RfcSourceFetcher =>
   async () => ({
@@ -220,7 +347,7 @@ const makeSourceFetcher =
     text,
   });
 
-const makeTypeSafeHttpClient = () => {
+const makeTypeSafeHttpClient = (models: ReadonlyArray<string> = ["jev-1.13.0"]) => {
   let calls = 0;
   const client = HttpClient.make((request) => {
     calls += 1;
@@ -236,7 +363,7 @@ const makeTypeSafeHttpClient = () => {
       ],
       ...Array.from({ length: 8 }, (_, index) => [
         `passage_${index}`,
-        calls === 1
+        (calls - 1) % 2 === 0
           ? { type: "noul", noul: 0.99 }
           : {
               type: "choice",
@@ -257,7 +384,7 @@ const makeTypeSafeHttpClient = () => {
         request,
         new Response(
           JSON.stringify({
-            model: "jev-1.13.0",
+            model: models[Math.min(Math.floor((calls - 1) / 2), models.length - 1)] ?? "jev-1.13.0",
             answers,
             usage: { input_tokens: 10, output_tokens: 6 },
           }),
@@ -274,6 +401,60 @@ afterEach(async () => {
 });
 
 describe("known RFC research", () => {
+  test("requires explicit activation before returning answered", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    // This deliberately uses the ordinary public constructor, not the private
+    // calibration-only constructor used by the fixture helper below.
+    const client = await createCoreRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-test",
+      policyPreset: "precision-v1",
+      automaticAnswerActivation: undefined,
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [catalogDocument],
+      rfcSourceFetcher: makeSourceFetcher(sourceText),
+      decisionModel: makeDecisionModel([]),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 1,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+    });
+
+    expect(result.status).toBe("needs_review");
+  });
+
+  test("rejects a forged activation object even when its shape resembles the capability", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const client = await createCoreRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-test",
+      policyPreset: "precision-v1",
+      automaticAnswerActivation: {} as RfcClientOptions["automaticAnswerActivation"],
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [catalogDocument],
+      rfcSourceFetcher: makeSourceFetcher(sourceText),
+      decisionModel: makeDecisionModel([]),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 1,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+    });
+
+    expect(result.status).toBe("needs_review");
+  });
+
   test("refreshes a missing catalog, caches source text, and runs two semantic stages", async () => {
     const cacheDirectory = await makeCacheDirectory();
     const calls: Array<unknown> = [];
@@ -354,6 +535,68 @@ describe("known RFC research", () => {
     });
     expect(sourceFetches).toBe(1);
     expect(calls).toHaveLength(4);
+  });
+
+  test("does not let an uncertain distractor suppress an activated direct answer", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const source = [
+      "1. Direct answer",
+      "",
+      "The client MUST send a request containing the target resource.",
+      "",
+      "2. Additional context",
+      "",
+      "The client sends the request to the server after selecting a target resource.",
+    ].join("\n");
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [catalogDocument],
+      rfcSourceFetcher: makeSourceFetcher(source),
+      decisionModel: makeMixedRelationDecisionModel(),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 1,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+    });
+
+    expect(result.status).toBe("answered");
+    expect(result.evidence).toHaveLength(1);
+    expect(result.evidence[0]?.relation).toBe("direct_answer");
+  });
+
+  test("composes uncertain requested evidence with accepted current evidence as partial", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const requested = makeCatalogDocument(9110, { updatedBy: ["RFC9111"] });
+    const current = makeCatalogDocument(9111, { updates: ["RFC9110"] });
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [requested, current],
+      rfcSourceFetcher: makeSourceMapFetcher({ RFC9110: sourceText, RFC9111: sourceText }, []),
+      decisionModel: makeUncertainRequestedDecisionModel(),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 1,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+    });
+
+    expect(result.status).toBe("partial");
+    expect(result.currency?.current).toEqual(["RFC9111"]);
   });
 
   test("researches the requested RFC and terminal current context across an update chain", async () => {
@@ -984,7 +1227,42 @@ describe("known RFC research", () => {
 
     expect(result.diagnostics.requestedModel).toBe("jev-latest");
     expect(result.diagnostics.resolvedModel).toBe("jev-1.13.0");
+    expect(result.diagnostics.resolvedModels).toEqual(["jev-1.13.0", "jev-1.13.0"]);
     expect(typeSafe.calls()).toBe(2);
+  });
+
+  test("keeps resolved model diagnostics local to each research operation", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const typeSafe = makeTypeSafeHttpClient(["jev-first", "jev-second"]);
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-latest",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      typeSafeHttpClient: typeSafe.client,
+      catalogSource: async () => [catalogDocument],
+      rfcSourceFetcher: makeSourceFetcher(sourceText),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const first = await client.research({
+      schemaVersion: 1,
+      question: "What must the client send?",
+      rfc: "9110",
+    });
+    const second = await client.research({
+      schemaVersion: 1,
+      question: "What must the client send?",
+      rfc: "9110",
+    });
+
+    expect(first.diagnostics.resolvedModels).toEqual(["jev-first", "jev-first"]);
+    expect(second.diagnostics.resolvedModels).toEqual(["jev-second", "jev-second"]);
+    expect(first.diagnostics.resolvedModel).toBe("jev-first");
+    expect(second.diagnostics.resolvedModel).toBe("jev-second");
+    expect(typeSafe.calls()).toBe(4);
   });
 
   test("returns needs_split for a confidently compound request", async () => {
@@ -1040,6 +1318,31 @@ describe("known RFC research", () => {
     expect(result.evidence).toEqual([]);
     expect(result.diagnostics.selection).toEqual([{ candidateId: "block-1", probability: 0.1 }]);
     expect(result.diagnostics.classification).toEqual([]);
+  });
+
+  test("judges a borderline selected passage before classifying unsupported", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [catalogDocument],
+      rfcSourceFetcher: makeSourceFetcher(sourceText),
+      decisionModel: makeDecisionModel([], "atomic", "irrelevant", 0.9, 0.95, 0.45),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 1,
+      question: "What does the server cache?",
+      rfc: "RFC9110",
+    });
+
+    expect(result.status).toBe("unsupported");
+    expect(result.diagnostics.classification).toHaveLength(1);
   });
 
   test("returns needs_review when a negative relation is low confidence", async () => {
@@ -1661,7 +1964,7 @@ describe("known RFC research", () => {
               ];
             }
             if (decision._tag === "Probability") {
-              return [key, { probability: 0.95 }];
+              return [key, { probability: options.input.documents === undefined ? 0.95 : 0.35 }];
             }
             return [
               key,
@@ -1756,6 +2059,9 @@ describe("known RFC research", () => {
       selectedPassages: 2,
     });
     expect(result.diagnostics.documentSelection).toHaveLength(2);
+    expect(result.diagnostics.documentSelection?.map(({ probability }) => probability)).toEqual([
+      0.35, 0.35,
+    ]);
     expect(result.diagnostics.timings.documentMs).toBeGreaterThanOrEqual(0);
   });
 

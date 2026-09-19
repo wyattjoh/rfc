@@ -323,6 +323,10 @@ const makePageUrl = (
       url.searchParams.set("limit", String(datatrackerPageSize));
       url.searchParams.set("offset", "0");
       url.searchParams.set("format", "json");
+      // Datatracker's default ordering is not stable across offset pages.
+      // Pin the upstream primary-key order so a complete published catalog
+      // cannot silently omit an RFC between requests.
+      url.searchParams.set("order_by", "id");
       if (resource === "document") {
         url.searchParams.set("type__slug", "rfc");
       } else {
@@ -357,6 +361,9 @@ const nextPageUrl = (
           reason: "Datatracker returned a next-page URL outside the configured API origin",
         });
       }
+      // Keep the stable primary-key ordering on every page, even when an
+      // upstream next link omits the query parameter.
+      resolved.searchParams.set("order_by", "id");
       return resolved.toString();
     },
     catch: (error) =>
@@ -436,6 +443,25 @@ const fetchPage = Effect.fnUntraced(function* (
   });
 });
 
+const pageOffset = (url: string): Effect.Effect<number | undefined, CatalogRefreshError> =>
+  Effect.try({
+    try: () => {
+      const value = new URL(url).searchParams.get("offset");
+      if (value === null) return undefined;
+      const offset = Number(value);
+      if (!Number.isSafeInteger(offset) || offset < 0) {
+        throw new Error("The pagination offset is not a non-negative integer");
+      }
+      return offset;
+    },
+    catch: (error) =>
+      new CatalogRefreshError({
+        stage: "decode",
+        url,
+        reason: errorMessage(error),
+      }),
+  });
+
 const fetchAllPages = Effect.fnUntraced(function* (
   http: HttpClient.HttpClient,
   initialUrl: string,
@@ -452,7 +478,6 @@ const fetchAllPages = Effect.fnUntraced(function* (
   const values: Array<unknown> = [];
   const visited = new Set<string>();
   let url: string | undefined = initialUrl;
-  let expectedTotal: number | undefined;
 
   while (url !== undefined) {
     if (visited.has(url)) {
@@ -465,27 +490,31 @@ const fetchAllPages = Effect.fnUntraced(function* (
     visited.add(url);
 
     const currentPage: DatatrackerPage = yield* fetchPage(http, url, configuredOrigin);
-    expectedTotal ??= currentPage.meta.total_count;
-    if (expectedTotal !== currentPage.meta.total_count) {
-      return yield* new CatalogRefreshError({
-        stage: "decode",
-        url,
-        reason: "Datatracker pagination changed its total count",
-      });
-    }
     values.push(...currentPage.objects);
 
-    url = yield* nextPageUrl(url, currentPage.meta.next, configuredOrigin);
+    const next: string | undefined = yield* nextPageUrl(
+      url,
+      currentPage.meta.next,
+      configuredOrigin,
+    );
+    if (next !== undefined) {
+      const currentOffset = yield* pageOffset(url);
+      const nextOffset = yield* pageOffset(next);
+      if (currentOffset !== undefined && nextOffset !== undefined && nextOffset <= currentOffset) {
+        return yield* new CatalogRefreshError({
+          stage: "decode",
+          url: next,
+          reason: "Datatracker pagination did not advance its offset",
+        });
+      }
+    }
+    url = next;
   }
 
-  if (expectedTotal === undefined || values.length < expectedTotal) {
-    return yield* new CatalogRefreshError({
-      stage: "decode",
-      url: initialUrl,
-      reason: "Datatracker pagination ended before all records were received",
-    });
-  }
-
+  // total_count is advisory: Datatracker can report a different snapshot on
+  // each request while documents are published or withdrawn. Exhausting the
+  // validated next-link chain is the completion signal; normalization below
+  // deduplicates stable document and relationship identities.
   return values;
 });
 
@@ -569,11 +598,11 @@ const normalizeRelationships = (
     const sourceValues = relationships.get(source);
     const targetValues = relationships.get(target);
     if (sourceValues === undefined || targetValues === undefined) {
-      throw new CatalogRefreshError({
-        stage: "normalize",
-        url,
-        reason: "Datatracker returned an RFC relationship outside the published catalog",
-      });
+      // Datatracker can retain a well-formed relationship for an RFC that is
+      // absent from this published-document snapshot. Do not let that orphan
+      // record invalidate the otherwise usable catalog, but keep the strict
+      // validation above so malformed references still fail closed.
+      continue;
     }
 
     if (kind === "updates") {

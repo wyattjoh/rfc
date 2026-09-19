@@ -11,6 +11,7 @@
     "format:check": "oxfmt --check",
     "lint": "oxlint --no-error-on-unmatched-pattern",
     "benchmark:topic": "bun run --cwd packages/rfc-core benchmark:topic",
+    "evaluate:live": "bun run packages/rfc/src/live-evaluation-bin.ts",
     "test": "bun test packages",
     "typecheck": "bun run --cwd packages/rfc-core typecheck && bun run --cwd packages/rfc typecheck",
     "hooks:install": "lefthook install"
