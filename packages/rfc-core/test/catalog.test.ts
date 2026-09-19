@@ -168,6 +168,46 @@ describe("catalog refresh", () => {
     await expect(client.catalogStatus()).resolves.toMatchObject({ state: "missing" });
   });
 
+  test("rejects malformed RFC relationships without creating a cache", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const http = makeHttpClient((url) => {
+      if (url.pathname.endsWith("/document/")) {
+        return Response.json(page([document(1, "First")], null, 1));
+      }
+      return Response.json(
+        page(
+          [
+            {
+              source: "/api/v1/doc/document/rfc1/",
+              target: "not-an-rfc",
+              relationship: "/api/v1/name/docrelationshipname/updates/",
+            },
+          ],
+          null,
+          1,
+        ),
+      );
+    });
+
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      datatrackerApiUrl: "https://example.test/api/v1/",
+      catalogHttpClient: http.client,
+      modelAlias: undefined,
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    await expect(client.catalogRefresh()).rejects.toMatchObject({
+      _tag: "CatalogRefreshError",
+      stage: "normalize",
+    });
+    await expect(client.catalogStatus()).resolves.toMatchObject({ state: "missing" });
+  });
+
   test("rejects cross-origin pagination and preserves the previous cache", async () => {
     const cacheDirectory = await makeCacheDirectory();
     let crossOriginNext = false;

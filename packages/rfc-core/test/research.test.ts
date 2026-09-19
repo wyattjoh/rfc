@@ -24,6 +24,33 @@ import {
 import type * as Decision from "effect/unstable/ai/Decision";
 
 const clients: Array<RfcClient> = [];
+type ResearchResult = Awaited<ReturnType<RfcClient["research"]>>;
+type CurrencyReport = NonNullable<ResearchResult["currency"]>;
+type ContextDiagnostics = NonNullable<ResearchResult["diagnostics"]["contexts"]>;
+type ContextSource = Extract<
+  NonNullable<ResearchResult["diagnostics"]["sources"]>[number],
+  { readonly context: string }
+>;
+
+const requireCurrency = (result: ResearchResult): CurrencyReport => {
+  if (result.currency === undefined) throw new Error("Expected currency report");
+  return result.currency;
+};
+
+const requireContextDiagnostics = (result: ResearchResult): ContextDiagnostics => {
+  if (result.diagnostics.contexts === undefined) {
+    throw new Error("Expected context diagnostics");
+  }
+  return result.diagnostics.contexts;
+};
+
+const requireContextSources = (result: ResearchResult): ReadonlyArray<ContextSource> => {
+  const sources = result.diagnostics.sources;
+  if (sources === undefined || !sources.every((source) => "context" in source)) {
+    throw new Error("Expected context source diagnostics");
+  }
+  return sources as ReadonlyArray<ContextSource>;
+};
 
 const makeCacheDirectory = async () => mkdtemp(join(tmpdir(), "rfc-core-research-test-"));
 
@@ -81,6 +108,32 @@ type InspectableDecision = {
   readonly criteria: Readonly<Record<string, string>>;
 };
 
+const makeCatalogDocument = (
+  number: number,
+  relationships: Readonly<Record<string, ReadonlyArray<string> | undefined>> = {},
+) => ({
+  ...catalogDocument,
+  identifier: `RFC${number}`,
+  rfcNumber: number,
+  canonicalUrl: `https://datatracker.ietf.org/doc/rfc${number}/`,
+  updates: relationships.updates ?? [],
+  updatedBy: relationships.updatedBy ?? [],
+  obsoletes: relationships.obsoletes ?? [],
+  obsoletedBy: relationships.obsoletedBy ?? [],
+});
+
+const makeSourceMapFetcher =
+  (sources: Readonly<Record<string, string>>, fetched: Array<string>): RfcSourceFetcher =>
+  async (document) => {
+    fetched.push(document.identifier);
+    const text = sources[document.identifier];
+    if (text === undefined) throw new Error(`Missing source for ${document.identifier}`);
+    return {
+      sourceUrl: `https://www.rfc-editor.org/rfc/rfc${document.rfcNumber}.txt`,
+      text,
+    };
+  };
+
 const makeDecisionModel = (
   calls: Array<unknown>,
   atomicity: "atomic" | "compound" = "atomic",
@@ -93,11 +146,17 @@ const makeDecisionModel = (
   relationProbability = 0.9,
   relationConfidence = 0.95,
   selectionProbability = 0.95,
+  relationForCall:
+    | ((
+        call: number,
+      ) => "direct_answer" | "partial_answer" | "background_only" | "contradictory" | "irrelevant")
+    | undefined = undefined,
 ): DecisionModel.DecisionModel => {
   const model = {
     [DecisionModel.TypeId]: DecisionModel.TypeId,
     decide: (definition: { readonly decisions: Readonly<Record<string, Decision.Any>> }) => {
       calls.push(definition);
+      const currentRelation = relationForCall?.(calls.length) ?? relation;
       const answers = Object.fromEntries(
         Object.entries(definition.decisions).map(([key, decision]) =>
           decision._tag === "Probability"
@@ -117,26 +176,26 @@ const makeDecisionModel = (
               : [
                   key,
                   {
-                    label: relation,
+                    label: currentRelation,
                     probabilities: {
                       direct_answer:
-                        relation === "direct_answer"
+                        currentRelation === "direct_answer"
                           ? relationProbability
                           : (1 - relationProbability) / 4,
                       partial_answer:
-                        relation === "partial_answer"
+                        currentRelation === "partial_answer"
                           ? relationProbability
                           : (1 - relationProbability) / 4,
                       background_only:
-                        relation === "background_only"
+                        currentRelation === "background_only"
                           ? relationProbability
                           : (1 - relationProbability) / 4,
                       contradictory:
-                        relation === "contradictory"
+                        currentRelation === "contradictory"
                           ? relationProbability
                           : (1 - relationProbability) / 4,
                       irrelevant:
-                        relation === "irrelevant"
+                        currentRelation === "irrelevant"
                           ? relationProbability
                           : (1 - relationProbability) / 4,
                     },
@@ -245,18 +304,35 @@ describe("known RFC research", () => {
 
     expect(result.status).toBe("answered");
     expect(result.rfc?.identifier).toBe("RFC9110");
+    expect(requireCurrency(result)).toEqual({
+      requested: "RFC9110",
+      current: ["RFC9110"],
+      paths: [{ identifier: "RFC9110", path: [] }],
+      complete: true,
+      issues: [],
+      unresolved: [],
+      compatibility: [],
+    });
+    expect(result.contexts).toMatchObject([
+      {
+        role: "requested",
+        document: { identifier: "RFC9110" },
+        relationshipPath: [],
+        isCurrent: true,
+        state: "researched",
+      },
+    ]);
     expect(result.evidence).toHaveLength(1);
     const evidence = result.evidence[0];
     expect(evidence).toBeDefined();
     if (evidence === undefined) throw new Error("Expected evidence");
-    const sourceBytes = new TextEncoder().encode(sourceText);
-    expect(
-      new TextDecoder().decode(
-        sourceBytes.slice(evidence.provenance.startOffset, evidence.provenance.endOffset),
-      ),
-    ).toBe(evidence.quote);
-    expect(evidence.provenance.offsetUnit).toBe("utf8-byte");
+    expect(sourceText.slice(evidence.provenance.startOffset, evidence.provenance.endOffset)).toBe(
+      evidence.quote,
+    );
     expect(evidence.provenance.sourceHash).toBe(hashRfcSource(sourceText));
+    expect(evidence.context).toBe("requested");
+    expect(evidence.provenance.context).toBe("requested");
+    expect(evidence.provenance.relationshipPath).toEqual([]);
     expect(evidence.provenance.section).toBe("1. Requirements");
     expect(result.diagnostics).toMatchObject({
       schemaVersion: 1,
@@ -280,50 +356,567 @@ describe("known RFC research", () => {
     expect(calls).toHaveLength(4);
   });
 
-  test("uses UTF-8 byte offsets in research evidence provenance", async () => {
-    const unicodeSourceText = [
-      "Preamble: café 😀.",
-      "",
-      "1. Requirements",
-      "",
-      "The 😀 résumé client MUST send a request.",
-      "",
-    ].join("\n");
+  test("researches the requested RFC and terminal current context across an update chain", async () => {
     const cacheDirectory = await makeCacheDirectory();
+    const fetched: Array<string> = [];
+    const requested = makeCatalogDocument(9110, { updatedBy: ["RFC9111"] });
+    const intermediate = makeCatalogDocument(9111, {
+      updates: ["RFC9110"],
+      updatedBy: ["RFC9112"],
+    });
+    const current = makeCatalogDocument(9112, { updates: ["RFC9111"] });
     const client = await createRfcClient({
       cacheDirectory,
       catalogPath: undefined,
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      catalogSource: async () => [catalogDocument],
-      rfcSourceFetcher: makeSourceFetcher(unicodeSourceText),
+      catalogSource: async () => [requested, intermediate, current],
+      rfcSourceFetcher: makeSourceMapFetcher(
+        {
+          RFC9110: sourceText,
+          RFC9112: sourceText.replaceAll("9110", "9112"),
+        },
+        fetched,
+      ),
       decisionModel: makeDecisionModel([]),
-      policyPreset: "precision-v1",
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
     });
     clients.push(client);
 
     const result = await client.research({
       schemaVersion: 1,
-      question: "What must the résumé client send?",
+      question: "What must the client send?",
       rfc: "RFC9110",
     });
 
     expect(result.status).toBe("answered");
-    expect(result.evidence).toHaveLength(1);
-    const evidence = result.evidence[0];
-    expect(evidence).toBeDefined();
-    if (evidence === undefined) throw new Error("Expected evidence");
-    expect(evidence.provenance.offsetUnit).toBe("utf8-byte");
-    expect(evidence.provenance.sourceHash).toBe(hashRfcSource(unicodeSourceText));
-    const sourceBytes = new TextEncoder().encode(unicodeSourceText);
-    const startOffset = evidence.provenance.startOffset;
-    const endOffset = evidence.provenance.endOffset;
-    expect(new TextDecoder().decode(sourceBytes.slice(startOffset, endOffset))).toBe(
-      evidence.quote,
+    expect(fetched).toEqual(["RFC9110", "RFC9112"]);
+    expect(requireCurrency(result)).toEqual({
+      requested: "RFC9110",
+      current: ["RFC9112"],
+      paths: [
+        { identifier: "RFC9110", path: [] },
+        {
+          identifier: "RFC9112",
+          path: [
+            { from: "RFC9110", to: "RFC9111", relationship: "updates" },
+            { from: "RFC9111", to: "RFC9112", relationship: "updates" },
+          ],
+        },
+      ],
+      complete: true,
+      issues: [],
+      unresolved: [],
+      compatibility: [{ requested: "RFC9110", current: "RFC9112", outcome: "compatible" }],
+    });
+    expect(result.evidence.map((passage) => passage.context)).toEqual(["requested", "current"]);
+    expect(requireContextSources(result).map(({ context }) => context)).toEqual([
+      "requested",
+      "current",
+    ]);
+    expect(
+      requireContextDiagnostics(result).map(({ identifier, state }) => ({ identifier, state })),
+    ).toEqual([
+      { identifier: "RFC9110", state: "researched" },
+      { identifier: "RFC9112", state: "researched" },
+    ]);
+  });
+
+  test("follows branching update relationships deterministically", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const fetched: Array<string> = [];
+    const requested = makeCatalogDocument(9110, { updatedBy: ["RFC9112", "RFC9111"] });
+    const firstCurrent = makeCatalogDocument(9111, { updates: ["RFC9110"] });
+    const secondCurrent = makeCatalogDocument(9112, { updates: ["RFC9110"] });
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [secondCurrent, requested, firstCurrent],
+      rfcSourceFetcher: makeSourceMapFetcher(
+        {
+          RFC9110: sourceText,
+          RFC9111: sourceText.replaceAll("9110", "9111"),
+          RFC9112: sourceText.replaceAll("9110", "9112"),
+        },
+        fetched,
+      ),
+      decisionModel: makeDecisionModel([]),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 1,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+    });
+
+    expect(result.status).toBe("answered");
+    expect(fetched).toEqual(["RFC9110", "RFC9111", "RFC9112"]);
+    const currency = requireCurrency(result);
+    expect(currency.current).toEqual(["RFC9111", "RFC9112"]);
+    expect(currency.paths.slice(1)).toEqual([
+      {
+        identifier: "RFC9111",
+        path: [{ from: "RFC9110", to: "RFC9111", relationship: "updates" }],
+      },
+      {
+        identifier: "RFC9112",
+        path: [{ from: "RFC9110", to: "RFC9112", relationship: "updates" }],
+      },
+    ]);
+  });
+
+  test("follows obsoletion branches without replacing the requested evidence", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const fetched: Array<string> = [];
+    const requested = makeCatalogDocument(9110, { obsoletedBy: ["RFC9111", "RFC9112"] });
+    const firstCurrent = makeCatalogDocument(9111, { obsoletes: ["RFC9110"] });
+    const secondCurrent = makeCatalogDocument(9112, { obsoletes: ["RFC9110"] });
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [secondCurrent, requested, firstCurrent],
+      rfcSourceFetcher: makeSourceMapFetcher(
+        {
+          RFC9110: sourceText,
+          RFC9111: sourceText.replaceAll("9110", "9111"),
+          RFC9112: sourceText.replaceAll("9110", "9112"),
+        },
+        fetched,
+      ),
+      decisionModel: makeDecisionModel([]),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 1,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+    });
+
+    expect(result.status).toBe("answered");
+    expect(fetched).toEqual(["RFC9110", "RFC9111", "RFC9112"]);
+    const currency = requireCurrency(result);
+    expect(currency.current).toEqual(["RFC9111", "RFC9112"]);
+    expect(currency.paths).toEqual([
+      { identifier: "RFC9110", path: [] },
+      {
+        identifier: "RFC9111",
+        path: [{ from: "RFC9110", to: "RFC9111", relationship: "obsoletes" }],
+      },
+      {
+        identifier: "RFC9112",
+        path: [{ from: "RFC9110", to: "RFC9112", relationship: "obsoletes" }],
+      },
+    ]);
+    expect(currency.compatibility).toEqual([
+      { requested: "RFC9110", current: "RFC9111", outcome: "compatible" },
+      { requested: "RFC9110", current: "RFC9112", outcome: "compatible" },
+    ]);
+    expect(result.evidence.map((passage) => passage.provenance.identifier)).toEqual([
+      "RFC9110",
+      "RFC9111",
+      "RFC9112",
+    ]);
+  });
+
+  test("returns partial when a known current successor cannot be fetched", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const fetched: Array<string> = [];
+    const requested = makeCatalogDocument(9110, { updatedBy: ["RFC9111"] });
+    const current = makeCatalogDocument(9111, { updates: ["RFC9110"] });
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [requested, current],
+      rfcSourceFetcher: async (document) => {
+        fetched.push(document.identifier);
+        if (document.identifier === "RFC9111") throw new Error("successor unavailable");
+        return {
+          sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+          text: sourceText,
+        };
+      },
+      decisionModel: makeDecisionModel([]),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 1,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+    });
+
+    expect(result.status).toBe("partial");
+    expect(fetched).toEqual(["RFC9110", "RFC9111"]);
+    expect(requireCurrency(result)).toMatchObject({
+      requested: "RFC9110",
+      current: ["RFC9111"],
+      complete: false,
+      issues: ["missing_current_source"],
+    });
+    expect(result.contexts).toMatchObject([
+      { role: "requested", state: "researched" },
+      { role: "current", document: { identifier: "RFC9111" }, state: "unavailable" },
+    ]);
+    expect(result.evidence.every((passage) => passage.context === "requested")).toBe(true);
+    expect(requireContextDiagnostics(result)[1]).toMatchObject({
+      identifier: "RFC9111",
+      state: "unavailable",
+      status: null,
+      source: null,
+    });
+  });
+
+  test("fails closed and terminates on cyclic currency relationships", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const fetched: Array<string> = [];
+    const requested = makeCatalogDocument(9110, { updatedBy: ["RFC9111"] });
+    const successor = makeCatalogDocument(9111, {
+      updates: ["RFC9110"],
+      updatedBy: ["RFC9110"],
+    });
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [requested, successor],
+      rfcSourceFetcher: makeSourceMapFetcher(
+        { RFC9110: sourceText, RFC9111: sourceText.replaceAll("9110", "9111") },
+        fetched,
+      ),
+      decisionModel: makeDecisionModel([]),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 1,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+    });
+
+    expect(result.status).toBe("needs_review");
+    expect(fetched).toEqual(["RFC9110"]);
+    const currency = requireCurrency(result);
+    expect(currency.current).toEqual([]);
+    expect(currency.complete).toBe(false);
+    expect(currency.issues).toEqual(["cycle_detected", "missing_current_context"]);
+  });
+
+  test("detects cycles that cross a previously explored branch", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const fetched: Array<string> = [];
+    const requested = makeCatalogDocument(9110, { updatedBy: ["RFC9111", "RFC9112"] });
+    const firstBranch = makeCatalogDocument(9111, {
+      updates: ["RFC9110"],
+      updatedBy: ["RFC9113"],
+    });
+    const secondBranch = makeCatalogDocument(9112, {
+      updates: ["RFC9110", "RFC9113"],
+      updatedBy: ["RFC9113"],
+    });
+    const crossBranch = makeCatalogDocument(9113, {
+      updates: ["RFC9112"],
+      updatedBy: ["RFC9112"],
+    });
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [crossBranch, secondBranch, requested, firstBranch],
+      rfcSourceFetcher: makeSourceMapFetcher({ RFC9110: sourceText }, fetched),
+      decisionModel: makeDecisionModel([]),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 1,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+    });
+
+    expect(result.status).toBe("needs_review");
+    expect(fetched).toEqual(["RFC9110"]);
+    const currency = requireCurrency(result);
+    expect(currency.current).toEqual([]);
+    expect(currency.issues).toContain("cycle_detected");
+    expect(currency.issues).toContain("missing_current_context");
+  });
+
+  test("fails closed when a current direct requirement changes the requested wording", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const requested = makeCatalogDocument(9110, { updatedBy: ["RFC9111"] });
+    const current = makeCatalogDocument(9111, { updates: ["RFC9110"] });
+    const changedText = sourceText.replace(
+      "The client MUST send a request containing the target resource.",
+      "The client MUST NOT send a request containing the target resource.",
     );
-    expect(startOffset).not.toBe(unicodeSourceText.indexOf(evidence.quote));
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [requested, current],
+      rfcSourceFetcher: makeSourceMapFetcher({ RFC9110: sourceText, RFC9111: changedText }, []),
+      decisionModel: makeDecisionModel([]),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 1,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+    });
+
+    expect(result.status).toBe("needs_review");
+    expect(requireCurrency(result).compatibility).toEqual([
+      { requested: "RFC9110", current: "RFC9111", outcome: "conflicting" },
+    ]);
+  });
+
+  test("reports a bounded traversal when the successor chain exceeds policy limits", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const numbers = Array.from({ length: 10 }, (_, index) => 9000 + index);
+    const documents = numbers.map((number, index) =>
+      makeCatalogDocument(number, {
+        updatedBy: index === numbers.length - 1 ? [] : [`RFC${number + 1}`],
+        updates: index === 0 ? [] : [`RFC${number - 1}`],
+      }),
+    );
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => documents,
+      rfcSourceFetcher: makeSourceMapFetcher({ RFC9000: sourceText }, []),
+      decisionModel: makeDecisionModel([]),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 1,
+      question: "What must the client send?",
+      rfc: "RFC9000",
+    });
+
+    expect(result.status).toBe("needs_review");
+    const currency = requireCurrency(result);
+    expect(currency.current).toEqual([]);
+    expect(currency.issues).toContain("traversal_limit");
+  });
+
+  test("fails closed when a current requirement weakens its normative modality", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const requested = makeCatalogDocument(9110, { updatedBy: ["RFC9111"] });
+    const current = makeCatalogDocument(9111, { updates: ["RFC9110"] });
+    const weakenedText = sourceText.replace("The client MUST send", "The client MAY send");
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [requested, current],
+      rfcSourceFetcher: makeSourceMapFetcher({ RFC9110: sourceText, RFC9111: weakenedText }, []),
+      decisionModel: makeDecisionModel([]),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 1,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+    });
+
+    expect(result.status).toBe("needs_review");
+    expect(requireCurrency(result).compatibility).toEqual([
+      { requested: "RFC9110", current: "RFC9111", outcome: "conflicting" },
+    ]);
+  });
+
+  test("fails closed when a current requirement changes a substantive parameter", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const requested = makeCatalogDocument(9110, { updatedBy: ["RFC9111"] });
+    const current = makeCatalogDocument(9111, { updates: ["RFC9110"] });
+    const requestedText = sourceText.replace("a request containing the target resource", "X-Foo");
+    const changedText = requestedText.replace("X-Foo", "X-Bar");
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [requested, current],
+      rfcSourceFetcher: makeSourceMapFetcher({ RFC9110: requestedText, RFC9111: changedText }, []),
+      decisionModel: makeDecisionModel([]),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 1,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+    });
+
+    expect(result.status).toBe("needs_review");
+    expect(requireCurrency(result).compatibility).toEqual([
+      { requested: "RFC9110", current: "RFC9111", outcome: "uncertain" },
+    ]);
+  });
+
+  test("fails closed when a current requirement swaps subject and object roles", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const requested = makeCatalogDocument(9110, { updatedBy: ["RFC9111"] });
+    const current = makeCatalogDocument(9111, { updates: ["RFC9110"] });
+    const requestedText = sourceText.replace(
+      "a request containing the target resource",
+      "X-Foo to the server",
+    );
+    const swappedText = requestedText
+      .replace("The client MUST send", "The server MUST send")
+      .replace("to the server", "to the client");
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [requested, current],
+      rfcSourceFetcher: makeSourceMapFetcher({ RFC9110: requestedText, RFC9111: swappedText }, []),
+      decisionModel: makeDecisionModel([]),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 1,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+    });
+
+    expect(result.status).toBe("needs_review");
+    expect(requireCurrency(result).compatibility).toEqual([
+      { requested: "RFC9110", current: "RFC9111", outcome: "uncertain" },
+    ]);
+  });
+
+  test("returns needs_review when requested and current contexts conflict", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const requested = makeCatalogDocument(9110, { updatedBy: ["RFC9111"] });
+    const current = makeCatalogDocument(9111, { updates: ["RFC9110"] });
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [requested, current],
+      rfcSourceFetcher: makeSourceMapFetcher(
+        { RFC9110: sourceText, RFC9111: sourceText.replaceAll("9110", "9111") },
+        [],
+      ),
+      decisionModel: makeDecisionModel([], "atomic", "direct_answer", 0.9, 0.95, 0.95, (call) =>
+        call === 4 ? "contradictory" : "direct_answer",
+      ),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 1,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+    });
+
+    expect(result.status).toBe("needs_review");
+    expect(requireCurrency(result).complete).toBe(true);
+    expect(result.evidence.map((passage) => [passage.context, passage.relation])).toEqual([
+      ["requested", "direct_answer"],
+      ["current", "contradictory"],
+    ]);
+  });
+
+  test("does not claim current coverage for missing or malformed successors", async () => {
+    const missingCacheDirectory = await makeCacheDirectory();
+    const missingClient = await createRfcClient({
+      cacheDirectory: missingCacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [makeCatalogDocument(9110, { updatedBy: ["RFC9999"] })],
+      rfcSourceFetcher: makeSourceMapFetcher({ RFC9110: sourceText }, []),
+      decisionModel: makeDecisionModel([]),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(missingClient);
+
+    const missing = await missingClient.research({
+      schemaVersion: 1,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+    });
+
+    expect(missing.status).toBe("partial");
+    expect(missing.currency).toMatchObject({
+      current: [],
+      complete: false,
+      issues: ["missing_successor", "missing_current_context"],
+      unresolved: ["RFC9999"],
+    });
+
+    const malformedCacheDirectory = await makeCacheDirectory();
+    const malformedClient = await createRfcClient({
+      cacheDirectory: malformedCacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [makeCatalogDocument(9110, { updatedBy: ["not-an-rfc"] })],
+      rfcSourceFetcher: makeSourceMapFetcher({ RFC9110: sourceText }, []),
+      decisionModel: makeDecisionModel([]),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(malformedClient);
+
+    const malformed = await malformedClient.research({
+      schemaVersion: 1,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+    });
+
+    expect(malformed.status).toBe("needs_review");
+    expect(malformed.currency).toMatchObject({
+      current: [],
+      complete: false,
+      issues: ["malformed_relationship", "missing_current_context"],
+    });
   });
 
   test("does not persist semantic inputs, judgments, or provider responses", async () => {

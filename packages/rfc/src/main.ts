@@ -361,6 +361,11 @@ const researchCommand = Command.make(
     if (flags.format === "human") {
       yield* writeStdout(`Status: ${result.status}`);
       yield* writeStdout(`RFC: ${result.rfc?.identifier ?? "none discovered"}`);
+      for (const context of result.contexts ?? []) {
+        yield* writeStdout(
+          `Context: ${context.role} ${context.document.identifier} (${context.state})`,
+        );
+      }
       for (const passage of result.evidence) {
         yield* writeStdout(`Section: ${passage.provenance.section ?? "unknown"}`);
         yield* writeStdout(`Quote: ${passage.quote}`);

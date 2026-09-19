@@ -558,14 +558,22 @@ const normalizeRelationships = (
     const source = identifierFromReference(relationship.source);
     const target = identifierFromReference(relationship.target);
     const kind = lastPathSegment(relationship.relationship);
-    if (source === undefined || target === undefined || kind === undefined) {
-      continue;
+    if (source === undefined || target === undefined || (kind !== "updates" && kind !== "obs")) {
+      throw new CatalogRefreshError({
+        stage: "normalize",
+        url,
+        reason: "Datatracker returned a malformed RFC update or obsoletion relationship",
+      });
     }
 
     const sourceValues = relationships.get(source);
     const targetValues = relationships.get(target);
     if (sourceValues === undefined || targetValues === undefined) {
-      continue;
+      throw new CatalogRefreshError({
+        stage: "normalize",
+        url,
+        reason: "Datatracker returned an RFC relationship outside the published catalog",
+      });
     }
 
     if (kind === "updates") {

@@ -71,7 +71,101 @@ export const ResearchStatusSchema = Schema.Literals([
 export type ResearchStatus = Schema.Schema.Type<typeof ResearchStatusSchema>;
 
 /**
- * Versioned policy values shared by known-RFC and topic-only research.
+ * The role of an RFC in a currency-aware research result.
+ */
+export const RfcContextRoleSchema = Schema.Literals(["requested", "current"]);
+
+/**
+ * The role of an RFC in a currency-aware research result.
+ */
+export type RfcContextRole = Schema.Schema.Type<typeof RfcContextRoleSchema>;
+
+/**
+ * One directed catalog relationship followed while resolving RFC currency.
+ */
+export const RfcRelationshipStepSchema = Schema.Struct({
+  from: Schema.NonEmptyString,
+  to: Schema.NonEmptyString,
+  relationship: Schema.Literals(["updates", "obsoletes"]),
+});
+
+/**
+ * One directed relationship in the path from a requested RFC to a current RFC.
+ */
+export type RfcRelationshipStep = Schema.Schema.Type<typeof RfcRelationshipStepSchema>;
+
+/**
+ * A known RFC context returned with an evidence bundle.
+ */
+export const RfcResearchContextSchema = Schema.Struct({
+  role: RfcContextRoleSchema,
+  document: CatalogDocumentSchema,
+  relationshipPath: Schema.Array(RfcRelationshipStepSchema),
+  isCurrent: Schema.Boolean,
+  state: Schema.Literals(["researched", "unavailable"]),
+});
+
+/**
+ * A requested or current RFC context included in a research result.
+ */
+export type RfcResearchContext = Schema.Schema.Type<typeof RfcResearchContextSchema>;
+
+/**
+ * The bounded failure modes recorded while resolving RFC currency.
+ */
+export const RfcCurrencyIssueSchema = Schema.Literals([
+  "missing_successor",
+  "malformed_relationship",
+  "cycle_detected",
+  "traversal_limit",
+  "missing_current_context",
+  "missing_current_source",
+]);
+
+/**
+ * A bounded issue reported by RFC relationship traversal or current-context research.
+ */
+export type RfcCurrencyIssue = Schema.Schema.Type<typeof RfcCurrencyIssueSchema>;
+
+/**
+ * The deterministic compatibility judgment between requested and current evidence.
+ */
+export const RfcCurrencyCompatibilitySchema = Schema.Struct({
+  requested: Schema.NonEmptyString,
+  current: Schema.NonEmptyString,
+  outcome: Schema.Literals(["compatible", "conflicting", "uncertain"]),
+});
+
+/**
+ * A compatibility judgment recorded for one current RFC context.
+ */
+export type RfcCurrencyCompatibility = Schema.Schema.Type<typeof RfcCurrencyCompatibilitySchema>;
+
+const RfcCurrencyPathSchema = Schema.Struct({
+  identifier: Schema.NonEmptyString,
+  path: Schema.Array(RfcRelationshipStepSchema),
+});
+
+/**
+ * The deterministic requested-to-current RFC relationship report.
+ */
+export const RfcCurrencyReportSchema = Schema.Struct({
+  requested: Schema.NonEmptyString,
+  current: Schema.Array(Schema.NonEmptyString),
+  paths: Schema.Array(RfcCurrencyPathSchema),
+  complete: Schema.Boolean,
+  issues: Schema.Array(RfcCurrencyIssueSchema),
+  unresolved: Schema.Array(Schema.NonEmptyString),
+  compatibility: Schema.Array(RfcCurrencyCompatibilitySchema),
+});
+
+/**
+ * A relationship traversal report included in a research result.
+ */
+export type RfcCurrencyReport = Schema.Schema.Type<typeof RfcCurrencyReportSchema>;
+
+/**
+ * Versioned policy values for known-RFC research.
  */
 export const knownRfcPolicy = {
   policyVersion: "precision-v1",
@@ -81,6 +175,9 @@ export const knownRfcPolicy = {
   maxPassageCandidates: 8,
   sourceBlockMaxCharacters: 4_000,
   sourceBlockOverlapCharacters: 200,
+  maxCurrencyTraversalDepth: 16,
+  maxCurrencyContexts: 8,
+  currencyCompatibilityOverlapThreshold: 0.6,
   selectionProbabilityThreshold: 0.65,
   unsupportedProbabilityThreshold: 0.35,
   relationConfidenceThreshold: 0.65,
@@ -142,6 +239,8 @@ export type SourceBlock = Schema.Schema.Type<typeof SourceBlockSchema>;
 export const EvidenceProvenanceSchema = Schema.Struct({
   identifier: Schema.NonEmptyString,
   rfcNumber: Schema.Natural,
+  context: RfcContextRoleSchema,
+  relationshipPath: Schema.Array(RfcRelationshipStepSchema),
   sourceUrl: Schema.NonEmptyString,
   canonicalUrl: Schema.NonEmptyString,
   sourceHash: Schema.NonEmptyString,
@@ -164,6 +263,7 @@ const ProbabilityMapSchema = Schema.Record(Schema.String, Schema.Finite);
  */
 export const EvidencePassageSchema = Schema.Struct({
   id: Schema.NonEmptyString,
+  context: RfcContextRoleSchema,
   quote: Schema.String,
   relation: AnswerRelationSchema,
   selectionProbability: Schema.Number,
@@ -227,6 +327,26 @@ const SourceDiagnosticSchema = Schema.Struct({
   fetchedAt: Schema.String,
 });
 
+const ContextSourceDiagnosticSchema = Schema.Struct({
+  context: RfcContextRoleSchema,
+  source: SourceDiagnosticSchema,
+});
+
+const ContextDiagnosticsSchema = Schema.Struct({
+  context: RfcContextRoleSchema,
+  identifier: Schema.NonEmptyString,
+  relationshipPath: Schema.Array(RfcRelationshipStepSchema),
+  state: Schema.Literals(["researched", "unavailable"]),
+  status: Schema.NullOr(ResearchStatusSchema),
+  source: Schema.NullOr(SourceDiagnosticSchema),
+  usage: TokenUsageSchema,
+  timings: TimingSchema,
+  candidates: CandidateCountsSchema,
+  atomicity: Schema.NullOr(AtomicityDiagnosticSchema),
+  selection: Schema.Array(SelectionDiagnosticSchema),
+  classification: Schema.Array(ClassificationDiagnosticSchema),
+});
+
 /**
  * Bounded diagnostics for one semantic research operation.
  */
@@ -238,13 +358,19 @@ export const ResearchDiagnosticsSchema = Schema.Struct({
   usage: TokenUsageSchema,
   timings: TimingSchema,
   source: Schema.NullOr(SourceDiagnosticSchema),
-  sources: Schema.Union([Schema.Array(SourceDiagnosticSchema), Schema.Undefined]),
+  sources: Schema.Union([
+    Schema.Array(SourceDiagnosticSchema),
+    Schema.Array(ContextSourceDiagnosticSchema),
+    Schema.Undefined,
+  ]),
   catalog: CatalogStatusSchema,
+  currency: Schema.optionalKey(RfcCurrencyReportSchema),
   candidates: CandidateCountsSchema,
   atomicity: AtomicityDiagnosticSchema,
   documentSelection: Schema.Union([Schema.Array(SelectionDiagnosticSchema), Schema.Undefined]),
   selection: Schema.Array(SelectionDiagnosticSchema),
   classification: Schema.Array(ClassificationDiagnosticSchema),
+  contexts: Schema.optionalKey(Schema.Array(ContextDiagnosticsSchema)),
 });
 
 /**
@@ -253,7 +379,7 @@ export const ResearchDiagnosticsSchema = Schema.Struct({
 export type ResearchDiagnostics = Schema.Schema.Type<typeof ResearchDiagnosticsSchema>;
 
 /**
- * The versioned public result of known-RFC or topic-only research.
+ * The versioned public result of known-RFC research.
  */
 export const EvidenceBundleSchema = Schema.Struct({
   schemaVersion: Schema.Literal(1),
@@ -261,6 +387,8 @@ export const EvidenceBundleSchema = Schema.Struct({
   status: ResearchStatusSchema,
   question: Schema.NonEmptyString,
   rfc: Schema.NullOr(CatalogDocumentSchema),
+  contexts: Schema.optionalKey(Schema.Array(RfcResearchContextSchema)),
+  currency: Schema.optionalKey(RfcCurrencyReportSchema),
   evidence: Schema.Array(EvidencePassageSchema),
   diagnostics: ResearchDiagnosticsSchema,
 });
@@ -1270,6 +1398,274 @@ export const resolveKnownRfc = (catalog: RfcCatalog, hint: string): CatalogDocum
   return document;
 };
 
+type PlannedRfcContext = {
+  readonly role: RfcContextRole;
+  readonly document: CatalogDocument;
+  readonly relationshipPath: ReadonlyArray<RfcRelationshipStep>;
+  readonly isCurrent: boolean;
+};
+
+/**
+ * The resolved RFC contexts and relationship report used by research.
+ */
+export interface RfcCurrencyResolution {
+  /**
+   * The requested RFC and the applicable current RFC contexts.
+   */
+  readonly contexts: ReadonlyArray<RfcResearchContext>;
+  /**
+   * The deterministic relationship report for those contexts.
+   */
+  readonly report: RfcCurrencyReport;
+}
+
+type SuccessorEdge = {
+  readonly document: CatalogDocument;
+  readonly relationship: RfcRelationshipStep["relationship"];
+};
+
+type SuccessorLookup = {
+  readonly edges: ReadonlyArray<SuccessorEdge>;
+  readonly issues: ReadonlyArray<RfcCurrencyIssue>;
+  readonly unresolved: ReadonlyArray<string>;
+  readonly hasSuccessorMetadata: boolean;
+};
+
+const normalizedRfcIdentifier = (value: string): string | undefined => {
+  const match = /^RFC([1-9]\d*)$/i.exec(value.trim());
+  if (match === null) return undefined;
+  const number = Number(match[1]);
+  return Number.isSafeInteger(number) && number > 0 ? `RFC${number}` : undefined;
+};
+
+const currencyIdentifier = (document: CatalogDocument): string =>
+  normalizedRfcIdentifier(document.identifier) ?? document.identifier.toUpperCase();
+
+const compareRfcDocuments = (left: CatalogDocument, right: CatalogDocument): number =>
+  left.rfcNumber - right.rfcNumber || left.identifier.localeCompare(right.identifier);
+
+const uniqueCurrencyIssues = (
+  issues: ReadonlyArray<RfcCurrencyIssue>,
+): ReadonlyArray<RfcCurrencyIssue> => [...new Set(issues)];
+
+const uniqueIdentifiers = (identifiers: ReadonlyArray<string>): ReadonlyArray<string> => [
+  ...new Set(identifiers),
+];
+
+const successorLookup = (catalog: RfcCatalog, document: CatalogDocument): SuccessorLookup => {
+  const documentsByIdentifier = new Map<string, CatalogDocument>();
+  for (const candidate of catalog.documents) {
+    documentsByIdentifier.set(currencyIdentifier(candidate), candidate);
+    documentsByIdentifier.set(candidate.identifier.toUpperCase(), candidate);
+  }
+
+  const edges = new Map<string, SuccessorEdge>();
+  const issues: Array<RfcCurrencyIssue> = [];
+  const unresolved: Array<string> = [];
+  let hasSuccessorMetadata = false;
+
+  const addEdge = (identifier: string, relationship: RfcRelationshipStep["relationship"]): void => {
+    const normalized = normalizedRfcIdentifier(identifier);
+    if (normalized === undefined) {
+      issues.push("malformed_relationship");
+      return;
+    }
+    const successor = documentsByIdentifier.get(normalized);
+    if (successor === undefined) {
+      issues.push("missing_successor");
+      unresolved.push(normalized);
+      return;
+    }
+    const key = `${relationship}:${currencyIdentifier(successor)}`;
+    edges.set(key, { document: successor, relationship });
+  };
+
+  for (const identifier of document.updatedBy) {
+    hasSuccessorMetadata = true;
+    addEdge(identifier, "updates");
+  }
+  for (const identifier of document.obsoletedBy) {
+    hasSuccessorMetadata = true;
+    addEdge(identifier, "obsoletes");
+  }
+
+  for (const candidate of catalog.documents) {
+    for (const identifier of candidate.updates) {
+      const normalized = normalizedRfcIdentifier(identifier);
+      if (normalized === undefined) continue;
+      if (normalized === currencyIdentifier(document)) {
+        hasSuccessorMetadata = true;
+        addEdge(candidate.identifier, "updates");
+      }
+    }
+    for (const identifier of candidate.obsoletes) {
+      const normalized = normalizedRfcIdentifier(identifier);
+      if (normalized === undefined) continue;
+      if (normalized === currencyIdentifier(document)) {
+        hasSuccessorMetadata = true;
+        addEdge(candidate.identifier, "obsoletes");
+      }
+    }
+  }
+
+  const sortedEdges = [...edges.values()].sort(
+    (left, right) =>
+      compareRfcDocuments(left.document, right.document) ||
+      left.relationship.localeCompare(right.relationship),
+  );
+  return {
+    edges: sortedEdges,
+    issues: uniqueCurrencyIssues(issues),
+    unresolved: uniqueIdentifiers(unresolved),
+    hasSuccessorMetadata,
+  };
+};
+
+const resolveRfcCurrencyFromDocument = (
+  catalog: RfcCatalog,
+  requested: CatalogDocument,
+  maxDepth: number = knownRfcPolicy.maxCurrencyTraversalDepth,
+  maxContexts: number = knownRfcPolicy.maxCurrencyContexts,
+): RfcCurrencyResolution => {
+  const requestedContext: PlannedRfcContext = {
+    role: "requested",
+    document: requested,
+    relationshipPath: [],
+    isCurrent: false,
+  };
+  const expanded = new Set<string>();
+  const activePath = new Set<string>();
+  const successorLookups = new Map<string, SuccessorLookup>();
+  const currentContexts: Array<PlannedRfcContext> = [];
+  const issues: Array<RfcCurrencyIssue> = [];
+  const unresolved: Array<string> = [];
+  let hasSuccessorMetadata = false;
+  const contextLimit = Math.max(1, maxContexts);
+  const depthLimit = Math.max(0, maxDepth);
+
+  const lookupSuccessors = (document: CatalogDocument): SuccessorLookup => {
+    const identifier = currencyIdentifier(document);
+    const cached = successorLookups.get(identifier);
+    if (cached !== undefined) return cached;
+    const lookup = successorLookup(catalog, document);
+    successorLookups.set(identifier, lookup);
+    return lookup;
+  };
+
+  const visit = (
+    document: CatalogDocument,
+    relationshipPath: ReadonlyArray<RfcRelationshipStep>,
+    depth: number,
+  ): void => {
+    const documentIdentifier = currencyIdentifier(document);
+    activePath.add(documentIdentifier);
+    const lookup = lookupSuccessors(document);
+    issues.push(...lookup.issues);
+    unresolved.push(...lookup.unresolved);
+    hasSuccessorMetadata ||= lookup.hasSuccessorMetadata;
+
+    if (lookup.edges.length === 0) {
+      if (document !== requested) {
+        currentContexts.push({
+          role: "current",
+          document,
+          relationshipPath,
+          isCurrent: true,
+        });
+      }
+      activePath.delete(documentIdentifier);
+      expanded.add(documentIdentifier);
+      return;
+    }
+
+    for (const edge of lookup.edges) {
+      const edgePath: RfcRelationshipStep = {
+        from: document.identifier,
+        to: edge.document.identifier,
+        relationship: edge.relationship,
+      };
+      const successorIdentifier = currencyIdentifier(edge.document);
+      if (activePath.has(successorIdentifier)) {
+        issues.push("cycle_detected");
+        continue;
+      }
+      if (depth >= depthLimit) {
+        issues.push("traversal_limit");
+        continue;
+      }
+      if (expanded.has(successorIdentifier)) continue;
+      if (expanded.size >= contextLimit) {
+        issues.push("traversal_limit");
+        continue;
+      }
+
+      expanded.add(successorIdentifier);
+      visit(edge.document, [...relationshipPath, edgePath], depth + 1);
+    }
+
+    activePath.delete(documentIdentifier);
+  };
+
+  const requestedIdentifier = currencyIdentifier(requested);
+  expanded.add(requestedIdentifier);
+  visit(requested, [], 0);
+
+  const sortedCurrentContexts = currentContexts
+    .sort((left, right) => compareRfcDocuments(left.document, right.document))
+    .slice(0, Math.max(1, maxContexts));
+  if (hasSuccessorMetadata && sortedCurrentContexts.length === 0) {
+    issues.push("missing_current_context");
+  }
+
+  const currentIdentifiers =
+    hasSuccessorMetadata && sortedCurrentContexts.length > 0
+      ? sortedCurrentContexts.map(({ document }) => document.identifier)
+      : hasSuccessorMetadata
+        ? []
+        : [requested.identifier];
+  const contexts = [requestedContext, ...sortedCurrentContexts].map((context) => ({
+    ...context,
+    isCurrent: hasSuccessorMetadata ? context.role === "current" : context.role === "requested",
+    state: "researched" as const,
+  }));
+  const report: RfcCurrencyReport = {
+    requested: requested.identifier,
+    current: currentIdentifiers,
+    paths: contexts.map((context) => ({
+      identifier: context.document.identifier,
+      path: context.relationshipPath,
+    })),
+    complete: uniqueCurrencyIssues(issues).length === 0,
+    issues: uniqueCurrencyIssues(issues),
+    unresolved: uniqueIdentifiers(unresolved),
+    compatibility: [],
+  };
+  return { contexts, report };
+};
+
+/**
+ * Resolve the requested RFC and its bounded current RFC contexts.
+ *
+ * @param catalog Fresh published RFC metadata.
+ * @param hint RFC identifier or number supplied by the caller.
+ * @returns Requested and current contexts plus their relationship report.
+ * @throws RfcNotFoundError when the hint is not an exact catalog entry.
+ */
+export const resolveRfcCurrency = (catalog: RfcCatalog, hint: string): RfcCurrencyResolution =>
+  resolveRfcCurrencyFromDocument(catalog, resolveKnownRfc(catalog, hint));
+
+/**
+ * Resolve current contexts from an already resolved requested RFC.
+ *
+ * @param catalog Fresh published RFC metadata.
+ * @param requested Requested RFC document from the same catalog.
+ * @returns Requested and current contexts plus their relationship report.
+ */
+export const resolveRfcContexts = (
+  catalog: RfcCatalog,
+  requested: CatalogDocument,
+): RfcCurrencyResolution => resolveRfcCurrencyFromDocument(catalog, requested);
+
 const relationIsConfident = (confidence: number | undefined, policy: ResearchPolicy): boolean =>
   confidence !== undefined && confidence >= policy.relationConfidenceThreshold;
 
@@ -1342,12 +1738,34 @@ const statusFromRelations = (
   return "needs_review";
 };
 
+type ContextResearchResult = {
+  readonly context: RfcResearchContext;
+  readonly source: RfcSource;
+  readonly status: ResearchStatus;
+  readonly evidence: ReadonlyArray<EvidencePassage>;
+  readonly diagnostics: Schema.Schema.Type<typeof ContextDiagnosticsSchema>;
+  readonly usage: {
+    readonly inputTokens: number | undefined;
+    readonly outputTokens: number | undefined;
+  };
+  readonly timings: Schema.Schema.Type<typeof TimingSchema>;
+};
+
+type UnavailableContextResult = {
+  readonly context: RfcResearchContext;
+  readonly diagnostics: Schema.Schema.Type<typeof ContextDiagnosticsSchema>;
+};
+
 type PassageSource = {
   readonly document: CatalogDocument;
   readonly source: RfcSource;
+  readonly context: RfcContextRole;
+  readonly relationshipPath: ReadonlyArray<RfcRelationshipStep>;
 };
 
-const sourceDiagnostic = (source: RfcSource) => ({
+const sourceDiagnostic = (
+  source: RfcSource,
+): Schema.Schema.Type<typeof SourceDiagnosticSchema> => ({
   identifier: source.identifier,
   rfcNumber: source.rfcNumber,
   sourceUrl: source.sourceUrl,
@@ -1375,6 +1793,7 @@ const evidenceFromRelations = (
       return [
         {
           id: answer.block.id,
+          context: context.context,
           quote,
           relation: answer.relation,
           selectionProbability: answer.selectionProbability,
@@ -1383,6 +1802,8 @@ const evidenceFromRelations = (
           provenance: {
             identifier: context.document.identifier,
             rfcNumber: context.document.rfcNumber,
+            context: context.context,
+            relationshipPath: context.relationshipPath,
             sourceUrl: context.source.sourceUrl,
             canonicalUrl: context.document.canonicalUrl,
             sourceHash: context.source.contentHash,
@@ -1396,13 +1817,393 @@ const evidenceFromRelations = (
       ];
     });
 
+const zeroUsage = (): Schema.Schema.Type<typeof TokenUsageSchema> => ({
+  inputTokens: null,
+  outputTokens: null,
+});
+
+const zeroTimings = (): Schema.Schema.Type<typeof TimingSchema> => ({
+  catalogMs: 0,
+  sourceMs: 0,
+  lexicalMs: 0,
+  selectionMs: 0,
+  relationMs: 0,
+  totalMs: 0,
+  documentMs: undefined,
+});
+
+const emptyCandidates = (): Schema.Schema.Type<typeof CandidateCountsSchema> => ({
+  sourceBlocks: 0,
+  passageCandidates: 0,
+  selectedPassages: 0,
+  catalogDocuments: undefined,
+  documentCandidates: undefined,
+  acceptedDocuments: undefined,
+});
+
+const researchContext = Effect.fnUntraced(function* (
+  question: string,
+  plannedContext: PlannedRfcContext,
+  options: KnownRfcResearchOptions,
+  policy: ResearchPolicy,
+): Effect.fn.Return<
+  ContextResearchResult,
+  RfcSourceCacheError | RfcSourceFetchError | DecisionModelError,
+  FileSystem.FileSystem | RfcSourceStore | RfcSourceServiceTag | DecisionModel.DecisionModel
+> {
+  const sourceStarted = yield* Clock.currentTimeMillis;
+  const source = yield* loadRfcSource(plannedContext.document, options.sourceDirectory);
+  const sourceFinished = yield* Clock.currentTimeMillis;
+  const lexicalStarted = sourceFinished;
+  const blocks = parseSourceBlocks(
+    source.text,
+    policy.sourceBlockMaxCharacters,
+    policy.sourceBlockOverlapCharacters,
+  );
+  const candidates = shortlistPassageCandidates(blocks, question, policy.maxPassageCandidates);
+  const lexicalFinished = yield* Clock.currentTimeMillis;
+  const selectionStarted = lexicalFinished;
+  const selection = yield* selectionStage(question, candidates, policy, true);
+  const selectionFinished = yield* Clock.currentTimeMillis;
+  if (selection.atomicity === undefined) {
+    return yield* new DecisionModelError({
+      stage: "selection",
+      reason: "Provider response did not include atomicity diagnostics",
+    });
+  }
+  const relationStarted = selectionFinished;
+  const relation = yield* relationStage(question, selection.selected, policy);
+  const relationFinished = yield* Clock.currentTimeMillis;
+  const status = statusFromRelations(
+    relation.answers,
+    selection.atomicity,
+    selection.diagnostics,
+    policy,
+  );
+  const usage = combineUsage(selection.usage, relation.usage);
+  const timings = {
+    catalogMs: 0,
+    sourceMs: elapsed(sourceStarted, sourceFinished),
+    lexicalMs: elapsed(lexicalStarted, lexicalFinished),
+    selectionMs: elapsed(selectionStarted, selectionFinished),
+    relationMs: elapsed(relationStarted, relationFinished),
+    totalMs: elapsed(sourceStarted, relationFinished),
+    documentMs: undefined,
+  } satisfies Schema.Schema.Type<typeof TimingSchema>;
+  const context: RfcResearchContext = {
+    ...plannedContext,
+    state: "researched",
+  };
+  const offsets = makeUtf8OffsetMap(source.text);
+  const evidence: Array<EvidencePassage> = [];
+  for (const answer of relation.answers.filter((candidate) =>
+    acceptedRelation(candidate.relation, candidate.probabilities, candidate.confidence, policy),
+  )) {
+    const startOffset = offsets.byteOffsetAtCodeUnit(answer.block.startOffset);
+    const endOffset = offsets.byteOffsetAtCodeUnit(answer.block.endOffset);
+    if (startOffset === undefined || endOffset === undefined) {
+      return yield* new DecisionModelError({
+        stage: "relation",
+        reason: "The accepted evidence range is not a UTF-8 source boundary",
+      });
+    }
+    const quote = source.text.slice(answer.block.startOffset, answer.block.endOffset);
+    evidence.push({
+      id: answer.block.id,
+      context: plannedContext.role,
+      quote,
+      relation: answer.relation,
+      selectionProbability: answer.selectionProbability,
+      relationProbabilities: answer.probabilities,
+      confidence: answer.confidence ?? null,
+      provenance: {
+        identifier: plannedContext.document.identifier,
+        rfcNumber: plannedContext.document.rfcNumber,
+        context: plannedContext.role,
+        relationshipPath: plannedContext.relationshipPath,
+        sourceUrl: source.sourceUrl,
+        canonicalUrl: plannedContext.document.canonicalUrl,
+        sourceHash: source.contentHash,
+        offsetUnit: utf8OffsetUnit,
+        startOffset,
+        endOffset,
+        section: answer.block.section,
+        fetchedAt: source.fetchedAt,
+      },
+    });
+  }
+  const diagnostics = {
+    context: plannedContext.role,
+    identifier: plannedContext.document.identifier,
+    relationshipPath: plannedContext.relationshipPath,
+    state: "researched" as const,
+    status,
+    source: sourceDiagnostic(source),
+    usage: {
+      inputTokens: usage.inputTokens ?? null,
+      outputTokens: usage.outputTokens ?? null,
+    },
+    timings,
+    candidates: {
+      sourceBlocks: blocks.length,
+      passageCandidates: candidates.length,
+      selectedPassages: selection.selected.length,
+      catalogDocuments: undefined,
+      documentCandidates: undefined,
+      acceptedDocuments: undefined,
+    },
+    atomicity: {
+      label: selection.atomicity.label,
+      probabilities: selection.atomicity.probabilities,
+      confidence: selection.atomicity.confidence ?? null,
+    },
+    selection: selection.diagnostics,
+    classification: relation.diagnostics,
+  } satisfies Schema.Schema.Type<typeof ContextDiagnosticsSchema>;
+  return { context, source, status, evidence, diagnostics, usage, timings };
+});
+
+const unavailableContext = (plannedContext: PlannedRfcContext): UnavailableContextResult => {
+  const context: RfcResearchContext = {
+    ...plannedContext,
+    state: "unavailable",
+  };
+  return {
+    context,
+    diagnostics: {
+      context: plannedContext.role,
+      identifier: plannedContext.document.identifier,
+      relationshipPath: plannedContext.relationshipPath,
+      state: "unavailable",
+      status: null,
+      source: null,
+      usage: zeroUsage(),
+      timings: zeroTimings(),
+      candidates: emptyCandidates(),
+      atomicity: null,
+      selection: [],
+      classification: [],
+    },
+  };
+};
+
+const addNumbers = (left: number, right: number): number => left + right;
+
+const sumUsage = (
+  results: ReadonlyArray<ContextResearchResult>,
+): { readonly inputTokens: number | undefined; readonly outputTokens: number | undefined } =>
+  results.reduce<{
+    readonly inputTokens: number | undefined;
+    readonly outputTokens: number | undefined;
+  }>(
+    (usage, result) => ({
+      inputTokens: addUsage(usage.inputTokens, result.usage.inputTokens),
+      outputTokens: addUsage(usage.outputTokens, result.usage.outputTokens),
+    }),
+    { inputTokens: undefined, outputTokens: undefined },
+  );
+
+const sumTimings = (
+  results: ReadonlyArray<ContextResearchResult>,
+): Schema.Schema.Type<typeof TimingSchema> =>
+  results.reduce(
+    (timings, result) => ({
+      catalogMs: timings.catalogMs,
+      sourceMs: addNumbers(timings.sourceMs, result.timings.sourceMs),
+      lexicalMs: addNumbers(timings.lexicalMs, result.timings.lexicalMs),
+      selectionMs: addNumbers(timings.selectionMs, result.timings.selectionMs),
+      relationMs: addNumbers(timings.relationMs, result.timings.relationMs),
+      totalMs: addNumbers(timings.totalMs, result.timings.totalMs),
+      documentMs: undefined,
+    }),
+    zeroTimings(),
+  );
+
+const compatibilityStatements = (quote: string): ReadonlyArray<string> => {
+  const statements = quote
+    .split(/(?:\r?\n+|(?<=[.!?])\s+)/)
+    .map((statement) => statement.trim())
+    .filter((statement) => statement.length > 0);
+  const normative = statements.filter((statement) =>
+    /\b(?:must|shall|should|may|required|prohibited)\b/i.test(statement),
+  );
+  return normative.length > 0 ? normative : statements;
+};
+
+type CompatibilityStatement = {
+  readonly tokens: ReadonlyArray<string>;
+  readonly tokenSet: ReadonlySet<string>;
+};
+
+const compatibilityTokens = (statement: string): CompatibilityStatement => {
+  const normalized = statement
+    .toLowerCase()
+    .replace(/\brequest\s+for\s+comments\s*:?\s*\d+\b/g, " ")
+    .replace(/\brfc\s*\d+\b/g, " ")
+    .replace(/\b(?:is|are)\s+(?:required|obligated)\s+to\b/g, " must ")
+    .replace(/\b(?:must|shall)\s+not\b/g, " must_not ")
+    .replace(/\b(?:must|shall)\b/g, " must ")
+    .replace(/\bshould\s+not\b/g, " should_not ")
+    .replace(/\bshould\b/g, " should ")
+    .replace(/\bmay\s+not\b/g, " may_not ")
+    .replace(/\bmay\b/g, " may ")
+    .replace(/\b(?:the|a|an|of|to|that|which|is|are|be|as|for)\b/g, " ")
+    .replace(/[^a-z0-9_]+/g, " ");
+  const tokens = normalized.split(/\s+/).filter((token) => token.length > 0);
+  return { tokens, tokenSet: new Set(tokens) };
+};
+
+const tokenOverlap = (left: ReadonlySet<string>, right: ReadonlySet<string>): number => {
+  if (left.size === 0 || right.size === 0) return 0;
+  let intersection = 0;
+  for (const token of left) {
+    if (right.has(token)) intersection += 1;
+  }
+  return intersection / new Set([...left, ...right]).size;
+};
+
+const requirementModal = (tokens: ReadonlySet<string>): string | undefined =>
+  ["must", "must_not", "should", "should_not", "may", "may_not"].find((token) => tokens.has(token));
+
+const hasOpposingRequirement = (left: ReadonlySet<string>, right: ReadonlySet<string>): boolean => {
+  const leftModal = requirementModal(left);
+  const rightModal = requirementModal(right);
+  if (leftModal === undefined || rightModal === undefined || leftModal === rightModal) {
+    return false;
+  }
+  const shared = [...left].filter((token) => !token.endsWith("_not") && right.has(token));
+  return shared.length >= 2;
+};
+
+const sameTokens = (left: ReadonlyArray<string>, right: ReadonlyArray<string>): boolean =>
+  left.length === right.length && left.every((token, index) => token === right[index]);
+
+const compareCurrencyQuotes = (
+  requestedQuote: string,
+  currentQuote: string,
+  threshold: number,
+): RfcCurrencyCompatibility["outcome"] => {
+  const requestedStatements = compatibilityStatements(requestedQuote).map(compatibilityTokens);
+  const currentStatements = compatibilityStatements(currentQuote).map(compatibilityTokens);
+  for (const requestedStatement of requestedStatements) {
+    for (const currentStatement of currentStatements) {
+      const overlap = tokenOverlap(requestedStatement.tokenSet, currentStatement.tokenSet);
+      if (
+        hasOpposingRequirement(requestedStatement.tokenSet, currentStatement.tokenSet) &&
+        overlap >= 0.3
+      ) {
+        return "conflicting";
+      }
+    }
+  }
+  const requestedStatementsMatch = requestedStatements.every((requestedStatement) =>
+    currentStatements.some(
+      (currentStatement) =>
+        sameTokens(requestedStatement.tokens, currentStatement.tokens) &&
+        tokenOverlap(requestedStatement.tokenSet, currentStatement.tokenSet) >= threshold,
+    ),
+  );
+  const currentStatementsMatch = currentStatements.every((currentStatement) =>
+    requestedStatements.some(
+      (requestedStatement) =>
+        sameTokens(requestedStatement.tokens, currentStatement.tokens) &&
+        tokenOverlap(requestedStatement.tokenSet, currentStatement.tokenSet) >= threshold,
+    ),
+  );
+  return requestedStatementsMatch && currentStatementsMatch ? "compatible" : "uncertain";
+};
+
+const currencyCompatibility = (
+  requested: ContextResearchResult,
+  current: ReadonlyArray<ContextResearchResult>,
+  policy: ResearchPolicy,
+): ReadonlyArray<RfcCurrencyCompatibility> => {
+  if (requested.status !== "answered") return [];
+  const requestedEvidence = requested.evidence.filter(
+    (passage) => passage.relation === "direct_answer",
+  );
+  if (requestedEvidence.length === 0) return [];
+
+  return current.flatMap((currentContext) => {
+    if (currentContext.status !== "answered") return [];
+    const currentEvidence = currentContext.evidence.filter(
+      (passage) => passage.relation === "direct_answer",
+    );
+    if (currentEvidence.length === 0) return [];
+    let outcome: RfcCurrencyCompatibility["outcome"] = "compatible";
+    let comparedPairs = 0;
+    for (const requestedPassage of requestedEvidence) {
+      for (const currentPassage of currentEvidence) {
+        comparedPairs += 1;
+        const comparison = compareCurrencyQuotes(
+          requestedPassage.quote,
+          currentPassage.quote,
+          policy.currencyCompatibilityOverlapThreshold,
+        );
+        if (comparison === "conflicting") {
+          outcome = comparison;
+          break;
+        }
+        if (comparison === "uncertain") outcome = comparison;
+      }
+      if (outcome === "conflicting") break;
+    }
+    if (comparedPairs === 0) outcome = "uncertain";
+    return [
+      {
+        requested: requested.context.document.identifier,
+        current: currentContext.context.document.identifier,
+        outcome,
+      },
+    ];
+  });
+};
+
+const combinedCurrencyStatus = (
+  requested: ContextResearchResult,
+  current: ReadonlyArray<ContextResearchResult>,
+  unavailable: ReadonlyArray<UnavailableContextResult>,
+  report: RfcCurrencyReport,
+): ResearchStatus => {
+  const statuses = [requested.status, ...current.map(({ status }) => status)];
+  if (statuses.includes("needs_split")) return "needs_split";
+  const unsafeIssues = report.issues.some((issue) =>
+    ["malformed_relationship", "cycle_detected", "traversal_limit"].includes(issue),
+  );
+  if (
+    unsafeIssues ||
+    statuses.includes("needs_review") ||
+    report.compatibility.some((comparison) => comparison.outcome !== "compatible")
+  ) {
+    return "needs_review";
+  }
+  const incomplete = !report.complete || unavailable.length > 0;
+  if (incomplete) return "partial";
+  if (statuses.every((status) => status === "answered")) return "answered";
+  if (statuses.every((status) => status === "unsupported")) return "unsupported";
+  if (statuses.some((status) => status === "answered" || status === "partial")) return "partial";
+  return "needs_review";
+};
+
+const updateCurrencyReport = (
+  report: RfcCurrencyReport,
+  unavailable: ReadonlyArray<UnavailableContextResult>,
+): RfcCurrencyReport => {
+  if (unavailable.length === 0) return report;
+  return {
+    ...report,
+    complete: false,
+    issues: uniqueCurrencyIssues([...report.issues, "missing_current_source"]),
+  };
+};
+
 /**
  * Run the complete known-RFC retrieval and semantic evidence pipeline.
  *
  * @param question Atomic research question.
  * @param hint Exact RFC identifier or number.
  * @param options Fresh catalog, cache, provider, and timing configuration.
- * @returns A versioned evidence bundle with exact provenance and diagnostics.
+ * @returns A versioned evidence bundle with exact provenance for requested and current contexts.
  */
 export const researchKnownRfc = Effect.fnUntraced(function* (
   question: string,
@@ -1425,85 +2226,134 @@ export const researchKnownRfc = Effect.fnUntraced(function* (
 > {
   const policy = yield* policyFor(options.policyPreset);
   const resolvedModelRef = yield* ResolvedModelName;
-  const document = yield* Effect.try({
-    try: () => resolveKnownRfc(options.catalog, hint),
-    catch: (error) =>
-      error instanceof RfcNotFoundError ? error : new RfcNotFoundError({ rfc: hint }),
-  });
-  const sourceStarted = yield* Clock.currentTimeMillis;
-  const source = yield* loadRfcSource(document, options.sourceDirectory);
-  const sourceFinished = yield* Clock.currentTimeMillis;
-  const lexicalStarted = sourceFinished;
-  const blocks = parseSourceBlocks(
-    source.text,
-    policy.sourceBlockMaxCharacters,
-    policy.sourceBlockOverlapCharacters,
-  );
-  const candidates = shortlistPassageCandidates(blocks, question, policy.maxPassageCandidates);
-  const lexicalFinished = yield* Clock.currentTimeMillis;
-  const selectionStarted = lexicalFinished;
-  const selection = yield* selectionStage(question, candidates, policy, true);
-  const selectionFinished = yield* Clock.currentTimeMillis;
-  if (selection.atomicity === undefined) {
-    return yield* new DecisionModelError({
-      stage: "selection",
-      reason: "Provider response did not include atomicity diagnostics",
-    });
+  const requested = resolveKnownRfc(options.catalog, hint);
+  const resolution = resolveRfcCurrencyFromDocument(options.catalog, requested);
+  const plannedContexts: Array<PlannedRfcContext> = resolution.contexts.map((context) => ({
+    role: context.role,
+    document: context.document,
+    relationshipPath: context.relationshipPath,
+    isCurrent: context.isCurrent,
+  }));
+  const requestedContext = plannedContexts[0];
+  if (requestedContext === undefined) {
+    return yield* new RfcNotFoundError({ rfc: hint });
   }
-  const relationStarted = selectionFinished;
-  const relation = yield* relationStage(question, selection.selected, policy);
-  const relationFinished = yield* Clock.currentTimeMillis;
-  const resolvedModel = yield* Ref.get(resolvedModelRef);
-  const usage = combineUsage(selection.usage, relation.usage);
-  const evidence = evidenceFromRelations(
-    relation.answers,
-    new Map(candidates.map((candidate) => [candidate.id, { document, source }] as const)),
-    policy,
-  );
-  const status = statusFromRelations(
-    relation.answers,
-    selection.atomicity,
-    selection.diagnostics,
-    policy,
+
+  const requestedResult = yield* researchContext(question, requestedContext, options, policy);
+  const currentResults: Array<ContextResearchResult> = [];
+  const unavailableResults: Array<UnavailableContextResult> = [];
+  for (const plannedContext of plannedContexts.slice(1)) {
+    const currentResult = yield* Effect.result(
+      researchContext(question, plannedContext, options, policy),
+    );
+    if (Result.isSuccess(currentResult)) {
+      currentResults.push(currentResult.success);
+      continue;
+    }
+    const currentError = currentResult.failure;
+    if (
+      currentError instanceof RfcSourceCacheError ||
+      currentError instanceof RfcSourceFetchError
+    ) {
+      unavailableResults.push(unavailableContext(plannedContext));
+      continue;
+    }
+    return yield* Effect.fail(currentError);
+  }
+
+  const allResults = [requestedResult, ...currentResults];
+  const compatibility = currencyCompatibility(requestedResult, currentResults, policy);
+  const report = {
+    ...updateCurrencyReport(resolution.report, unavailableResults),
+    compatibility,
+  } satisfies RfcCurrencyReport;
+  const status = combinedCurrencyStatus(
+    requestedResult,
+    currentResults,
+    unavailableResults,
+    report,
   );
   const finishedAt = yield* Clock.currentTimeMillis;
+  const usage = sumUsage(allResults);
+  const timings = sumTimings(allResults);
+  const requestedSource = sourceDiagnostic(requestedResult.source);
+  const contexts = [
+    ...allResults.map(({ context }) => context),
+    ...unavailableResults.map(({ context }) => context),
+  ];
+  const contextDiagnostics = [
+    ...allResults.map(({ diagnostics }) => diagnostics),
+    ...unavailableResults.map(({ diagnostics }) => diagnostics),
+  ];
+  const multiContext = plannedContexts.length > 1;
+  const evidence = allResults.flatMap(({ evidence: passages }) =>
+    passages.map((passage) =>
+      multiContext ? { ...passage, id: `${passage.provenance.identifier}:${passage.id}` } : passage,
+    ),
+  );
+  const sourceDiagnostics = allResults.map((result) => ({
+    context: result.context.role,
+    source: sourceDiagnostic(result.source),
+  }));
+  const candidates = allResults.reduce(
+    (counts, result) => ({
+      sourceBlocks: counts.sourceBlocks + result.diagnostics.candidates.sourceBlocks,
+      passageCandidates: counts.passageCandidates + result.diagnostics.candidates.passageCandidates,
+      selectedPassages: counts.selectedPassages + result.diagnostics.candidates.selectedPassages,
+      catalogDocuments: undefined,
+      documentCandidates: undefined,
+      acceptedDocuments: undefined,
+    }),
+    emptyCandidates(),
+  );
+  const selection = allResults.flatMap((result) =>
+    result.diagnostics.selection.map((candidate) => ({
+      ...candidate,
+      candidateId: multiContext
+        ? `${result.context.document.identifier}:${candidate.candidateId}`
+        : candidate.candidateId,
+    })),
+  );
+  const classification = allResults.flatMap((result) =>
+    result.diagnostics.classification.map((candidate) => ({
+      ...candidate,
+      candidateId: multiContext
+        ? `${result.context.document.identifier}:${candidate.candidateId}`
+        : candidate.candidateId,
+    })),
+  );
+  const requestedDiagnostics = requestedResult.diagnostics;
+  const requestedAtomicity = requestedDiagnostics.atomicity;
+  if (requestedAtomicity === null) {
+    return yield* new DecisionModelError({
+      stage: "selection",
+      reason: "The requested RFC context did not produce atomicity diagnostics",
+    });
+  }
   const diagnostics = {
     schemaVersion: 1 as const,
     policyVersion: policy.policyVersion,
     requestedModel: options.modelAlias,
-    resolvedModel,
+    resolvedModel: yield* Ref.get(resolvedModelRef),
     usage: {
       inputTokens: usage.inputTokens ?? null,
       outputTokens: usage.outputTokens ?? null,
     },
     timings: {
+      ...timings,
       catalogMs: options.catalogMs,
-      sourceMs: elapsed(sourceStarted, sourceFinished),
-      lexicalMs: elapsed(lexicalStarted, lexicalFinished),
-      selectionMs: elapsed(selectionStarted, selectionFinished),
-      relationMs: elapsed(relationStarted, relationFinished),
       totalMs: elapsed(options.startedAt, finishedAt),
-      documentMs: undefined,
     },
-    source: sourceDiagnostic(source),
-    sources: undefined,
+    source: requestedSource,
+    sources: sourceDiagnostics,
     catalog: options.catalogStatus,
-    candidates: {
-      sourceBlocks: blocks.length,
-      passageCandidates: candidates.length,
-      selectedPassages: selection.selected.length,
-      catalogDocuments: undefined,
-      documentCandidates: undefined,
-      acceptedDocuments: undefined,
-    },
-    atomicity: {
-      label: selection.atomicity.label,
-      probabilities: selection.atomicity.probabilities,
-      confidence: selection.atomicity.confidence ?? null,
-    },
+    currency: report,
+    candidates,
+    atomicity: requestedAtomicity,
     documentSelection: undefined,
-    selection: selection.diagnostics,
-    classification: relation.diagnostics,
+    selection,
+    classification,
+    contexts: contextDiagnostics,
   } satisfies ResearchDiagnostics;
 
   return Schema.decodeUnknownSync(EvidenceBundleSchema)({
@@ -1511,7 +2361,9 @@ export const researchKnownRfc = Effect.fnUntraced(function* (
     kind: "evidence_bundle",
     status,
     question,
-    rfc: document,
+    rfc: requested,
+    contexts,
+    currency: report,
     evidence,
     diagnostics,
   });
@@ -1626,6 +2478,8 @@ export const researchTopic = Effect.fnUntraced(function* (
     sourceContexts.push({
       document: accepted.document,
       source: yield* loadRfcSource(accepted.document, options.sourceDirectory),
+      context: "requested",
+      relationshipPath: [],
     });
   }
   const sourceFinished = yield* Clock.currentTimeMillis;

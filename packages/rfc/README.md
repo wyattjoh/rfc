@@ -28,6 +28,8 @@ When standard input contains non-whitespace input, it is authoritative and conve
 
 Research refreshes a missing or stale catalog, then reads authoritative RFC Editor plain text through a content-addressed cache and returns a versioned evidence bundle. Known-RFC research uses two semantic stages. Topic-only research lexically shortlists catalog identifiers, titles, and abstracts, uses one independent document-probability decision per candidate, and advances only bounded accepted documents through passage selection and answer-relation verification. Each evidence passage contains an exact quote, absolute UTF-8 byte offsets into the SHA-256 source, the declared `offsetUnit: "utf8-byte"`, canonical URLs, and a nullable best-effort section label. Bundle diagnostics include source hashes and fetch times, lexical and semantic candidate counts, accepted document probabilities, requested and provider-resolved model identifiers, token usage, probabilities, confidence, catalog freshness, and stage timings.
 
+Known-RFC currency research never silently replaces the requested RFC: update and obsoletion relationships are traversed deterministically with bounded, cycle-safe paths, and terminal current RFC contexts are researched independently. Requested/current evidence retains context-aware provenance and diagnostics. Incomplete successor coverage is reported as `partial` or `needs_review`; changed or ambiguous normative wording is not accepted as compatible.
+
 Citation verification accepts canonical JSON with an RFC identifier, factual claim, exact quotation, and optional offset:
 
 ```json

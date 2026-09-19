@@ -12,6 +12,14 @@ _Avoid_: Compound question, broad prompt
 The local collection of published RFC metadata used to discover documents and understand update or obsoletion relationships.
 _Avoid_: Index, registry
 
+**RFC currency**:
+The bounded, deterministic traversal from a requested RFC through update and obsoletion relationships to applicable current RFC contexts.
+_Avoid_: Replacement, latest-document substitution
+
+**RFC context**:
+The requested or applicable current published RFC whose exact source text is researched independently for one evidence bundle.
+_Avoid_: Source alias, version
+
 **Document candidate**:
 A published RFC that remains plausible evidence for an atomic question after catalog discovery.
 _Avoid_: Search result, source
