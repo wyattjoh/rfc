@@ -4,12 +4,15 @@ The private `rfc` package exposes the RFC evidence engine's agent-facing CLI.
 
 ## Process protocol
 
-`catalog status` writes a versioned JSON response to standard output by default:
+Catalog commands write versioned JSON responses to standard output by default:
 
 ```sh
 rfc catalog status
-rfc catalog status --format human
+rfc catalog refresh
+rfc catalog refresh --format human
 ```
+
+`catalog refresh` follows the paginated Datatracker RFC and relationship APIs, then atomically replaces the local version-one catalog. A failed refresh leaves the previous cache untouched. `catalog status` reports missing, fresh, or stale state, the cache identity, fetch time, age, and document count.
 
 Research accepts canonical JSON on standard input:
 

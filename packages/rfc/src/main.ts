@@ -23,6 +23,11 @@ const cacheDirectory = Flag.String("cache-directory").pipe(
   Flag.withDefault(defaultCacheDirectory),
 );
 
+const datatrackerApiUrl = Flag.String("datatracker-api-url").pipe(
+  Flag.withDescription("Datatracker API base URL used for catalog refresh"),
+  Flag.optional,
+);
+
 const writeStdout = (value: string): Effect.Effect<void> =>
   Effect.sync(() => {
     process.stdout.write(`${value}\n`);
@@ -58,6 +63,10 @@ const catalogStatusCommand = Command.make(
     if (format === "human") {
       yield* writeStdout(`Catalog: ${status.state}`);
       yield* writeStdout(`Path: ${status.catalogPath}`);
+      yield* writeStdout(`Cache: ${status.cacheIdentity}`);
+      yield* writeStdout(`Fetched: ${status.refreshedAt ?? "never"}`);
+      yield* writeStdout(`Age: ${status.ageMs ?? "unknown"}`);
+      yield* writeStdout(`Documents: ${status.documentCount}`);
       return;
     }
 
@@ -65,9 +74,49 @@ const catalogStatusCommand = Command.make(
   }),
 ).pipe(Command.withDescription("Inspect local RFC metadata catalog freshness"));
 
+const catalogRefreshCommand = Command.make(
+  "refresh",
+  {
+    cacheDirectory,
+    datatrackerApiUrl,
+    format,
+  },
+  Effect.fn(function* ({ cacheDirectory, datatrackerApiUrl, format }) {
+    const client = yield* Effect.tryPromise({
+      try: () =>
+        createRfcClient({
+          cacheDirectory,
+          catalogPath: undefined,
+          datatrackerApiUrl: Option.getOrUndefined(datatrackerApiUrl),
+          modelAlias: undefined,
+          typeSafeApiKey: undefined,
+          typeSafeApiUrl: undefined,
+        }),
+      catch: (error) => error,
+    });
+
+    const result = yield* Effect.acquireUseRelease(
+      Effect.succeed(client),
+      (activeClient) =>
+        Effect.tryPromise({ try: () => activeClient.catalogRefresh(), catch: (error) => error }),
+      (activeClient) =>
+        Effect.tryPromise({ try: () => activeClient.close(), catch: (error) => error }),
+    );
+
+    if (format === "human") {
+      yield* writeStdout(`Catalog: ${result.state}`);
+      yield* writeStdout(`Path: ${result.catalogPath}`);
+      yield* writeStdout(`Documents: ${result.documentCount}`);
+      return;
+    }
+
+    yield* writeStdout(JSON.stringify(result));
+  }),
+).pipe(Command.withDescription("Refresh the local RFC metadata catalog"));
+
 const catalogCommand = Command.make("catalog").pipe(
   Command.withDescription("Manage the local RFC metadata catalog"),
-  Command.withSubcommands([catalogStatusCommand]),
+  Command.withSubcommands([catalogStatusCommand, catalogRefreshCommand]),
 );
 
 const question = Flag.String("question").pipe(

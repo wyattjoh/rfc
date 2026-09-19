@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
+  CatalogRefreshError,
   RfcClientClosedError,
   createRfcClient,
   toErrorEnvelope,
@@ -34,8 +35,11 @@ describe("createRfcClient", () => {
       kind: "catalog_status",
       state: "missing",
       catalogPath: join(cacheDirectory, "catalog.json"),
+      cacheIdentity: "rfc-catalog-v1",
+      fetchedAt: null,
       refreshedAt: null,
       ageMs: null,
+      documentCount: 0,
     });
 
     await rm(cacheDirectory, { recursive: true, force: true });
@@ -81,6 +85,23 @@ describe("createRfcClient", () => {
       error: {
         code: "client_closed",
         message: "The RFC client is already closed",
+      },
+    });
+
+    expect(
+      toErrorEnvelope(
+        new CatalogRefreshError({
+          stage: "decode",
+          url: "https://datatracker.example/api/v1/doc/document/",
+          reason: "Malformed response",
+        }),
+      ),
+    ).toEqual({
+      schemaVersion: 1,
+      kind: "error",
+      error: {
+        code: "catalog_refresh_failed",
+        message: "Unable to refresh catalog: Malformed response",
       },
     });
   });

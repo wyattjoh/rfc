@@ -1,7 +1,9 @@
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+
+const servers: Array<ReturnType<typeof Bun.serve>> = [];
 
 const repositoryRoot = join(import.meta.dir, "../../..");
 
@@ -35,6 +37,12 @@ const runCli = async (
   return { exitCode, stdout, stderr };
 };
 
+afterEach(() => {
+  for (const server of servers.splice(0)) {
+    server.stop(true);
+  }
+});
+
 describe("rfc process protocol", () => {
   test("writes a versioned catalog status response to stdout", async () => {
     const cacheDirectory = await mkdtemp(join(tmpdir(), "rfc-cli-test-"));
@@ -46,8 +54,64 @@ describe("rfc process protocol", () => {
       kind: "catalog_status",
       state: "missing",
       catalogPath: join(cacheDirectory, "catalog.json"),
+      cacheIdentity: "rfc-catalog-v1",
+      fetchedAt: null,
       refreshedAt: null,
       ageMs: null,
+      documentCount: 0,
+    });
+    expect(result.stderr).toBe("");
+  });
+
+  test("refreshes the catalog through the JSON process protocol", async () => {
+    const cacheDirectory = await mkdtemp(join(tmpdir(), "rfc-cli-refresh-test-"));
+    const server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        const url = new URL(request.url);
+        if (url.pathname.endsWith("/document/")) {
+          return Response.json({
+            meta: { limit: 500, offset: 0, total_count: 1, next: null, previous: null },
+            objects: [
+              {
+                name: "rfc9110",
+                rfc_number: 9110,
+                title: "HTTP Semantics",
+                abstract: "HTTP semantics.",
+                resource_uri: "/api/v1/doc/document/rfc9110/",
+                stream: "/api/v1/name/streamname/ietf/",
+                states: [],
+              },
+            ],
+          });
+        }
+        if (url.pathname.endsWith("/relateddocument/")) {
+          return Response.json({
+            meta: { limit: 500, offset: 0, total_count: 0, next: null, previous: null },
+            objects: [],
+          });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    servers.push(server);
+
+    const result = await runCli([
+      "catalog",
+      "refresh",
+      "--cache-directory",
+      cacheDirectory,
+      "--datatracker-api-url",
+      `${server.url}api/v1/`,
+    ]);
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      schemaVersion: 1,
+      kind: "catalog_refresh",
+      state: "fresh",
+      documentCount: 1,
+      cacheIdentity: "rfc-catalog-v1",
     });
     expect(result.stderr).toBe("");
   });
