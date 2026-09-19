@@ -454,7 +454,7 @@ export const makeLiveRfcSourceLayer = (fetcher: RfcSourceFetcher): Layer.Layer<L
 
 const readEntry = Effect.fnUntraced(function* (
   sourceDirectory: string,
-  document: RfcMetadata,
+  document: Pick<RfcMetadata, "identifier" | "rfcNumber">,
 ): Effect.fn.Return<
   { readonly entry: LiveSourceCacheEntry | undefined; readonly corrupt: boolean },
   RfcSourceCacheError,
@@ -574,6 +574,57 @@ const removeEntry = Effect.fnUntraced(function* (
           ),
     ),
   );
+});
+
+/**
+ * Inspect one named RFC source-cache entry without network access.
+ *
+ * @param sourceDirectory Root source-cache directory.
+ * @param identifier Canonical RFC identifier.
+ * @param rfcNumber Positive RFC number matching the identifier.
+ * @returns Whether the named entry exists and passes all cache integrity checks.
+ */
+export const hasLiveRfcSourceCacheEntry = Effect.fnUntraced(function* (
+  sourceDirectory: string,
+  identifier: string,
+  rfcNumber: number,
+): Effect.fn.Return<boolean, RfcSourceCacheError, FileSystem.FileSystem | Path.Path> {
+  const { entry } = yield* readEntry(sourceDirectory, { identifier, rfcNumber });
+  return entry !== undefined;
+});
+
+/**
+ * Remove one named RFC source-cache entry without network access.
+ *
+ * @param sourceDirectory Root source-cache directory.
+ * @param identifier Canonical RFC identifier.
+ * @returns Whether the named entry existed before removal.
+ */
+export const removeLiveRfcSourceCacheEntry = Effect.fnUntraced(function* (
+  sourceDirectory: string,
+  identifier: string,
+): Effect.fn.Return<boolean, RfcSourceCacheError, FileSystem.FileSystem | Path.Path> {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const pathService = yield* Path.Path;
+  const path = entryPath(pathService, sourceDirectory, identifier);
+  const exists = yield* fileSystem.stat(path).pipe(
+    Effect.matchEffect({
+      onFailure: (error) =>
+        isNotFound(error)
+          ? Effect.succeed(false)
+          : Effect.fail(
+              new RfcSourceCacheError({
+                stage: "read",
+                sourcePath: path,
+                reason: error.message,
+              }),
+            ),
+      onSuccess: () => Effect.succeed(true),
+    }),
+  );
+  if (!exists) return false;
+  yield* removeEntry(sourceDirectory, identifier);
+  return true;
 });
 
 const sourceFromEntry = (entry: LiveSourceCacheEntry): RfcSource => ({

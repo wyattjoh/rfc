@@ -7,6 +7,7 @@ import {
   defaultCacheDirectory,
   schemaVersion,
   toErrorEnvelope,
+  type RfcClient,
 } from "@wyattjoh/rfc-core";
 import { NodeServices } from "@effect/platform-node";
 import { Console, Effect, Option } from "effect";
@@ -84,6 +85,8 @@ const rfc = Flag.String("rfc").pipe(
   Flag.withDescription("Known RFC identifier for a short interactive request"),
   Flag.optional,
 );
+
+const cacheRfc = Flag.String("rfc").pipe(Flag.withDescription("Named RFC source cache entry"));
 
 const searchTerms = Flag.String("search-term").pipe(
   Flag.withDescription("Ordered topic-discovery term; repeat one to four times"),
@@ -292,6 +295,71 @@ const parseCitationOffset = (value: string): number => {
 const makeApplication = (dependencies: RfcCliDependencies) => {
   const writeStdout = (value: string): Effect.Effect<void> =>
     Effect.sync(() => dependencies.writeStdout(`${value}\n`));
+
+  const withSourceCacheClient = <A>(
+    cacheDirectory: string,
+    use: (client: RfcClient) => Promise<A>,
+  ): Effect.Effect<A, unknown> =>
+    Effect.acquireUseRelease(
+      Effect.tryPromise({
+        try: () =>
+          dependencies.createClient({
+            cacheDirectory,
+            modelAlias: undefined,
+            automaticAnswerActivation: undefined,
+            typeSafeApiKey: undefined,
+            typeSafeApiUrl: undefined,
+          }),
+        catch: (error) => error,
+      }),
+      (client) => Effect.tryPromise({ try: () => use(client), catch: (error) => error }),
+      (client) => Effect.tryPromise({ try: () => client.close(), catch: (error) => error }),
+    );
+
+  const sourceCacheStatusCommand = Command.make(
+    "status",
+    {
+      cacheDirectory,
+      format,
+      rfc: cacheRfc,
+    },
+    Effect.fn(function* ({ cacheDirectory, format, rfc }) {
+      const status = yield* withSourceCacheClient(cacheDirectory, (client) =>
+        client.sourceCacheStatus(rfc),
+      );
+      if (format === "human") {
+        yield* writeStdout(`RFC: ${status.rfc}`);
+        yield* writeStdout(`Cache: ${status.state}`);
+        return;
+      }
+      yield* writeStdout(JSON.stringify(status));
+    }),
+  ).pipe(Command.withDescription("Inspect one RFC source cache entry without network access"));
+
+  const sourceCacheRemoveCommand = Command.make(
+    "remove",
+    {
+      cacheDirectory,
+      format,
+      rfc: cacheRfc,
+    },
+    Effect.fn(function* ({ cacheDirectory, format, rfc }) {
+      const result = yield* withSourceCacheClient(cacheDirectory, (client) =>
+        client.sourceCacheRemove(rfc),
+      );
+      if (format === "human") {
+        yield* writeStdout(`RFC: ${result.rfc}`);
+        yield* writeStdout(`Cache: ${result.removed ? "removed" : "missing"}`);
+        return;
+      }
+      yield* writeStdout(JSON.stringify(result));
+    }),
+  ).pipe(Command.withDescription("Remove one RFC source cache entry without network access"));
+
+  const sourceCacheCommand = Command.make("cache").pipe(
+    Command.withDescription("Manage individually requested RFC source text"),
+    Command.withSubcommands([sourceCacheStatusCommand, sourceCacheRemoveCommand]),
+  );
 
   const verifyCitationCommand = Command.make(
     "verify-citation",
@@ -585,7 +653,12 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
 
   return Command.make("rfc").pipe(
     Command.withDescription("TypeSafe RFC evidence engine"),
-    Command.withSubcommands([authCommand, researchCommand, verifyCitationCommand]),
+    Command.withSubcommands([
+      authCommand,
+      sourceCacheCommand,
+      researchCommand,
+      verifyCitationCommand,
+    ]),
   );
 };
 

@@ -41,19 +41,23 @@ const seedLiveSourceCacheEntry = async (
     readonly text: string;
     readonly fetchedAt: string;
     readonly freshUntil: string;
-    readonly etag?: string;
+    readonly etag?: string | undefined;
+    readonly identifier?: string | undefined;
+    readonly rfcNumber?: number | undefined;
   },
 ): Promise<void> => {
+  const identifier = entry.identifier ?? "RFC9110";
+  const rfcNumber = entry.rfcNumber ?? 9110;
   await mkdir(join(cacheDirectory, "sources", "v2"), { recursive: true });
   await writeFile(
-    join(cacheDirectory, "sources", "v2", "RFC9110.json"),
+    join(cacheDirectory, "sources", "v2", `${identifier}.json`),
     JSON.stringify({
       schemaVersion: 2,
       kind: "rfc_source_cache_entry",
       cacheIdentity: "rfc-source-v2",
-      identifier: "RFC9110",
-      rfcNumber: 9110,
-      sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+      identifier,
+      rfcNumber,
+      sourceUrl: `https://www.rfc-editor.org/rfc/rfc${rfcNumber}.txt`,
       text: entry.text,
       contentHash: hashRfcSource(entry.text),
       etag: entry.etag ?? '"fixture"',
@@ -200,11 +204,71 @@ describe("createRfcClient", () => {
     expect("catalogStatus" in client).toBe(false);
     expect("catalogRefresh" in client).toBe(false);
     expect("prefetchSources" in client).toBe(false);
+    expect(client.sourceCacheStatus).toBeFunction();
+    expect(client.sourceCacheRemove).toBeFunction();
     expect("RfcDiscovery" in PublicApi).toBe(false);
     expect("LiveRfcSource" in PublicApi).toBe(false);
     expect("RfcSourceServiceTag" in PublicApi).toBe(false);
     expect("makeRfcSourceHttpLayer" in PublicApi).toBe(false);
     expect("researchKnownRfc" in PublicApi).toBe(false);
+
+    await rm(cacheDirectory, { recursive: true, force: true });
+  });
+
+  test("inspects and removes only one named source-cache entry without network access", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const fetchedAt = new Date(0).toISOString();
+    const freshUntil = new Date(60_000).toISOString();
+    await seedLiveSourceCacheEntry(cacheDirectory, { text: sourceText, fetchedAt, freshUntil });
+    await seedLiveSourceCacheEntry(cacheDirectory, {
+      text: sourceText.replace("target", "selected"),
+      fetchedAt,
+      freshUntil,
+      identifier: "RFC9111",
+      rfcNumber: 9111,
+    });
+    let networkRequests = 0;
+    const networkClient = HttpClient.make((request) => {
+      networkRequests += 1;
+      return Effect.succeed(
+        HttpClientResponse.fromWeb(request, new Response("network access was not expected")),
+      );
+    });
+    const client = await createRfcClient({
+      cacheDirectory,
+      datatrackerHttpClient: networkClient,
+      rfcSourceHttpClient: networkClient,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      decisionModel: makeDecisionModel(),
+    });
+    clients.push(client);
+
+    await expect(client.sourceCacheStatus("9110")).resolves.toEqual({
+      schemaVersion: 2,
+      kind: "source_cache_status",
+      rfc: "RFC9110",
+      state: "hit",
+    });
+    await expect(client.sourceCacheStatus("RFC9999")).resolves.toMatchObject({ state: "miss" });
+    await expect(client.sourceCacheStatus("not-an-rfc")).rejects.toBeInstanceOf(InvalidInputError);
+
+    const rfc9110Path = join(cacheDirectory, "sources", "v2", "RFC9110.json");
+    await writeFile(rfc9110Path, "{corrupt");
+    await expect(client.sourceCacheStatus("RFC9110")).resolves.toMatchObject({ state: "miss" });
+    await expect(client.sourceCacheRemove("RFC9110")).resolves.toEqual({
+      schemaVersion: 2,
+      kind: "source_cache_remove",
+      rfc: "RFC9110",
+      removed: true,
+    });
+    await expect(client.sourceCacheRemove("RFC9110")).resolves.toMatchObject({ removed: false });
+    await expect(client.sourceCacheStatus("RFC9111")).resolves.toMatchObject({ state: "hit" });
+    expect(await Bun.file(join(cacheDirectory, "sources", "v2", "RFC9111.json")).exists()).toBe(
+      true,
+    );
+    expect(networkRequests).toBe(0);
 
     await rm(cacheDirectory, { recursive: true, force: true });
   });

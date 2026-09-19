@@ -20,10 +20,12 @@ import { FetchHttpClient, HttpClient } from "effect/unstable/http";
 import { isAcceptedEvaluationReport } from "./evaluation";
 import {
   RfcSourceRevalidationError,
+  hasLiveRfcSourceCacheEntry,
   loadLiveRfcSource,
   makeDefaultLiveRfcSourceLayer,
   makeLiveRfcSourceHttpLayer,
   makeLiveRfcSourceLayer,
+  removeLiveRfcSourceCacheEntry,
   type LiveRfcSourceResult,
 } from "./live-source";
 import {
@@ -468,12 +470,64 @@ export const decodeResearchRequest = (input: unknown): ResearchRequest => {
 };
 
 /**
+ * Local-only status for one named RFC source-cache entry.
+ */
+export interface RfcSourceCacheStatus {
+  /**
+   * Public protocol version.
+   */
+  readonly schemaVersion: typeof schemaVersion;
+  /**
+   * Identifies a source-cache inspection result.
+   */
+  readonly kind: "source_cache_status";
+  /**
+   * Canonical RFC identifier inspected locally.
+   */
+  readonly rfc: string;
+  /**
+   * Whether the named local entry is valid.
+   */
+  readonly state: "hit" | "miss";
+}
+
+/**
+ * Result of removing one named RFC source-cache entry.
+ */
+export interface RfcSourceCacheRemoveResult {
+  /**
+   * Public protocol version.
+   */
+  readonly schemaVersion: typeof schemaVersion;
+  /**
+   * Identifies a source-cache removal result.
+   */
+  readonly kind: "source_cache_remove";
+  /**
+   * Canonical RFC identifier targeted locally.
+   */
+  readonly rfc: string;
+  /**
+   * Whether the named entry existed before removal.
+   */
+  readonly removed: boolean;
+}
+
+/**
  * The public client boundary for RFC evidence operations.
  *
  * The interface intentionally contains Promise-returning methods and plain data
  * types only; Effect remains an implementation detail of the package.
  */
 export interface RfcClient {
+  /**
+   * Inspect one named RFC source-cache entry without network access.
+   */
+  readonly sourceCacheStatus: (rfc: string) => Promise<RfcSourceCacheStatus>;
+  /**
+   * Remove one named RFC source-cache entry without network access.
+   */
+  readonly sourceCacheRemove: (rfc: string) => Promise<RfcSourceCacheRemoveResult>;
   /**
    * Research one topic or known published RFC and return exact evidence.
    */
@@ -608,6 +662,43 @@ const resolveSourceDirectory = Effect.fnUntraced(function* (options: RfcClientOp
   const cacheDirectory = options.cacheDirectory ?? defaultCacheDirectory;
   return options.sourceDirectory ?? path.join(cacheDirectory, "sources");
 });
+
+const normalizeRfcCacheKey = (
+  value: string,
+): { readonly identifier: string; readonly rfcNumber: number } => {
+  const match = /^(?:RFC)?([1-9]\d*)$/i.exec(value.trim());
+  const rfcNumber = match === null ? Number.NaN : Number(match[1]);
+  if (!Number.isSafeInteger(rfcNumber) || rfcNumber <= 0) {
+    throw new InvalidInputError({ reason: "RFC source cache commands require a named RFC" });
+  }
+  return { identifier: `RFC${rfcNumber}`, rfcNumber };
+};
+
+const sourceCacheStatusProgram = (options: RfcClientOptions, rfc: string) =>
+  Effect.gen(function* () {
+    const key = normalizeRfcCacheKey(rfc);
+    const sourceDirectory = yield* resolveSourceDirectory(options);
+    const hit = yield* hasLiveRfcSourceCacheEntry(sourceDirectory, key.identifier, key.rfcNumber);
+    return {
+      schemaVersion,
+      kind: "source_cache_status" as const,
+      rfc: key.identifier,
+      state: hit ? ("hit" as const) : ("miss" as const),
+    };
+  });
+
+const sourceCacheRemoveProgram = (options: RfcClientOptions, rfc: string) =>
+  Effect.gen(function* () {
+    const key = normalizeRfcCacheKey(rfc);
+    const sourceDirectory = yield* resolveSourceDirectory(options);
+    const removed = yield* removeLiveRfcSourceCacheEntry(sourceDirectory, key.identifier);
+    return {
+      schemaVersion,
+      kind: "source_cache_remove" as const,
+      rfc: key.identifier,
+      removed,
+    };
+  });
 
 type LoadedLiveSource = {
   readonly document: import("./catalog").CatalogDocument;
@@ -1165,6 +1256,14 @@ export const createRfcClient = async (
   };
 
   const client: RfcClient = {
+    sourceCacheStatus: async (rfc) => {
+      assertOpen();
+      return runtime.runPromise(sourceCacheStatusProgram(options, rfc));
+    },
+    sourceCacheRemove: async (rfc) => {
+      assertOpen();
+      return runtime.runPromise(sourceCacheRemoveProgram(options, rfc));
+    },
     research: async (request) => {
       assertOpen();
       const decodedRequest = decodeResearchRequest(request);

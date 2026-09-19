@@ -214,6 +214,65 @@ describe("rfc process protocol", () => {
     expect(result.stdout).toBe("");
   });
 
+  test("routes named-RFC cache status and removal through the client facade", async () => {
+    const operations: Array<string> = [];
+    let closed = 0;
+    const createClient = (async () => ({
+      sourceCacheStatus: async (rfc: string) => {
+        operations.push(`status:${rfc}`);
+        return {
+          schemaVersion: 2 as const,
+          kind: "source_cache_status" as const,
+          rfc,
+          state: "hit" as const,
+        };
+      },
+      sourceCacheRemove: async (rfc: string) => {
+        operations.push(`remove:${rfc}`);
+        return {
+          schemaVersion: 2 as const,
+          kind: "source_cache_remove" as const,
+          rfc,
+          removed: true,
+        };
+      },
+      research: async () => stubEvidenceBundle,
+      verifyCitation: async () => {
+        throw new Error("citation verification is not exercised by this test");
+      },
+      close: async () => {
+        closed += 1;
+      },
+    })) as unknown as RfcCliDependencies["createClient"];
+
+    const status = await runCli(
+      ["cache", "status", "--rfc", "RFC9110"],
+      undefined,
+      makeFixtureCredentialStore(),
+      createClient,
+    );
+    const removed = await runCli(
+      ["cache", "remove", "--rfc", "RFC9110", "--format", "human"],
+      undefined,
+      makeFixtureCredentialStore(),
+      createClient,
+    );
+
+    expect(status.exitCode).toBe(0);
+    expect(status.stderr).toBe("");
+    expect(JSON.parse(status.stdout)).toEqual({
+      schemaVersion: 2,
+      kind: "source_cache_status",
+      rfc: "RFC9110",
+      state: "hit",
+    });
+    expect(removed.exitCode).toBe(0);
+    expect(removed.stderr).toBe("");
+    expect(removed.stdout).toBe("RFC: RFC9110\nCache: removed\n");
+    expect(operations).toEqual(["status:RFC9110", "remove:RFC9110"]);
+    expect(closed).toBe(2);
+  });
+
   test("accepts version 2 known-RFC JSON and convenience input", async () => {
     const requests: Array<unknown> = [];
     let closed = 0;
