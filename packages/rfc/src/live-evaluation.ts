@@ -18,6 +18,11 @@ import {
   type EvaluationReportOptions,
 } from "@wyattjoh/rfc-core";
 import { readCliConfig } from "./config";
+import {
+  makeDefaultCredentialStore,
+  resolveStoredCredential,
+  type CredentialStore,
+} from "./credentials";
 import { createRfcCalibrationClient } from "../../rfc-core/src/internal-calibration";
 
 const liveCorpus = {
@@ -189,20 +194,48 @@ const errorKind = (error: unknown): string => {
 };
 
 /**
+ * Injectable dependencies for the opt-in live evaluator.
+ */
+export interface LiveEvaluationOptions {
+  /**
+   * Credential boundary shared with ordinary research and citation commands.
+   */
+  readonly credentialStore: CredentialStore | undefined;
+  /**
+   * Explicit command-level opt-in for a live provider run.
+   */
+  readonly enable: boolean | undefined;
+}
+
+const defaultLiveEvaluationOptions: LiveEvaluationOptions = {
+  credentialStore: undefined,
+  enable: true,
+};
+
+/**
  * Run the opt-in live TypeSafe calibration against authoritative RFC Editor sources.
  *
  * Catalog and source refreshes happen before an untimed pass over every live
  * case and three sequential timed iterations. This warms currency successors
  * and provider-accepted topic sources while preserving a bounded provider call
- * order and excluding catalog refresh from both p95 gates.
+ * order and excluding catalog refresh from both p95 gates. The provider key is
+ * resolved from the same injectable Bun.secrets boundary used by the CLI.
  *
+ * @param options Explicit live-run opt-in and credential boundary.
  * @returns Zero when every precision, safety, latency, and model gate passes;
  * otherwise two.
  */
-export const runLiveEvaluation = async (): Promise<number> => {
+export const runLiveEvaluation = async (
+  runtimeOptions: LiveEvaluationOptions = defaultLiveEvaluationOptions,
+): Promise<number> => {
   let config: ReturnType<typeof readCliConfig>;
   try {
-    config = readCliConfig();
+    config = readCliConfig({
+      liveEvaluation: runtimeOptions.enable,
+      automaticAnswerEnabled: undefined,
+      evaluationCacheDirectory: undefined,
+      evaluationOutput: undefined,
+    });
   } catch (error) {
     throw new ConfigurationError({
       reason:
@@ -211,7 +244,7 @@ export const runLiveEvaluation = async (): Promise<number> => {
   }
   if (!config.liveEvaluation) {
     throw new ConfigurationError({
-      reason: "Live evaluation is disabled; set RFC_LIVE_EVALUATION=true explicitly",
+      reason: "Live evaluation is disabled; pass the explicit live-evaluation opt-in",
     });
   }
   if (
@@ -225,7 +258,7 @@ export const runLiveEvaluation = async (): Promise<number> => {
     });
   }
 
-  let options: EvaluationReportOptions = {
+  let reportOptions: EvaluationReportOptions = {
     origin: "live",
     releaseBuildId: evaluationReleaseAttestation.buildId,
     corpusDigest: evaluationCorpusDigest,
@@ -239,12 +272,15 @@ export const runLiveEvaluation = async (): Promise<number> => {
     maxKnownRfcP95LatencyMilliseconds: undefined,
     maxTopicP95LatencyMilliseconds: undefined,
   };
+  const apiKey = await resolveStoredCredential(
+    runtimeOptions.credentialStore ?? makeDefaultCredentialStore(),
+  );
   const client = await createRfcCalibrationClient({
     cacheDirectory: config.evaluationCacheDirectory,
     catalogPath: undefined,
     modelAlias: config.evaluationModel,
     policyPreset: config.policyPreset,
-    typeSafeApiKey: config.apiKey,
+    typeSafeApiKey: apiKey,
     typeSafeApiUrl: undefined,
   });
 
@@ -269,7 +305,7 @@ export const runLiveEvaluation = async (): Promise<number> => {
         );
         return observationFromCitationResult(evaluationCase, result);
       } catch (error) {
-        return failedEvaluationObservation(evaluationCase, options, errorKind(error));
+        return failedEvaluationObservation(evaluationCase, reportOptions, errorKind(error));
       }
     };
     const warmupObservations = [];
@@ -294,15 +330,15 @@ export const runLiveEvaluation = async (): Promise<number> => {
       for (const hash of observation.sourceHashes) hashes.add(hash);
       sourceHashes.set(evaluationCase.rfc, hashes);
     }
-    options = {
-      ...options,
+    reportOptions = {
+      ...reportOptions,
       authoritativeSourceHashes: Object.fromEntries(
         [...sourceHashes.entries()]
           .sort(([left], [right]) => left.localeCompare(right))
           .map(([identifier, hashes]) => [identifier, [...hashes].sort()]),
       ),
     };
-    const report = await runEvaluation(timedCorpus, evaluateCase, options);
+    const report = await runEvaluation(timedCorpus, evaluateCase, reportOptions);
     const output = `${JSON.stringify(report, null, 2)}\n`;
     await mkdir(dirname(config.evaluationOutput), { recursive: true });
     await writeFile(config.evaluationOutput, output, "utf8");

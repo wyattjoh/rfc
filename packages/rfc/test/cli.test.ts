@@ -10,39 +10,47 @@ import {
   makeEvaluationReport,
 } from "@wyattjoh/rfc-core";
 import { automaticAnswerActivationFor, type RfcCliConfig } from "../src/config";
+import type { CredentialStore } from "../src/credentials";
+import { run } from "../src/main";
 
 const servers: Array<ReturnType<typeof Bun.serve>> = [];
 
 const repositoryRoot = join(import.meta.dir, "../../..");
 const reviewedReleaseReportPath = join(repositoryRoot, ".scratch/rfc-evaluation-report.json");
 
+const makeFixtureCredentialStore = (value: string | null = "fixture-key"): CredentialStore => {
+  let stored = value;
+  return {
+    get: async () => stored,
+    set: async (next) => {
+      stored = next;
+    },
+    delete: async () => {
+      const existed = stored !== null;
+      stored = null;
+      return existed;
+    },
+  };
+};
+
 const runCli = async (
   args: Array<string>,
   input: string | undefined = undefined,
-  environment: NodeJS.ProcessEnv = {
-    ...process.env,
-    TYPESAFE_API_KEY: "fixture-key",
-  },
+  credentialStore: CredentialStore = makeFixtureCredentialStore(),
 ): Promise<{ readonly exitCode: number; readonly stdout: string; readonly stderr: string }> => {
-  const child = Bun.spawn(["bun", "run", "packages/rfc/src/bin.ts", ...args], {
-    cwd: repositoryRoot,
-    stdin: input === undefined ? undefined : "pipe",
-    stdout: "pipe",
-    stderr: "pipe",
-    env: environment,
+  let stdout = "";
+  let stderr = "";
+  const exitCode = await run(args, {
+    credentialStore,
+    readStandardInput: async () => input ?? "",
+    promptCredential: async () => "fixture-key",
+    writeStdout: (value) => {
+      stdout += value;
+    },
+    writeStderr: (value) => {
+      stderr += value;
+    },
   });
-
-  if (input !== undefined && child.stdin !== undefined) {
-    child.stdin.write(input);
-    child.stdin.end();
-  }
-
-  const [exitCode, stdout, stderr] = await Promise.all([
-    child.exited,
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ]);
-
   return { exitCode, stdout, stderr };
 };
 
@@ -335,14 +343,6 @@ describe("rfc process protocol", () => {
         server.url.toString(),
       ],
       JSON.stringify({ schemaVersion: 1, question: "What must the client send?", rfc: "9110" }),
-      {
-        ...process.env,
-        TYPESAFE_API_KEY: "fixture-key",
-        TYPESAFE_MODEL: "jev-1.13.0",
-        RFC_POLICY_PRESET: "precision-v1",
-        RFC_AUTOMATIC_ANSWER_ENABLED: "true",
-        RFC_EVALUATION_OUTPUT: evaluationOutput,
-      },
     );
 
     expect(result.exitCode).toBe(0);
@@ -366,14 +366,6 @@ describe("rfc process protocol", () => {
         "human",
       ],
       JSON.stringify({ schemaVersion: 1, question: "What must the client send?", rfc: "9110" }),
-      {
-        ...process.env,
-        TYPESAFE_API_KEY: "fixture-key",
-        TYPESAFE_MODEL: "jev-1.13.0",
-        RFC_POLICY_PRESET: "precision-v1",
-        RFC_AUTOMATIC_ANSWER_ENABLED: "true",
-        RFC_EVALUATION_OUTPUT: evaluationOutput,
-      },
     );
     expect(human.exitCode).toBe(0);
     expect(human.stderr).toBe("");
@@ -386,7 +378,6 @@ describe("rfc process protocol", () => {
   if (existsSync(reviewedReleaseReportPath)) {
     test("activates the exact measured report only with explicit opt-in", () => {
       const config = {
-        apiKey: "fixture-key",
         modelAlias: "jev-1.13.0",
         policyPreset: "precision-v1",
         evaluationModel: "jev-latest",
@@ -543,13 +534,6 @@ describe("rfc process protocol", () => {
           server.url.toString(),
         ],
         JSON.stringify({ schemaVersion: 1, question: currentCase.question, rfc: "9110" }),
-        {
-          ...process.env,
-          TYPESAFE_API_KEY: "fixture-key",
-          TYPESAFE_MODEL: "jev-1.13.0",
-          RFC_POLICY_PRESET: "precision-v1",
-          RFC_AUTOMATIC_ANSWER_ENABLED: "true",
-        },
       );
 
       expect(result.exitCode).toBe(0);
@@ -641,31 +625,19 @@ describe("rfc process protocol", () => {
       },
     });
     servers.push(server);
-    const environment = {
-      ...process.env,
-      TYPESAFE_API_KEY: "fixture-key",
-      TYPESAFE_MODEL: "jev-1.13.0",
-      RFC_POLICY_PRESET: "precision-v1",
-      RFC_AUTOMATIC_ANSWER_ENABLED: "true",
-    };
-
-    const convenience = await runCli(
-      [
-        "verify-citation",
-        "--cache-directory",
-        cacheDirectory,
-        "--typesafe-api-url",
-        server.url.toString(),
-        "--rfc",
-        "RFC9110",
-        "--claim",
-        "The client sends a request.",
-        "--quote",
-        "The client MUST send a request containing the target resource.",
-      ],
-      undefined,
-      environment,
-    );
+    const convenience = await runCli([
+      "verify-citation",
+      "--cache-directory",
+      cacheDirectory,
+      "--typesafe-api-url",
+      server.url.toString(),
+      "--rfc",
+      "RFC9110",
+      "--claim",
+      "The client sends a request.",
+      "--quote",
+      "The client MUST send a request containing the target resource.",
+    ]);
 
     expect(convenience.exitCode).toBe(0);
     expect(convenience.stderr).toBe("");
@@ -693,7 +665,6 @@ describe("rfc process protocol", () => {
         claim: "The server caches requests.",
         quote: "The server MUST cache requests.",
       }),
-      environment,
     );
 
     expect(fabricated.exitCode).toBe(0);
@@ -719,11 +690,12 @@ describe("rfc process protocol", () => {
     });
   });
 
-  test("contains Varlock failures in the versioned stderr protocol", async () => {
-    const environment = { ...process.env };
-    delete environment.TYPESAFE_API_KEY;
-
-    const result = await runCli(["catalog", "status"], undefined, environment);
+  test("reports a missing credential before constructing a provider", async () => {
+    const result = await runCli(
+      ["research", "--question", "What is HTTP?"],
+      undefined,
+      makeFixtureCredentialStore(null),
+    );
 
     expect(result.exitCode).toBe(1);
     expect(result.stdout).toBe("");
@@ -731,8 +703,8 @@ describe("rfc process protocol", () => {
       schemaVersion: 1,
       kind: "error",
       error: {
-        code: "configuration_error",
-        message: "Unable to load required Varlock configuration",
+        code: "credential_missing",
+        message: "No TypeSafe API key is configured; run `rfc auth add`",
       },
     });
   });

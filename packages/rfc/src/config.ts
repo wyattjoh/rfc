@@ -2,21 +2,20 @@ import { readFileSync } from "node:fs";
 import { Schema } from "effect";
 import {
   automaticAnswerActivationFromReport,
+  evaluationModelAlias,
   evaluationPolicy,
   pinnedJevModel,
 } from "@wyattjoh/rfc-core";
 import type { AutomaticAnswerActivation } from "@wyattjoh/rfc-core";
-import { ENV } from "./env";
 
 /**
- * Schema for configuration consumed by the CLI composition root.
+ * Schema for non-secret configuration consumed by the CLI composition root.
  */
 export const RfcCliConfigSchema = Schema.Struct({
-  apiKey: Schema.String,
   modelAlias: Schema.Literal(pinnedJevModel),
   policyPreset: Schema.Literal(evaluationPolicy.policyVersion),
-  evaluationModel: Schema.NonEmptyString,
-  pinnedModel: Schema.NonEmptyString,
+  evaluationModel: Schema.Literal(evaluationModelAlias),
+  pinnedModel: Schema.Literal(pinnedJevModel),
   liveEvaluation: Schema.Boolean,
   automaticAnswerEnabled: Schema.Boolean,
   evaluationCacheDirectory: Schema.NonEmptyString,
@@ -24,35 +23,82 @@ export const RfcCliConfigSchema = Schema.Struct({
 });
 
 /**
- * Configuration needed by the CLI composition root after Varlock has loaded.
+ * Configuration needed by the CLI composition root after typed defaults are
+ * applied. It contains no provider credential.
  */
 export type RfcCliConfig = Schema.Schema.Type<typeof RfcCliConfigSchema>;
 
 /**
- * Read and validate typed, Varlock-backed configuration without exposing
- * process environment access to the core.
- *
- * @returns The CLI configuration, including the provider credential for wiring.
- * @throws Schema.SchemaError when Varlock does not provide valid configuration.
+ * Explicit non-secret configuration overrides used by the live evaluator and
+ * deterministic callers. Every field is intentionally typed and non-secret.
  */
-export const readCliConfig = (): RfcCliConfig =>
+export interface RfcCliConfigOverrides {
+  /**
+   * Whether the caller explicitly enabled the live evaluator.
+   */
+  readonly liveEvaluation: boolean | undefined;
+  /**
+   * Whether a reviewed calibration report may activate answered results.
+   */
+  readonly automaticAnswerEnabled: boolean | undefined;
+  /**
+   * Directory used for evaluation source caches.
+   */
+  readonly evaluationCacheDirectory: string | undefined;
+  /**
+   * Path used for the sanitized evaluation report.
+   */
+  readonly evaluationOutput: string | undefined;
+}
+
+const defaultConfigValue = {
+  modelAlias: pinnedJevModel,
+  policyPreset: evaluationPolicy.policyVersion,
+  evaluationModel: evaluationModelAlias,
+  pinnedModel: pinnedJevModel,
+  liveEvaluation: false,
+  automaticAnswerEnabled: false,
+  evaluationCacheDirectory: ".scratch/rfc-evaluation-cache",
+  evaluationOutput: ".scratch/rfc-evaluation-report.json",
+} satisfies RfcCliConfig;
+
+const noOverrides: RfcCliConfigOverrides = {
+  liveEvaluation: undefined,
+  automaticAnswerEnabled: undefined,
+  evaluationCacheDirectory: undefined,
+  evaluationOutput: undefined,
+};
+
+/**
+ * The typed non-secret defaults used by ordinary CLI commands.
+ */
+export const defaultCliConfig: RfcCliConfig = Object.freeze(
+  Schema.decodeUnknownSync(RfcCliConfigSchema)(defaultConfigValue),
+);
+
+/**
+ * Read typed non-secret CLI configuration without consulting environment
+ * variables, dotenv files, or a credential store.
+ *
+ * @param overrides Explicit non-secret values supplied by a command or test.
+ * @returns Schema-validated CLI configuration.
+ */
+export const readCliConfig = (overrides: RfcCliConfigOverrides = noOverrides): RfcCliConfig =>
   Schema.decodeUnknownSync(RfcCliConfigSchema)({
-    apiKey: ENV.TYPESAFE_API_KEY,
-    modelAlias: ENV.TYPESAFE_MODEL,
-    policyPreset: ENV.RFC_POLICY_PRESET,
-    evaluationModel: ENV.RFC_EVALUATION_MODEL,
-    pinnedModel: ENV.RFC_PINNED_MODEL,
-    liveEvaluation: ENV.RFC_LIVE_EVALUATION,
-    automaticAnswerEnabled: ENV.RFC_AUTOMATIC_ANSWER_ENABLED,
-    evaluationCacheDirectory: ENV.RFC_EVALUATION_CACHE_DIRECTORY,
-    evaluationOutput: ENV.RFC_EVALUATION_OUTPUT,
+    ...defaultCliConfig,
+    liveEvaluation: overrides.liveEvaluation ?? defaultCliConfig.liveEvaluation,
+    automaticAnswerEnabled:
+      overrides.automaticAnswerEnabled ?? defaultCliConfig.automaticAnswerEnabled,
+    evaluationCacheDirectory:
+      overrides.evaluationCacheDirectory ?? defaultCliConfig.evaluationCacheDirectory,
+    evaluationOutput: overrides.evaluationOutput ?? defaultCliConfig.evaluationOutput,
   });
 
 /**
- * Resolve automatic-answer activation from an explicit environment opt-in and
- * a passing calibration artifact with the current release attestation.
+ * Resolve automatic-answer activation from an explicit opt-in and a passing
+ * calibration artifact with the current release attestation.
  *
- * @param config Validated Varlock-backed CLI configuration.
+ * @param config Validated non-secret CLI configuration.
  * @returns An opaque activation proof, or undefined when activation fails closed.
  */
 export const automaticAnswerActivationFor = (

@@ -48,18 +48,44 @@ Errors are versioned JSON envelopes on standard error and return a nonzero exit 
 
 The opt-in `bun run benchmark:topic` command warms the topic cache, records repeated research timings, reports p95 JSON, and fails when p95 reaches the three-second target. Set `RFC_TOPIC_BENCHMARK=1` and `RFC_CACHE_DIRECTORY` before running it; it never runs as part of the normal test suite.
 
-## Precision calibration
+## Provider credentials
 
-The committed `@wyattjoh/rfc-core` evaluation corpus covers HTTP, TLS, OAuth, and DNS known-RFC research, topic research, currency changes, answer statuses, and citation verdicts, including an actual repeated quotation from RFC 9110. Each expected outcome carries a corpus rationale and an explicit allowed-outcome policy; only the recertified negative, updated-document, fully supported caching, and evidence-backed topic-discovery cases permit bounded alternatives; topic answers still require a document threshold, selected passage, and confident direct relation. The modern normative case remains an exact answered positive control and citation verdicts remain exact. Ambiguous or insufficient evidence stays fail-closed. Deterministic tests use fake Effect services and recorded DecisionModel responses; they never require a provider credential or network access.
+The TypeSafe API key is stored by Bun's experimental `Bun.secrets` API under this stable identity:
 
-Run the live TypeSafe calibration only when explicitly enabled through Varlock:
+- service: `com.wyattjoh.rfc`
+- name: `typesafe-api-key`
+
+Add it interactively with a masked prompt:
 
 ```sh
-RFC_LIVE_EVALUATION=true TYPESAFE_API_KEY=... bun run evaluate:live
+rfc auth add
 ```
 
-The command starts with `RFC_EVALUATION_MODEL=jev-latest`, refreshes the catalog, prefetches corpus sources, and runs an untimed pass over every live case before timing three sequential warm-cache iterations. It records every provider-resolved model and writes a sanitized report to `RFC_EVALUATION_OUTPUT`. The report contains policy/model identity, corpus and policy digests, authoritative source hashes, verdicts, probabilities, confidence, usage, timings, expected outcomes, the research answer rate, citation-only supported-claim coverage, separate status/verdict rates, positive-control status, and gate failures; it never writes prompts, questions, reasoning, or credentials. Precision must be at least 98%, fabricated or contradicted citations cannot be accepted, and p95 must remain strictly below 2 seconds for known-RFC research and 3 seconds for topic research. Automatic `answered` requires `RFC_AUTOMATIC_ANSWER_ENABLED=true` plus a release-bound attestation compiled into the current build: the exact report digest, build identity, corpus/policy digests, authoritative source hashes, and unexpired freshness window must all match. The coordinator-reviewed `rfc-evidence-precision-v4` attestation is accepted for the measured report (`7f2070e5040525f8794d6cee8cc2a4440f00836a2dc079de5c2cb3bcc9ee2f9b`), which recorded precision and supported coverage of 1, zero unsafe citation acceptances, known-RFC/topic p95 latencies of 1696/1111ms, and six RFCs with 19 authoritative source hashes through `2026-10-19T19:20:57.805Z`; any digest, identity, source, model, observation, or expiry mismatch remains fail-closed. The committed production default is the pinned `jev-1.13.0` model, and the live command rejects configuration that does not use the committed `jev-latest` → `jev-1.13.0` pair. Changing the pin requires a new passing evaluation and reviewed release attestation.
+For automation, explicitly pipe the key through standard input. It is never accepted as an argv value:
+
+```sh
+cat /path/to/a-protected-key-input | rfc auth add --stdin
+```
+
+`auth status` reports only whether a key is configured and the service/name identity. `auth remove` is deterministic: its versioned result reports `removed: true` when a key existed and `removed: false` when it was already absent. JSON is the default; add `--format human` only for human-readable output. The key is not included in command output, diagnostics, snapshots, or error envelopes.
+
+Bun maps the store to the host credential service: macOS Keychain, Linux Secret Service (libsecret, such as GNOME Keyring or KWallet), or Windows Credential Manager. Linux requires a running and unlocked Secret Service daemon; macOS requires Keychain access; Windows requires Credential Manager. This repository pins Bun `1.4.2` in `package.json` and tests against that version because `Bun.secrets` is experimental and may change.
+
+To migrate an existing setup, run `rfc auth add`, verify with `rfc auth status`, then delete the obsolete plaintext, `.env`, Varlock, dotenv, or 1Password-backed TypeSafe API-key configuration. Research, citation verification, and live evaluation all resolve this same credential lazily before constructing the provider.
+
+## Precision calibration
+
+The committed `@wyattjoh/rfc-core` evaluation corpus covers HTTP, TLS, OAuth, and DNS known-RFC research, topic research, currency changes, answer statuses, and citation verdicts, including an actual repeated quotation from RFC 9110. Each expected outcome carries a corpus rationale and an explicit allowed-outcome policy; only the recertified negative, updated-document, fully supported caching, and evidence-backed topic-discovery cases permit bounded alternatives; topic answers still require a document threshold, selected passage, and confident direct relation. The modern normative case remains an exact answered positive control and citation verdicts remain exact. Ambiguous or insufficient evidence stays fail-closed. Deterministic tests use injected fake credential and Effect services with recorded DecisionModel responses; they never require a provider credential, the real OS credential manager, or network access.
+
+Run the live TypeSafe calibration only through the explicit evaluator command after storing a credential:
+
+```sh
+rfc auth status
+bun run evaluate:live
+```
+
+The command starts with the typed `jev-latest` alias, refreshes the catalog, prefetches corpus sources, and runs an untimed pass over every live case before timing three sequential warm-cache iterations. It records every provider-resolved model and writes a sanitized report to `.scratch/rfc-evaluation-report.json` by default. The report contains policy/model identity, corpus and policy digests, authoritative source hashes, verdicts, probabilities, confidence, usage, timings, expected outcomes, the research answer rate, citation-only supported-claim coverage, separate status/verdict rates, positive-control status, and gate failures; it never writes prompts, questions, reasoning, or credentials. Precision must be at least 98%, fabricated or contradicted citations cannot be accepted, and p95 must remain strictly below 2 seconds for known-RFC research and 3 seconds for topic research. Automatic `answered` requires explicit enablement plus a release-bound attestation compiled into the current build: the exact report digest, build identity, corpus/policy digests, authoritative source hashes, and unexpired freshness window must all match. The coordinator-reviewed `rfc-evidence-precision-v4` attestation is accepted for the measured report (`7f2070e5040525f8794d6cee8cc2a4440f00836a2dc079de5c2cb3bcc9ee2f9b`), which recorded precision and supported coverage of 1, zero unsafe citation acceptances, known-RFC/topic p95 latencies of 1696/1111ms, and six RFCs with 19 authoritative source hashes through `2026-10-19T19:20:57.805Z`; any digest, identity, source, model, observation, or expiry mismatch remains fail-closed. The committed production default is the pinned `jev-1.13.0` model, and changing the pin requires a new passing evaluation and reviewed release attestation.
 
 ## Configuration
 
-Varlock is loaded and validated before the application module for every command. The committed `.env.schema` declares the sensitive required `TYPESAFE_API_KEY` and defaults `RFC_AUTOMATIC_ANSWER_ENABLED` to false. Even with the accepted release attestation, the flag must be explicitly enabled and the local report must match every release-bound identity; missing, stale, or tampered artifacts remain fail-closed and report `needs_review`. Catalog status does not make a provider request, but it still requires the validated configuration boundary. Missing configuration is reported as a versioned JSON error envelope. Bun's automatic dotenv loading is disabled in `bunfig.toml`.
+Non-secret model, policy, evaluation, cache, output, and automatic-answer settings use typed defaults in the CLI composition root. They are not loaded from Varlock, dotenv, `.env` files, or ordinary environment variables. `bunfig.toml` disables Bun dotenv loading. Use explicit CLI flags for command-specific values such as cache and provider URLs; the credential store is the only authority for the TypeSafe API key. Even with the accepted release attestation, automatic answering must be explicitly enabled and the local report must match every release-bound identity; missing, stale, or tampered artifacts remain fail-closed and report `needs_review`.

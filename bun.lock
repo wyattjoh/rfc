@@ -20,7 +20,6 @@
         "@effect/platform-node": "4.0.0-rc.116",
         "@wyattjoh/rfc-core": "workspace:*",
         "effect": "4.0.0-rc.116",
-        "varlock": "1.20.0",
       },
       "devDependencies": {
         "@types/bun": "1.4.2",
@@ -141,14 +140,6 @@
 
     "@types/ws": ["@types/ws@8.18.1", "", { "dependencies": { "@types/node": "*" } }, "sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg=="],
 
-    "@varlock/native-helper-darwin": ["@varlock/native-helper-darwin@1.20.0", "", { "os": "darwin" }, "sha512-+AidNOGpJ63+CifPsg0wCPLaCwOunoHCazWIPekTnujzk4HTVB1iowLsWBOaAfLq6TDeSKSis2gk7M9oSlcKNA=="],
-
-    "@varlock/native-helper-linux-arm64": ["@varlock/native-helper-linux-arm64@1.20.0", "", { "os": "linux", "cpu": "arm64" }, "sha512-W7dxyWkEuzFf+qOKNHqs5j0QOy0vW/zXrusS9i0Zt4l4oP6u0hwWqS8xV2ww6KiG2SrV+Dvrn/23fh4kTE/cCA=="],
-
-    "@varlock/native-helper-linux-x64": ["@varlock/native-helper-linux-x64@1.20.0", "", { "os": "linux", "cpu": "x64" }, "sha512-6N6w87D4ByujoVRz0hxFH/VXNOmr9rXnp+WDdzxHa2FZirmy31wW3LoiPjIXrmriNZ9p2C5JseECEDBKsnwQcg=="],
-
-    "@varlock/native-helper-win32-x64": ["@varlock/native-helper-win32-x64@1.20.0", "", { "os": [ "linux", "win32", ] }, "sha512-mDH00lx2h+dWmbARTnfmRu321SuZigKslUdX7dAn0/7+psShiFCx6QEWLjjyZgDPSCGVNbIM3JArC40vCTXJjw=="],
-
     "@wyattjoh/rfc": ["@wyattjoh/rfc@workspace:packages/rfc"],
 
     "@wyattjoh/rfc-core": ["@wyattjoh/rfc-core@workspace:packages/rfc-core"],
@@ -196,8 +187,6 @@
     "undici": ["undici@8.10.2", "", {}, "sha512-/y4/bH9YNU5hi9NIrpOuvGXFcxrj3CMrV+/AYpowAYTpHn8gX/XPFjNy766FPoYY0miQhdW977JFWKGNhBdwyQ=="],
 
     "undici-types": ["undici-types@8.9.0", "", {}, "sha512-KTDyRTYX8sWmKXAikPHHSyc63CRPETMctyjKFupcC6OBLXT3xsN0e9aF7m+mIXutFWpUXuedtowG7iLOzp0kQg=="],
-
-    "varlock": ["varlock@1.20.0", "", { "optionalDependencies": { "@varlock/native-helper-darwin": "1.20.0", "@varlock/native-helper-linux-arm64": "1.20.0", "@varlock/native-helper-linux-x64": "1.20.0", "@varlock/native-helper-win32-x64": "1.20.0" }, "bin": { "varlock": "bin/cli.js" } }, "sha512-MA5idJKpaQ36d90OxY4gWwWzdVKle6YUq3OI58o/j5ImCz3m8DFmonGbvixyFRhmm7sQeGcNyo8hBHc3kVLNqw=="],
 
     "ws": ["ws@8.21.3", "", { "peerDependencies": { "bufferutil": "^4.0.1", "utf-8-validate": ">=5.0.2" }, "optionalPeers": ["bufferutil", "utf-8-validate"] }, "sha512-201TZ/kPWxoPr/OKWjquZR1SWKXcvxdH+e1xrx89b3YbmzLMFCLfnaG1HFIgWzJOEWZ7MvpK++odZufgYR50Rw=="],
   }

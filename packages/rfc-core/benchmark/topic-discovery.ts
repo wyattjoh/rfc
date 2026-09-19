@@ -1,5 +1,6 @@
 import { performance } from "node:perf_hooks";
 import { createRfcClient, evaluationPolicy, pinnedJevModel } from "../src/index";
+import { makeDefaultCredentialStore, resolveStoredCredential } from "../../rfc/src/credentials";
 
 const parsePositiveInteger = (value: string | undefined, fallback: number): number => {
   const parsed = value === undefined ? Number.NaN : Number(value);
@@ -21,13 +22,14 @@ const main = async (): Promise<void> => {
   const targetMs = evaluationPolicy.maxTopicP95LatencyMilliseconds;
   const question =
     process.env.RFC_TOPIC_BENCHMARK_QUESTION ?? "What does HTTP require of a client?";
+  const typeSafeApiKey = await resolveStoredCredential(makeDefaultCredentialStore());
   const client = await createRfcClient({
     cacheDirectory,
     catalogPath: undefined,
     modelAlias: pinnedJevModel,
     policyPreset: evaluationPolicy.policyVersion,
     automaticAnswerActivation: undefined,
-    typeSafeApiKey: process.env.TYPESAFE_API_KEY,
+    typeSafeApiKey,
     typeSafeApiUrl: process.env.TYPESAFE_API_URL,
   });
 

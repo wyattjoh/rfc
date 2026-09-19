@@ -1,17 +1,15 @@
 #!/usr/bin/env bun
 
-import { join } from "node:path";
-import { loadVarlock } from "./varlock-bootstrap";
+import { runLiveEvaluation } from "./live-evaluation";
+import { toCliErrorEnvelope } from "./main";
 
-if (await loadVarlock(join(import.meta.dir, "../../.."))) {
-  const { runLiveEvaluation } = await import("./live-evaluation");
-  try {
-    process.exitCode = await runLiveEvaluation();
-  } catch (error) {
-    const { toErrorEnvelope } = await import("@wyattjoh/rfc-core");
-    process.stderr.write(`${JSON.stringify(toErrorEnvelope(error))}\n`);
-    process.exitCode = 1;
-  }
-} else {
+try {
+  // Invoking this dedicated binary is the explicit live-evaluation opt-in.
+  process.exitCode = await runLiveEvaluation({
+    credentialStore: undefined,
+    enable: true,
+  });
+} catch (error) {
+  process.stderr.write(`${JSON.stringify(toCliErrorEnvelope(error))}\n`);
   process.exitCode = 1;
 }

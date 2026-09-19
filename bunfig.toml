@@ -1,2 +1,2 @@
-# Varlock is the sole environment authority for the CLI.
+# Keep dotenv files out of the CLI process; credentials use Bun.secrets.
 env = false

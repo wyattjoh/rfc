@@ -216,7 +216,7 @@ export class InvalidInputError extends Schema.TaggedError<InvalidInputError>()(
 ) {}
 
 /**
- * Signals that the CLI configuration could not be read after Varlock activation.
+ * Signals that the CLI's typed non-secret configuration could not be read.
  */
 export class ConfigurationError extends Schema.TaggedError<ConfigurationError>()(
   "ConfigurationError",
@@ -264,6 +264,11 @@ export type ErrorCode =
   | "policy_error"
   | "invalid_input"
   | "configuration_error"
+  | "credential_missing"
+  | "credential_store_unavailable"
+  | "credential_access_denied"
+  | "credential_storage_failed"
+  | "credential_deletion_failed"
   | "internal_error";
 
 const ErrorCodeSchema = Schema.Literals([
@@ -282,6 +287,11 @@ const ErrorCodeSchema = Schema.Literals([
   "policy_error",
   "invalid_input",
   "configuration_error",
+  "credential_missing",
+  "credential_store_unavailable",
+  "credential_access_denied",
+  "credential_storage_failed",
+  "credential_deletion_failed",
   "internal_error",
 ]);
 
