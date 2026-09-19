@@ -25,7 +25,6 @@ const main = async (): Promise<void> => {
   const typeSafeApiKey = await resolveStoredCredential(makeDefaultCredentialStore());
   const client = await createRfcClient({
     cacheDirectory,
-    catalogPath: undefined,
     modelAlias: pinnedJevModel,
     policyPreset: evaluationPolicy.policyVersion,
     automaticAnswerActivation: undefined,
@@ -34,11 +33,11 @@ const main = async (): Promise<void> => {
   });
 
   try {
-    await client.research({ schemaVersion: 1, question, rfc: null });
+    await client.research({ schemaVersion: 2, question, rfc: null, searchTerms: [question] });
     const samples: Array<number> = [];
     for (let index = 0; index < iterations; index += 1) {
       const startedAt = performance.now();
-      await client.research({ schemaVersion: 1, question, rfc: null });
+      await client.research({ schemaVersion: 2, question, rfc: null, searchTerms: [question] });
       samples.push(performance.now() - startedAt);
     }
 

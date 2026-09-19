@@ -18,26 +18,21 @@ import {
   hashRfcSource,
   makeRfcSourceHttpLayer,
   parseSourceBlocks,
-  type RfcClient,
+  type EvidenceBundle,
   type RfcClientOptions,
   type RfcSourceFetcher,
 } from "../src/index";
 import type * as Decision from "effect/unstable/ai/Decision";
-import { createRfcCalibrationClient as createCalibrationRfcClient } from "../src/internal-calibration";
+import {
+  createRfcCalibrationClient as createCalibrationRfcClient,
+  type RfcCalibrationClientOptions,
+} from "../src/internal-calibration";
 
-const clients: Array<RfcClient> = [];
-type TestClientOptions = Omit<RfcClientOptions, "automaticAnswerActivation"> & {
-  readonly automaticAnswerActivation?: RfcClientOptions["automaticAnswerActivation"];
-};
-const createRfcClient = (options: TestClientOptions) =>
-  options.automaticAnswerActivation === undefined
-    ? createCalibrationRfcClient(options)
-    : createCoreRfcClient({
-        ...options,
-        automaticAnswerActivation: options.automaticAnswerActivation,
-      });
+const clients: Array<{ readonly close: () => Promise<void> }> = [];
+type TestClientOptions = RfcCalibrationClientOptions;
+const createRfcClient = (options: TestClientOptions) => createCalibrationRfcClient(options);
 
-type ResearchResult = Awaited<ReturnType<RfcClient["research"]>>;
+type ResearchResult = EvidenceBundle;
 type CurrencyReport = NonNullable<ResearchResult["currency"]>;
 type ContextDiagnostics = NonNullable<ResearchResult["diagnostics"]["contexts"]>;
 type ContextSource = Extract<
@@ -347,6 +342,29 @@ const makeSourceFetcher =
     text,
   });
 
+const makeCurrentRfcDatatrackerClient = (): HttpClient.HttpClient =>
+  HttpClient.make((request, url) =>
+    Effect.succeed(
+      HttpClientResponse.fromWeb(
+        request,
+        url.pathname.endsWith("/relateddocument/")
+          ? Response.json({
+              meta: { limit: 64, offset: 0, total_count: 0, next: null },
+              objects: [],
+            })
+          : Response.json({
+              name: "rfc9110",
+              rfc_number: 9110,
+              title: "HTTP Semantics",
+              abstract: "HTTP semantics.",
+              resource_uri: "/api/v1/doc/document/rfc9110/",
+              stream: "/api/v1/name/streamname/ietf/",
+              states: [],
+            }),
+      ),
+    ),
+  );
+
 const makeTypeSafeHttpClient = (models: ReadonlyArray<string> = ["jev-1.13.0"]) => {
   let calls = 0;
   const client = HttpClient.make((request) => {
@@ -407,13 +425,12 @@ describe("known RFC research", () => {
     // calibration-only constructor used by the fixture helper below.
     const client = await createCoreRfcClient({
       cacheDirectory,
-      catalogPath: undefined,
       modelAlias: "jev-test",
       policyPreset: "precision-v1",
       automaticAnswerActivation: undefined,
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      catalogSource: async () => [catalogDocument],
+      datatrackerHttpClient: makeCurrentRfcDatatrackerClient(),
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       decisionModel: makeDecisionModel([]),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
@@ -421,9 +438,10 @@ describe("known RFC research", () => {
     clients.push(client);
 
     const result = await client.research({
-      schemaVersion: 1,
+      schemaVersion: 2,
       question: "What must the client send?",
       rfc: "RFC9110",
+      searchTerms: undefined,
     });
 
     expect(result.status).toBe("needs_review");
@@ -433,13 +451,12 @@ describe("known RFC research", () => {
     const cacheDirectory = await makeCacheDirectory();
     const client = await createCoreRfcClient({
       cacheDirectory,
-      catalogPath: undefined,
       modelAlias: "jev-test",
       policyPreset: "precision-v1",
       automaticAnswerActivation: {} as RfcClientOptions["automaticAnswerActivation"],
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      catalogSource: async () => [catalogDocument],
+      datatrackerHttpClient: makeCurrentRfcDatatrackerClient(),
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       decisionModel: makeDecisionModel([]),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
@@ -447,9 +464,10 @@ describe("known RFC research", () => {
     clients.push(client);
 
     const result = await client.research({
-      schemaVersion: 1,
+      schemaVersion: 2,
       question: "What must the client send?",
       rfc: "RFC9110",
+      searchTerms: undefined,
     });
 
     expect(result.status).toBe("needs_review");

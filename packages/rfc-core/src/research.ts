@@ -15,6 +15,7 @@ import * as AiError from "effect/unstable/ai/AiError";
 import * as Decision from "effect/unstable/ai/Decision";
 import * as DecisionModel from "effect/unstable/ai/DecisionModel";
 import { LiveRetrievalTraceSchema } from "./discovery";
+import { LiveRfcSource, RfcSourceRevalidationError } from "./live-source";
 import { makeUtf8OffsetMap, moveToUtf8Boundary, utf8OffsetUnit } from "./offsets";
 import { isAutomaticAnswerActivation, type AutomaticAnswerActivation } from "./activation";
 import {
@@ -502,6 +503,22 @@ export interface KnownRfcResearchOptions {
    * Start timestamp for the complete operation.
    */
   readonly startedAt: number;
+  /**
+   * Optional request-local source loader used by schema-version-two research.
+   */
+  readonly sourceLoader?:
+    | ((
+        document: CatalogDocument,
+      ) => Effect.Effect<
+        RfcSource,
+        RfcSourceCacheError | RfcSourceFetchError | RfcSourceRevalidationError,
+        FileSystem.FileSystem | LiveRfcSource
+      >)
+    | undefined;
+  /**
+   * Optional preordered live-discovery candidates for topic research.
+   */
+  readonly documentCandidates?: ReadonlyArray<CatalogDocument> | undefined;
 }
 
 interface LineRecord {
@@ -597,9 +614,6 @@ type RelationResult = {
   }>;
   readonly usage: DecisionModel.DecisionUsage;
 };
-
-const errorMessage = (error: unknown): string =>
-  error instanceof Error ? error.message : "The DecisionModel request failed";
 
 type DecisionStage = "document" | "selection" | "relation";
 
@@ -1907,11 +1921,17 @@ const researchContext = Effect.fnUntraced(function* (
   policy: ResearchPolicy,
 ): Effect.fn.Return<
   ContextResearchResult,
-  RfcSourceCacheError | RfcSourceFetchError | DecisionModelError,
-  FileSystem.FileSystem | RfcSourceStore | RfcSourceServiceTag | DecisionModel.DecisionModel
+  RfcSourceCacheError | RfcSourceFetchError | RfcSourceRevalidationError | DecisionModelError,
+  | FileSystem.FileSystem
+  | RfcSourceStore
+  | RfcSourceServiceTag
+  | LiveRfcSource
+  | DecisionModel.DecisionModel
 > {
   const sourceStarted = yield* Clock.currentTimeMillis;
-  const source = yield* loadRfcSource(plannedContext.document, options.sourceDirectory);
+  const source = yield* options.sourceLoader === undefined
+    ? loadRfcSource(plannedContext.document, options.sourceDirectory)
+    : options.sourceLoader(plannedContext.document);
   const sourceFinished = yield* Clock.currentTimeMillis;
   const lexicalStarted = sourceFinished;
   const blocks = parseSourceBlocks(
@@ -2297,6 +2317,7 @@ export const researchKnownRfc = Effect.fnUntraced(function* (
   | RfcNotFoundError
   | RfcSourceCacheError
   | RfcSourceFetchError
+  | RfcSourceRevalidationError
   | DecisionModelError
   | ResearchPolicyError
   | import("./catalog").CatalogReadError
@@ -2304,6 +2325,7 @@ export const researchKnownRfc = Effect.fnUntraced(function* (
   | FileSystem.FileSystem
   | RfcSourceStore
   | RfcSourceServiceTag
+  | LiveRfcSource
   | DecisionModel.DecisionModel
   | ResolvedModelName
   | ResolvedModelNames
@@ -2478,6 +2500,7 @@ export const researchTopic = Effect.fnUntraced(function* (
   EvidenceBundle,
   | RfcSourceCacheError
   | RfcSourceFetchError
+  | RfcSourceRevalidationError
   | DecisionModelError
   | ResearchPolicyError
   | import("./catalog").CatalogReadError
@@ -2485,6 +2508,7 @@ export const researchTopic = Effect.fnUntraced(function* (
   | FileSystem.FileSystem
   | RfcSourceStore
   | RfcSourceServiceTag
+  | LiveRfcSource
   | DecisionModel.DecisionModel
   | ResolvedModelName
   | ResolvedModelNames
@@ -2497,11 +2521,13 @@ export const researchTopic = Effect.fnUntraced(function* (
   const resolvedModelRef = yield* ResolvedModelName;
   const resolvedModelsRef = yield* ResolvedModelNames;
   const documentLexicalStarted = yield* Clock.currentTimeMillis;
-  const documentCandidates = rankDocumentCandidates(
-    options.catalog.documents,
-    question,
-    policy.maxDocumentCandidates,
-  );
+  const documentCandidates =
+    options.documentCandidates === undefined
+      ? rankDocumentCandidates(options.catalog.documents, question, policy.maxDocumentCandidates)
+      : options.documentCandidates.map((document, index, documents) => ({
+          document,
+          lexicalScore: documents.length - index,
+        }));
   const documentLexicalFinished = yield* Clock.currentTimeMillis;
   const documentStarted = documentLexicalFinished;
   const documentSelection = yield* documentSelectionStage(question, documentCandidates, policy);
@@ -2584,7 +2610,9 @@ export const researchTopic = Effect.fnUntraced(function* (
   for (const accepted of documentSelection.accepted) {
     sourceContexts.push({
       document: accepted.document,
-      source: yield* loadRfcSource(accepted.document, options.sourceDirectory),
+      source: yield* options.sourceLoader === undefined
+        ? loadRfcSource(accepted.document, options.sourceDirectory)
+        : options.sourceLoader(accepted.document),
       context: "requested",
       relationshipPath: [],
     });

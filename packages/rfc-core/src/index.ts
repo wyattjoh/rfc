@@ -17,13 +17,23 @@ import {
 import * as DecisionModel from "effect/unstable/ai/DecisionModel";
 import { FetchHttpClient, HttpClient } from "effect/unstable/http";
 import { isAcceptedEvaluationReport } from "./evaluation";
-import { makeArtifactActivation, type AutomaticAnswerActivation } from "./activation";
 import {
-  CatalogReadError,
+  RfcSourceRevalidationError,
+  loadLiveRfcSource,
+  makeDefaultLiveRfcSourceLayer,
+  makeLiveRfcSourceHttpLayer,
+  makeLiveRfcSourceLayer,
+  type LiveRfcSourceResult,
+} from "./live-source";
+import {
+  calibrationAnswerActivation,
+  makeArtifactActivation,
+  type AutomaticAnswerActivation,
+} from "./activation";
+import {
   CatalogRefreshError,
   CatalogStore,
   CatalogStaleError,
-  CatalogWriteError,
   DatatrackerCatalogSource,
   catalogRefreshResultFromValue,
   catalogStatusFromValue,
@@ -33,10 +43,14 @@ import {
   makeCatalogSourceLayer,
   makeDefaultCatalogSourceLayer,
 } from "./catalog";
-import type { CatalogRefreshResult, CatalogSource, CatalogStatus } from "./catalog";
+import type { CatalogSource } from "./catalog";
+import { registerCalibrationOperations } from "./internal-client";
 import {
   RfcDiscovery,
   RfcDiscoveryError,
+  datatrackerCurrencyContextLimit,
+  datatrackerCurrencyDepthLimit,
+  datatrackerSuccessorLimit,
   makeDefaultRfcDiscoveryLayer,
   makeRfcDiscoveryHttpLayer,
 } from "./discovery";
@@ -62,7 +76,6 @@ import type { EvidenceBundle } from "./research";
 import {
   RfcSourceCacheError,
   RfcSourceFetchError,
-  RfcSourceStore,
   defaultRfcEditorBaseUrl,
   loadRfcSource,
   makeRfcSourceUrl,
@@ -73,10 +86,10 @@ import {
 } from "./source";
 import type { RfcSourceFetcher } from "./source";
 
-export * from "./catalog";
 export * from "./citation";
 export * from "./discovery";
 export * from "./evaluation";
+export * from "./live-source";
 export * from "./offsets";
 export * from "./research";
 export * from "./source";
@@ -109,32 +122,23 @@ const defaultCacheDirectoryRoot = (() => {
 /**
  * The version of the public JSON contracts exposed by the RFC evidence engine.
  */
-export const schemaVersion = 1 as const;
+export const schemaVersion = 2 as const;
 
 /**
- * The default directory containing RFC source-cache and legacy catalog data.
+ * The default directory containing cached canonical RFC sources.
  */
 export const defaultCacheDirectory = join(defaultCacheDirectoryRoot, "rfc-evidence-engine");
-
-/**
- * The lifecycle state of the local RFC metadata catalog.
- */
-export type CatalogState = CatalogStatus["state"];
 
 /**
  * Options for constructing an RFC evidence client.
  */
 export interface RfcClientOptions {
   /**
-   * Directory containing the versioned metadata catalog.
+   * Directory containing cached canonical RFC sources.
    */
   readonly cacheDirectory: string | undefined;
   /**
-   * Explicit catalog path, which takes precedence over `cacheDirectory`.
-   */
-  readonly catalogPath: string | undefined;
-  /**
-   * Datatracker API base URL used for live discovery and legacy catalog refresh.
+   * Datatracker API base URL used for live discovery.
    */
   readonly datatrackerApiUrl?: string | undefined;
   /**
@@ -167,18 +171,6 @@ export interface RfcClientOptions {
    */
   readonly now?: (() => number) | undefined;
   /**
-   * Optional normalized source used by deterministic tests instead of Datatracker.
-   */
-  readonly catalogSource?: CatalogSource | undefined;
-  /**
-   * Optional HTTP service used by deterministic catalog-source tests.
-   */
-  readonly catalogHttpClient?: HttpClient.HttpClient | undefined;
-  /**
-   * Optional fetch implementation used by deterministic redirect tests.
-   */
-  readonly catalogFetch?: typeof globalThis.fetch | undefined;
-  /**
    * Optional source fetcher used by deterministic source and provenance tests.
    */
   readonly rfcSourceFetcher?: RfcSourceFetcher | undefined;
@@ -202,6 +194,13 @@ export interface RfcClientOptions {
    * A deterministic DecisionModel replacement for tests and embedded callers.
    */
   readonly decisionModel?: DecisionModel.DecisionModel | undefined;
+}
+
+interface RuntimeClientOptions extends RfcClientOptions {
+  readonly catalogPath?: string | undefined;
+  readonly catalogSource?: CatalogSource | undefined;
+  readonly catalogHttpClient?: HttpClient.HttpClient | undefined;
+  readonly catalogFetch?: typeof globalThis.fetch | undefined;
 }
 
 /**
@@ -244,13 +243,10 @@ export class ConfigurationError extends Schema.TaggedError<ConfigurationError>()
  * The operational errors exposed by the Promise facade.
  */
 export type RfcCoreError =
-  | CatalogReadError
-  | CatalogRefreshError
-  | CatalogStaleError
-  | CatalogWriteError
   | RfcDiscoveryError
   | RfcSourceCacheError
   | RfcSourceFetchError
+  | RfcSourceRevalidationError
   | CitationQuoteAmbiguousError
   | CitationOffsetMismatchError
   | RfcClientClosedError
@@ -265,13 +261,10 @@ export type RfcCoreError =
  * Stable machine-readable error codes emitted by the CLI boundary.
  */
 export type ErrorCode =
-  | "catalog_read_failed"
-  | "catalog_refresh_failed"
-  | "catalog_stale"
-  | "catalog_write_failed"
   | "discovery_failed"
   | "source_cache_failed"
   | "source_fetch_failed"
+  | "source_revalidation_failed"
   | "citation_quote_ambiguous"
   | "citation_offset_mismatch"
   | "client_closed"
@@ -289,13 +282,10 @@ export type ErrorCode =
   | "internal_error";
 
 const ErrorCodeSchema = Schema.Literals([
-  "catalog_read_failed",
-  "catalog_refresh_failed",
-  "catalog_stale",
-  "catalog_write_failed",
   "discovery_failed",
   "source_cache_failed",
   "source_fetch_failed",
+  "source_revalidation_failed",
   "citation_quote_ambiguous",
   "citation_offset_mismatch",
   "client_closed",
@@ -346,66 +336,79 @@ export interface ErrorEnvelope {
   };
 }
 
-/**
- * Schema version for live known-RFC research requests.
- */
-export const liveResearchSchemaVersion = 2 as const;
-
 const LegacyResearchRequestSchema = Schema.Struct({
-  schemaVersion: Schema.Literal(schemaVersion),
+  schemaVersion: Schema.Literal(1),
   question: Schema.NonEmptyString,
   rfc: Schema.NullOr(Schema.String),
 });
 
-const LiveKnownRfcResearchRequestInputSchema = Schema.Struct({
-  schemaVersion: Schema.Literal(liveResearchSchemaVersion),
+type LegacyResearchRequest = Schema.Schema.Type<typeof LegacyResearchRequestSchema>;
+
+const KnownRfcResearchRequestInputSchema = Schema.Struct({
+  schemaVersion: Schema.Literal(schemaVersion),
   question: Schema.NonEmptyString,
   rfc: Schema.NonEmptyString,
-  searchTerms: Schema.optionalKey(Schema.Union([Schema.Array(Schema.String), Schema.Undefined])),
+  searchTerms: Schema.optionalKey(Schema.Undefined),
+});
+
+const TopicSearchTermSchema = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(200));
+
+const TopicResearchRequestInputSchema = Schema.Struct({
+  schemaVersion: Schema.Literal(schemaVersion),
+  question: Schema.NonEmptyString,
+  rfc: Schema.Null,
+  searchTerms: Schema.Array(TopicSearchTermSchema).check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(4),
+  ),
 });
 
 /**
- * Schema for the versioned research requests accepted by the CLI.
+ * Schema for version-two known-RFC and topic research requests.
  */
 export const ResearchRequestSchema = Schema.Union([
-  LegacyResearchRequestSchema,
-  LiveKnownRfcResearchRequestInputSchema,
+  KnownRfcResearchRequestInputSchema,
+  TopicResearchRequestInputSchema,
 ]);
-
-/**
- * A legacy request retained temporarily for flows not yet migrated to live discovery.
- */
-export interface LegacyResearchRequest {
-  readonly schemaVersion: typeof schemaVersion;
-  readonly question: string;
-  readonly rfc: string | null;
-}
 
 /**
  * A schema-version-two request for exact known-RFC research.
  */
 export interface LiveKnownRfcResearchRequest {
-  readonly schemaVersion: typeof liveResearchSchemaVersion;
+  readonly schemaVersion: typeof schemaVersion;
   readonly question: string;
   readonly rfc: string;
   readonly searchTerms: undefined;
 }
 
 /**
- * A decoded request accepted by the research operation during the expansion migration.
+ * A schema-version-two request for bounded topic discovery.
  */
-export type ResearchRequest = LegacyResearchRequest | LiveKnownRfcResearchRequest;
+export interface LiveTopicResearchRequest {
+  readonly schemaVersion: typeof schemaVersion;
+  readonly question: string;
+  readonly rfc: null;
+  readonly searchTerms: ReadonlyArray<string>;
+}
+
+/**
+ * A decoded schema-version-two research request.
+ */
+export type ResearchRequest = LiveKnownRfcResearchRequest | LiveTopicResearchRequest;
 
 /**
  * Decode unknown research input at the public JSON boundary.
  *
  * @param input The unknown value received from JSON or convenience flags.
- * @returns A validated legacy request or schema-version-two known-RFC request.
- * @throws InvalidInputError when the value does not satisfy either supported request shape.
+ * @returns A validated schema-version-two known-RFC or topic request.
+ * @throws InvalidInputError when the value does not satisfy the version-two contract.
  */
+const decodeLegacyResearchRequest = (input: unknown): LegacyResearchRequest =>
+  Schema.decodeUnknownSync(LegacyResearchRequestSchema)(input);
+
 export const decodeResearchRequest = (input: unknown): ResearchRequest => {
   try {
-    const request = Schema.decodeUnknownSync(LiveKnownRfcResearchRequestInputSchema)(input);
+    const request = Schema.decodeUnknownSync(KnownRfcResearchRequestInputSchema)(input);
     if (request.searchTerms !== undefined) {
       throw new InvalidInputError({
         reason: "Known-RFC research must not include topic search terms",
@@ -417,10 +420,19 @@ export const decodeResearchRequest = (input: unknown): ResearchRequest => {
   }
 
   try {
-    return Schema.decodeUnknownSync(LegacyResearchRequestSchema)(input);
+    const request = Schema.decodeUnknownSync(TopicResearchRequestInputSchema)(input);
+    if (
+      request.searchTerms.length < 1 ||
+      request.searchTerms.length > 4 ||
+      request.searchTerms.some((term) => term.length === 0 || term.length > 200)
+    ) {
+      throw new Error("invalid search terms");
+    }
+    return request;
   } catch {
     throw new InvalidInputError({
-      reason: "Research input must use schema version 1 or a version 2 known-RFC request",
+      reason:
+        "Research input must use schema version 2 with an RFC or one to four bounded search terms",
     });
   }
 };
@@ -432,18 +444,6 @@ export const decodeResearchRequest = (input: unknown): ResearchRequest => {
  * types only; Effect remains an implementation detail of the package.
  */
 export interface RfcClient {
-  /**
-   * Return freshness information for the local metadata catalog.
-   */
-  readonly catalogStatus: () => Promise<CatalogStatus>;
-  /**
-   * Fetch, normalize, and atomically replace the local metadata catalog.
-   */
-  readonly catalogRefresh: () => Promise<CatalogRefreshResult>;
-  /**
-   * Fetch and cache exact RFC Editor sources before a timed evaluation.
-   */
-  readonly prefetchSources: (rfcs: ReadonlyArray<string>) => Promise<void>;
   /**
    * Research one topic or known published RFC and return exact evidence.
    */
@@ -534,7 +534,7 @@ const decisionModelLayer = (options: RfcClientOptions) =>
         ),
       );
 
-const platformLayer = (options: RfcClientOptions) => {
+const platformLayer = (options: RuntimeClientOptions) => {
   const fetchOptions = Layer.succeed(FetchHttpClient.RequestInit, {
     redirect: "error" as const,
   });
@@ -560,7 +560,7 @@ const platformLayer = (options: RfcClientOptions) => {
     : Layer.merge(base, Layer.succeed(Clock.Clock, makeClock(options.now)));
 };
 
-const clientLayer = (options: RfcClientOptions) => {
+const clientLayer = (options: RuntimeClientOptions) => {
   const datatrackerBaseUrl = options.datatrackerApiUrl ?? defaultDatatrackerApiUrl;
   const catalogSourceLayer =
     options.catalogSource === undefined
@@ -576,12 +576,19 @@ const clientLayer = (options: RfcClientOptions) => {
       : options.rfcSourceHttpClient === undefined
         ? makeDefaultRfcSourceLayer(defaultRfcEditorBaseUrl)
         : makeRfcSourceHttpLayer(options.rfcSourceHttpClient, defaultRfcEditorBaseUrl);
+  const liveRfcSourceLayer =
+    options.rfcSourceFetcher !== undefined
+      ? makeLiveRfcSourceLayer(options.rfcSourceFetcher)
+      : options.rfcSourceHttpClient === undefined
+        ? makeDefaultLiveRfcSourceLayer()
+        : makeLiveRfcSourceHttpLayer(options.rfcSourceHttpClient);
   const services = Layer.mergeAll(
     catalogStoreLayer,
     rfcSourceStoreLayer,
     catalogSourceLayer,
     discoveryLayer,
     rfcSourceLayer,
+    liveRfcSourceLayer,
   ).pipe(Layer.provideMerge(platformLayer(options)));
 
   return Layer.merge(services, decisionModelLayer(options)).pipe(
@@ -589,26 +596,26 @@ const clientLayer = (options: RfcClientOptions) => {
   );
 };
 
-const resolveCatalogPath = Effect.fnUntraced(function* (options: RfcClientOptions) {
+const resolveCatalogPath = Effect.fnUntraced(function* (options: RuntimeClientOptions) {
   const path = yield* Path.Path;
   const cacheDirectory = options.cacheDirectory ?? defaultCacheDirectory;
   return options.catalogPath ?? path.join(cacheDirectory, "catalog.json");
 });
 
-const resolveSourceDirectory = Effect.fnUntraced(function* (options: RfcClientOptions) {
+const resolveSourceDirectory = Effect.fnUntraced(function* (options: RuntimeClientOptions) {
   const path = yield* Path.Path;
   const cacheDirectory = options.cacheDirectory ?? defaultCacheDirectory;
   return options.sourceDirectory ?? path.join(cacheDirectory, "sources");
 });
 
-const catalogStatusProgram = (options: RfcClientOptions) =>
+const catalogStatusProgram = (options: RuntimeClientOptions) =>
   Effect.gen(function* () {
     const store = yield* CatalogStore;
     const catalogPath = yield* resolveCatalogPath(options);
     return yield* store.status(catalogPath);
   });
 
-const catalogRefreshProgram = (options: RfcClientOptions) =>
+const catalogRefreshProgram = (options: RuntimeClientOptions) =>
   Effect.gen(function* () {
     const store = yield* CatalogStore;
     const source = yield* DatatrackerCatalogSource;
@@ -629,7 +636,7 @@ const catalogRefreshProgram = (options: RfcClientOptions) =>
     return catalogRefreshResultFromValue(catalogPath, catalog, now);
   });
 
-const knownCatalogProgram = (options: RfcClientOptions) =>
+const knownCatalogProgram = (options: RuntimeClientOptions) =>
   Effect.gen(function* () {
     const store = yield* CatalogStore;
     const startedAt = yield* Clock.currentTimeMillis;
@@ -659,7 +666,10 @@ const knownCatalogProgram = (options: RfcClientOptions) =>
     };
   });
 
-const prefetchSourcesProgram = (options: RfcClientOptions, identifiers: ReadonlyArray<string>) =>
+const prefetchSourcesProgram = (
+  options: RuntimeClientOptions,
+  identifiers: ReadonlyArray<string>,
+) =>
   Effect.gen(function* () {
     const context = yield* knownCatalogProgram(options);
     for (const identifier of identifiers) {
@@ -673,6 +683,27 @@ const prefetchSourcesProgram = (options: RfcClientOptions, identifiers: Readonly
     }
   });
 
+type LoadedLiveSource = {
+  readonly document: import("./catalog").CatalogDocument;
+  readonly result: LiveRfcSourceResult;
+};
+
+const cacheOutcomeFor = (loads: ReadonlyArray<LoadedLiveSource>, identifier: string | undefined) =>
+  (identifier === undefined
+    ? loads[0]?.result.outcome
+    : loads.find(({ document }) => document.identifier === identifier)?.result.outcome) ??
+  "not_requested";
+
+const sourceRequestTraces = (loads: ReadonlyArray<LoadedLiveSource>, sourceMs: number) =>
+  loads.map(({ document, result }) => ({
+    kind: "source" as const,
+    url: makeRfcSourceUrl(defaultRfcEditorBaseUrl, document.rfcNumber),
+    attempts: result.requestCount,
+    status: result.status ?? null,
+    statuses: result.status === undefined ? [] : [result.status],
+    durationMs: loads.length === 0 ? 0 : sourceMs / loads.length,
+  }));
+
 const liveKnownResearchProgram = Effect.fnUntraced(function* (
   options: RfcClientOptions,
   request: LiveKnownRfcResearchRequest,
@@ -681,10 +712,18 @@ const liveKnownResearchProgram = Effect.fnUntraced(function* (
   const discovery = yield* RfcDiscovery;
   const lookup = yield* discovery.lookupKnownRfc(request.rfc);
   const sourceDirectory = yield* resolveSourceDirectory(options);
-  const sourceStore = yield* RfcSourceStore;
-  const cachedSource = yield* sourceStore.read(sourceDirectory, lookup.document.identifier);
+  const sourceLoads: Array<LoadedLiveSource> = [];
+  const sourceLoader = (document: import("./catalog").CatalogDocument) =>
+    loadLiveRfcSource(document, sourceDirectory).pipe(
+      Effect.tap((result) =>
+        Effect.sync(() => {
+          sourceLoads.push({ document, result });
+        }),
+      ),
+      Effect.map(({ source }) => source),
+    );
   const now = yield* Clock.currentTimeMillis;
-  const requestLocalMetadata = makeCatalog([lookup.document], now);
+  const requestLocalMetadata = makeCatalog(lookup.documents, now);
   const result = yield* researchKnownRfc(request.question, request.rfc, {
     catalog: requestLocalMetadata,
     catalogStatus: catalogStatusFromValue(
@@ -693,6 +732,7 @@ const liveKnownResearchProgram = Effect.fnUntraced(function* (
       now,
     ),
     sourceDirectory,
+    sourceLoader,
     policyPreset: options.policyPreset ?? "precision-v1",
     // Live discovery is not covered by the precision-v1 release attestation.
     // Ticket 07 introduces the precision-v2 activation gate.
@@ -701,13 +741,14 @@ const liveKnownResearchProgram = Effect.fnUntraced(function* (
     catalogMs: lookup.metadataMs,
     startedAt,
   });
-  const sourceCacheOutcome = cachedSource === undefined ? "miss" : "hit";
-  const sourceRequestCount = sourceCacheOutcome === "miss" ? 1 : 0;
+  const sourceRequestCount = sourceLoads.reduce(
+    (count, load) => count + load.result.requestCount,
+    0,
+  );
   const datatrackerRequestCount = lookup.requests.reduce(
     (count, trace) => count + trace.attempts,
     0,
   );
-  const sourceUrl = makeRfcSourceUrl(defaultRfcEditorBaseUrl, lookup.document.rfcNumber);
   const retrieval = {
     schemaVersion: 2 as const,
     requestCount: datatrackerRequestCount + sourceRequestCount,
@@ -715,17 +756,100 @@ const liveKnownResearchProgram = Effect.fnUntraced(function* (
     sourceRequestCount,
     metadataMs: lookup.metadataMs,
     sourceMs: result.diagnostics.timings.sourceMs,
-    sourceCacheOutcome,
+    sourceCacheOutcome: cacheOutcomeFor(sourceLoads, lookup.document.identifier),
+    traversalComplete: lookup.traversalComplete,
+    traversalContexts: lookup.traversalContexts,
+    traversalDepth: lookup.traversalDepth,
+    successorRows: lookup.successorRows,
+    contextLimit: datatrackerCurrencyContextLimit,
+    depthLimit: datatrackerCurrencyDepthLimit,
+    relationshipLimit: datatrackerSuccessorLimit,
     requests: [
       ...lookup.requests,
-      {
-        kind: "source" as const,
-        url: sourceUrl,
-        attempts: sourceRequestCount,
-        status: null,
-        statuses: sourceCacheOutcome === "miss" ? [null] : [],
-        durationMs: result.diagnostics.timings.sourceMs,
-      },
+      ...sourceRequestTraces(sourceLoads, result.diagnostics.timings.sourceMs),
+    ],
+  };
+  const { catalog: _catalog, ...legacyDiagnostics } = result.diagnostics;
+  const currency =
+    lookup.traversalComplete || result.currency === undefined
+      ? result.currency
+      : {
+          ...result.currency,
+          complete: false,
+          issues: [...new Set([...result.currency.issues, "traversal_limit" as const])],
+        };
+
+  return Schema.decodeUnknownSync(EvidenceBundleSchema)({
+    ...result,
+    schemaVersion: 2,
+    status: lookup.traversalComplete ? result.status : "needs_review",
+    currency,
+    diagnostics: {
+      ...legacyDiagnostics,
+      schemaVersion: 2,
+      currency,
+      retrieval,
+    },
+  });
+});
+
+const liveTopicResearchProgram = Effect.fnUntraced(function* (
+  options: RfcClientOptions,
+  request: LiveTopicResearchRequest,
+) {
+  const startedAt = yield* Clock.currentTimeMillis;
+  const discovery = yield* RfcDiscovery;
+  const discovered = yield* discovery.discoverTopic(request.searchTerms);
+  const sourceDirectory = yield* resolveSourceDirectory(options);
+  const sourceLoads: Array<LoadedLiveSource> = [];
+  const sourceLoader = (document: import("./catalog").CatalogDocument) =>
+    loadLiveRfcSource(document, sourceDirectory).pipe(
+      Effect.tap((result) =>
+        Effect.sync(() => {
+          sourceLoads.push({ document, result });
+        }),
+      ),
+      Effect.map(({ source }) => source),
+    );
+  const now = yield* Clock.currentTimeMillis;
+  const requestLocalMetadata = makeCatalog(discovered.documents, now);
+  const result = yield* researchTopic(request.question, {
+    catalog: requestLocalMetadata,
+    catalogStatus: catalogStatusFromValue(
+      "request-local://rfc-discovery",
+      requestLocalMetadata,
+      now,
+    ),
+    documentCandidates: discovered.documents,
+    sourceDirectory,
+    sourceLoader,
+    policyPreset: options.policyPreset ?? "precision-v1",
+    automaticAnswerActivation: undefined,
+    modelAlias: options.modelAlias ?? precisionPolicy.pinnedModel,
+    catalogMs: discovered.metadataMs,
+    startedAt,
+  });
+  const sourceRequestCount = sourceLoads.reduce(
+    (count, load) => count + load.result.requestCount,
+    0,
+  );
+  const datatrackerRequestCount = discovered.requests.reduce(
+    (count, trace) => count + trace.attempts,
+    0,
+  );
+  const retrieval = {
+    schemaVersion: 2 as const,
+    requestCount: datatrackerRequestCount + sourceRequestCount,
+    datatrackerRequestCount,
+    sourceRequestCount,
+    metadataMs: discovered.metadataMs,
+    sourceMs: result.diagnostics.timings.sourceMs,
+    sourceCacheOutcome: cacheOutcomeFor(sourceLoads, result.rfc?.identifier),
+    upstreamRows: discovered.upstreamRows,
+    uniqueCandidates: discovered.documents.length,
+    requests: [
+      ...discovered.requests,
+      ...sourceRequestTraces(sourceLoads, result.diagnostics.timings.sourceMs),
     ],
   };
   const { catalog: _catalog, ...legacyDiagnostics } = result.diagnostics;
@@ -733,6 +857,7 @@ const liveKnownResearchProgram = Effect.fnUntraced(function* (
   return Schema.decodeUnknownSync(EvidenceBundleSchema)({
     ...result,
     schemaVersion: 2,
+    status: discovered.documents.length === 0 ? "needs_review" : result.status,
     diagnostics: {
       ...legacyDiagnostics,
       schemaVersion: 2,
@@ -741,23 +866,26 @@ const liveKnownResearchProgram = Effect.fnUntraced(function* (
   });
 });
 
-const researchProgram = (options: RfcClientOptions, request: ResearchRequest) =>
-  request.schemaVersion === liveResearchSchemaVersion
-    ? liveKnownResearchProgram(options, request)
-    : Effect.gen(function* () {
-        const context = yield* knownCatalogProgram(options);
-        const researchOptions = {
-          ...context,
-          policyPreset: options.policyPreset ?? "precision-v1",
-          automaticAnswerActivation: options.automaticAnswerActivation,
-          modelAlias: options.modelAlias ?? precisionPolicy.pinnedModel,
-        };
-        return request.rfc === null
-          ? yield* researchTopic(request.question, researchOptions)
-          : yield* researchKnownRfc(request.question, request.rfc, researchOptions);
-      });
+const legacyResearchProgram = (options: RuntimeClientOptions, request: LegacyResearchRequest) =>
+  Effect.gen(function* () {
+    const context = yield* knownCatalogProgram(options);
+    const researchOptions = {
+      ...context,
+      policyPreset: options.policyPreset ?? "precision-v1",
+      automaticAnswerActivation: options.automaticAnswerActivation,
+      modelAlias: options.modelAlias ?? precisionPolicy.pinnedModel,
+    };
+    return request.rfc === null
+      ? yield* researchTopic(request.question, researchOptions)
+      : yield* researchKnownRfc(request.question, request.rfc, researchOptions);
+  });
 
-const citationProgram = (options: RfcClientOptions, request: CitationVerificationRequest) =>
+const researchProgram = (options: RfcClientOptions, request: ResearchRequest) =>
+  request.rfc === null
+    ? liveTopicResearchProgram(options, request)
+    : liveKnownResearchProgram(options, request);
+
+const citationProgram = (options: RuntimeClientOptions, request: CitationVerificationRequest) =>
   Effect.gen(function* () {
     const context = yield* knownCatalogProgram(options);
     return yield* verifyCitation(request, {
@@ -781,50 +909,6 @@ const resetModelTrackingProgram = (options: RfcClientOptions) =>
  * @returns A safe, serializable error envelope.
  */
 export const toErrorEnvelope = (error: unknown): ErrorEnvelope => {
-  if (error instanceof CatalogReadError) {
-    return {
-      schemaVersion,
-      kind: "error",
-      error: {
-        code: "catalog_read_failed",
-        message: `Unable to inspect catalog: ${error.reason}`,
-      },
-    };
-  }
-
-  if (error instanceof CatalogRefreshError) {
-    return {
-      schemaVersion,
-      kind: "error",
-      error: {
-        code: "catalog_refresh_failed",
-        message: `Unable to refresh catalog: ${error.reason}`,
-      },
-    };
-  }
-
-  if (error instanceof CatalogStaleError) {
-    return {
-      schemaVersion,
-      kind: "error",
-      error: {
-        code: "catalog_stale",
-        message: "The RFC catalog is stale and must be refreshed before research",
-      },
-    };
-  }
-
-  if (error instanceof CatalogWriteError) {
-    return {
-      schemaVersion,
-      kind: "error",
-      error: {
-        code: "catalog_write_failed",
-        message: `Unable to write catalog: ${error.reason}`,
-      },
-    };
-  }
-
   if (error instanceof RfcDiscoveryError) {
     return {
       schemaVersion,
@@ -858,6 +942,17 @@ export const toErrorEnvelope = (error: unknown): ErrorEnvelope => {
     };
   }
 
+  if (error instanceof RfcSourceRevalidationError) {
+    return {
+      schemaVersion,
+      kind: "error",
+      error: {
+        code: "source_revalidation_failed",
+        message: `Unable to revalidate stale RFC source from ${error.url}: ${error.reason}`,
+      },
+    };
+  }
+
   if (error instanceof CitationQuoteAmbiguousError) {
     return {
       schemaVersion,
@@ -886,7 +981,7 @@ export const toErrorEnvelope = (error: unknown): ErrorEnvelope => {
       kind: "error",
       error: {
         code: "rfc_not_found",
-        message: `RFC ${error.rfc} is not an exact published catalog entry`,
+        message: `RFC ${error.rfc} is not an exact published RFC`,
       },
     };
   }
@@ -969,7 +1064,6 @@ export const toErrorEnvelope = (error: unknown): ErrorEnvelope => {
 
 const defaultClientOptions: RfcClientOptions = {
   cacheDirectory: undefined,
-  catalogPath: undefined,
   datatrackerApiUrl: undefined,
   datatrackerHttpClient: undefined,
   modelAlias: undefined,
@@ -977,9 +1071,6 @@ const defaultClientOptions: RfcClientOptions = {
   typeSafeApiUrl: undefined,
   typeSafeHttpClient: undefined,
   now: undefined,
-  catalogSource: undefined,
-  catalogHttpClient: undefined,
-  catalogFetch: undefined,
   rfcSourceFetcher: undefined,
   rfcSourceHttpClient: undefined,
   sourceDirectory: undefined,
@@ -997,7 +1088,8 @@ const defaultClientOptions: RfcClientOptions = {
 export const createRfcClient = async (
   options: RfcClientOptions = defaultClientOptions,
 ): Promise<RfcClient> => {
-  const runtime = ManagedRuntime.make(clientLayer(options));
+  const runtimeOptions: RuntimeClientOptions = options;
+  const runtime = ManagedRuntime.make(clientLayer(runtimeOptions));
   let closed = false;
   // The provider layer is client-scoped, so model-backed boundaries are
   // serialized and reset before/after each operation to prevent cross-request
@@ -1020,11 +1112,11 @@ export const createRfcClient = async (
 
   const runModelOperation = <A>(program: Effect.Effect<A, any, any>): Promise<A> => {
     const operation = modelOperationTail.then(async () => {
-      await runtime.runPromise(resetModelTrackingProgram(options));
+      await runtime.runPromise(resetModelTrackingProgram(runtimeOptions));
       try {
         return await runtime.runPromise(program);
       } finally {
-        await runtime.runPromise(resetModelTrackingProgram(options));
+        await runtime.runPromise(resetModelTrackingProgram(runtimeOptions));
       }
     });
     modelOperationTail = operation.then(
@@ -1034,23 +1126,11 @@ export const createRfcClient = async (
     return operation;
   };
 
-  return {
-    catalogStatus: async () => {
-      assertOpen();
-      return runtime.runPromise(catalogStatusProgram(options));
-    },
-    catalogRefresh: async () => {
-      assertOpen();
-      return runtime.runPromise(catalogRefreshProgram(options));
-    },
-    prefetchSources: async (rfcs) => {
-      assertOpen();
-      return runtime.runPromise(prefetchSourcesProgram(options, rfcs));
-    },
+  const client: RfcClient = {
     research: async (request) => {
       assertOpen();
       const decodedRequest = decodeResearchRequest(request);
-      return runModelOperation(researchProgram(options, decodedRequest));
+      return runModelOperation(researchProgram(runtimeOptions, decodedRequest));
     },
     verifyCitation: async (request) => {
       assertOpen();
@@ -1062,9 +1142,33 @@ export const createRfcClient = async (
           reason: "Citation input must use schema version 1",
         });
       }
-      return runModelOperation(citationProgram(options, decodedRequest));
+      return runModelOperation(citationProgram(runtimeOptions, decodedRequest));
     },
     close,
     [Symbol.asyncDispose]: close,
   };
+
+  if (runtimeOptions.automaticAnswerActivation === calibrationAnswerActivation) {
+    registerCalibrationOperations(client, {
+      catalogStatus: async () => {
+        assertOpen();
+        return runtime.runPromise(catalogStatusProgram(runtimeOptions));
+      },
+      catalogRefresh: async () => {
+        assertOpen();
+        return runtime.runPromise(catalogRefreshProgram(runtimeOptions));
+      },
+      prefetchSources: async (rfcs: ReadonlyArray<string>) => {
+        assertOpen();
+        return runtime.runPromise(prefetchSourcesProgram(runtimeOptions, rfcs));
+      },
+      researchLegacy: async (request) => {
+        assertOpen();
+        const decodedRequest = decodeLegacyResearchRequest(request);
+        return runModelOperation(legacyResearchProgram(runtimeOptions, decodedRequest));
+      },
+    });
+  }
+
+  return client;
 };

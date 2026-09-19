@@ -5,7 +5,6 @@ import {
   decodeCitationVerificationRequest,
   decodeResearchRequest,
   defaultCacheDirectory,
-  liveResearchSchemaVersion,
   schemaVersion,
   toErrorEnvelope,
 } from "@wyattjoh/rfc-core";
@@ -60,12 +59,12 @@ const format = Flag.Literals("format", ["json", "human"] as const).pipe(
 );
 
 const cacheDirectory = Flag.String("cache-directory").pipe(
-  Flag.withDescription("Directory containing RFC source-cache and legacy catalog data"),
+  Flag.withDescription("Directory containing cached canonical RFC sources"),
   Flag.withDefault(defaultCacheDirectory),
 );
 
 const datatrackerApiUrl = Flag.String("datatracker-api-url").pipe(
-  Flag.withDescription("Datatracker API base URL used for live discovery or catalog refresh"),
+  Flag.withDescription("Datatracker API base URL used for live discovery"),
   Flag.optional,
 );
 
@@ -77,6 +76,11 @@ const question = Flag.String("question").pipe(
 const rfc = Flag.String("rfc").pipe(
   Flag.withDescription("Known RFC identifier for a short interactive request"),
   Flag.optional,
+);
+
+const searchTerms = Flag.String("search-term").pipe(
+  Flag.withDescription("Ordered topic-discovery term; repeat one to four times"),
+  Flag.between(0, 4),
 );
 
 const typeSafeApiUrl = Flag.String("typesafe-api-url").pipe(
@@ -281,94 +285,6 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
   const writeStdout = (value: string): Effect.Effect<void> =>
     Effect.sync(() => dependencies.writeStdout(`${value}\n`));
 
-  const catalogStatusCommand = Command.make(
-    "status",
-    {
-      cacheDirectory,
-      format,
-    },
-    Effect.fn(function* ({ cacheDirectory, format }) {
-      const status = yield* Effect.acquireUseRelease(
-        Effect.tryPromise({
-          try: () =>
-            createRfcClient({
-              cacheDirectory,
-              catalogPath: undefined,
-              modelAlias: undefined,
-              automaticAnswerActivation: undefined,
-              typeSafeApiKey: undefined,
-              typeSafeApiUrl: undefined,
-            }),
-          catch: (error) => error,
-        }),
-        (client) =>
-          Effect.tryPromise({
-            try: () => client.catalogStatus(),
-            catch: (error) => error,
-          }),
-        (client) => Effect.tryPromise({ try: () => client.close(), catch: (error) => error }),
-      );
-
-      if (format === "human") {
-        yield* writeStdout(`Catalog: ${status.state}`);
-        yield* writeStdout(`Path: ${status.catalogPath}`);
-        yield* writeStdout(`Cache: ${status.cacheIdentity}`);
-        yield* writeStdout(`Fetched: ${status.refreshedAt ?? "never"}`);
-        yield* writeStdout(`Age: ${status.ageMs ?? "unknown"}`);
-        yield* writeStdout(`Documents: ${status.documentCount}`);
-        return;
-      }
-
-      yield* writeStdout(JSON.stringify(status));
-    }),
-  ).pipe(Command.withDescription("Inspect local RFC metadata catalog freshness"));
-
-  const catalogRefreshCommand = Command.make(
-    "refresh",
-    {
-      cacheDirectory,
-      datatrackerApiUrl,
-      format,
-    },
-    Effect.fn(function* ({ cacheDirectory, datatrackerApiUrl, format }) {
-      const client = yield* Effect.tryPromise({
-        try: () =>
-          createRfcClient({
-            cacheDirectory,
-            catalogPath: undefined,
-            datatrackerApiUrl: Option.getOrUndefined(datatrackerApiUrl),
-            modelAlias: undefined,
-            automaticAnswerActivation: undefined,
-            typeSafeApiKey: undefined,
-            typeSafeApiUrl: undefined,
-          }),
-        catch: (error) => error,
-      });
-
-      const result = yield* Effect.acquireUseRelease(
-        Effect.succeed(client),
-        (activeClient) =>
-          Effect.tryPromise({ try: () => activeClient.catalogRefresh(), catch: (error) => error }),
-        (activeClient) =>
-          Effect.tryPromise({ try: () => activeClient.close(), catch: (error) => error }),
-      );
-
-      if (format === "human") {
-        yield* writeStdout(`Catalog: ${result.state}`);
-        yield* writeStdout(`Path: ${result.catalogPath}`);
-        yield* writeStdout(`Documents: ${result.documentCount}`);
-        return;
-      }
-
-      yield* writeStdout(JSON.stringify(result));
-    }),
-  ).pipe(Command.withDescription("Refresh the local RFC metadata catalog"));
-
-  const catalogCommand = Command.make("catalog").pipe(
-    Command.withDescription("Manage the local RFC metadata catalog"),
-    Command.withSubcommands([catalogStatusCommand, catalogRefreshCommand]),
-  );
-
   const verifyCitationCommand = Command.make(
     "verify-citation",
     {
@@ -402,7 +318,7 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
                 });
               }
               return decodeCitationRequest({
-                schemaVersion,
+                schemaVersion: 1,
                 rfc: flags.rfc.value,
                 claim: flags.claim.value,
                 quote: flags.quote.value,
@@ -428,7 +344,6 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
         try: () =>
           createRfcClient({
             cacheDirectory: flags.cacheDirectory,
-            catalogPath: undefined,
             datatrackerApiUrl: Option.getOrUndefined(flags.datatrackerApiUrl),
             modelAlias: cliConfig.modelAlias,
             policyPreset: cliConfig.policyPreset,
@@ -486,6 +401,7 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
       format,
       question,
       rfc,
+      searchTerms,
       typeSafeApiUrl,
     },
     Effect.fn(function* (flags) {
@@ -500,15 +416,16 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
           : Option.isSome(flags.question)
             ? Option.isSome(flags.rfc)
               ? decodeResearchRequest({
-                  schemaVersion: liveResearchSchemaVersion,
+                  schemaVersion,
                   question: flags.question.value,
                   rfc: flags.rfc.value,
-                  searchTerms: undefined,
+                  searchTerms: flags.searchTerms.length === 0 ? undefined : flags.searchTerms,
                 })
               : decodeResearchRequest({
                   schemaVersion,
                   question: flags.question.value,
                   rfc: null,
+                  searchTerms: flags.searchTerms,
                 })
             : (() => {
                 throw new InvalidInputError({
@@ -532,7 +449,6 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
         try: () =>
           createRfcClient({
             cacheDirectory: flags.cacheDirectory,
-            catalogPath: undefined,
             datatrackerApiUrl: Option.getOrUndefined(flags.datatrackerApiUrl),
             modelAlias: cliConfig.modelAlias,
             policyPreset: cliConfig.policyPreset,
@@ -661,7 +577,7 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
 
   return Command.make("rfc").pipe(
     Command.withDescription("TypeSafe RFC evidence engine"),
-    Command.withSubcommands([authCommand, catalogCommand, researchCommand, verifyCitationCommand]),
+    Command.withSubcommands([authCommand, researchCommand, verifyCitationCommand]),
   );
 };
 

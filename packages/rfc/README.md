@@ -4,29 +4,32 @@ The private `rfc` package exposes the RFC evidence engine's agent-facing CLI.
 
 ## Process protocol
 
-Catalog commands write versioned JSON responses to standard output by default:
-
-```sh
-rfc catalog status
-rfc catalog refresh
-rfc catalog refresh --format human
-```
-
-`catalog refresh` follows the paginated Datatracker RFC and relationship APIs, then atomically replaces the local version-one catalog. A failed refresh leaves the previous cache untouched. `catalog status` reports missing, fresh, or stale state, the cache identity, fetch time, age, and document count.
-
-Research accepts canonical JSON on standard input. Set `rfc` to `null` for topic-only discovery:
+Research uses the version-two public protocol and accepts canonical JSON on standard input. A known-RFC request supplies an RFC identifier:
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "question": "What does HTTP require of a client?",
-  "rfc": null
+  "rfc": "RFC9110"
 }
 ```
 
-When standard input contains non-whitespace input, it is authoritative and convenience flags are ignored. When standard input is empty, `--question` and `--rfc` provide the short interactive form. `--cache-directory`, `--datatracker-api-url`, and `--typesafe-api-url` are available for deterministic preflight and local testing. RFC research always fetches from the authoritative RFC Editor origin. JSON is always the automation default; human rendering is an explicit opt-in.
+A topic request sets `rfc` to `null` and supplies one to four ordered search terms:
 
-Research refreshes a missing or stale catalog, then reads authoritative RFC Editor plain text through a content-addressed cache and returns a versioned evidence bundle. Known-RFC research uses two semantic stages. Topic-only research lexically shortlists catalog identifiers, titles, and abstracts, uses one independent document-probability decision per candidate, and advances only bounded accepted documents through passage selection and answer-relation verification. Each evidence passage contains an exact quote, absolute UTF-8 byte offsets into the SHA-256 source, the declared `offsetUnit: "utf8-byte"`, canonical URLs, and a nullable best-effort section label. Bundle diagnostics include source hashes and fetch times, lexical and semantic candidate counts, accepted document probabilities, requested and provider-resolved model identifiers, token usage, probabilities, confidence, catalog freshness, and stage timings.
+```json
+{
+  "schemaVersion": 2,
+  "question": "What does HTTP require of a client?",
+  "rfc": null,
+  "searchTerms": ["HTTP semantics", "client request"]
+}
+```
+
+When standard input contains non-whitespace input, it is authoritative and convenience flags are ignored. When standard input is empty, use `--question` with either `--rfc` or one to four repeatable `--search-term` flags. `--cache-directory`, `--datatracker-api-url`, and `--typesafe-api-url` are available for deterministic preflight and local testing. JSON is always the automation default; human rendering is an explicit opt-in. Catalog status, refresh, and bulk-prefetch operations are not part of the public client or CLI.
+
+Known-RFC research fetches exact request-local metadata and recursively follows only bounded updating or obsoleting successors. Topic research issues one bounded title query and one bounded abstract query for each caller-supplied term, deterministically merges candidates in term order, and uses TypeSafe native multi-question scoring before source retrieval. Only the explicit search terms are sent to Datatracker; the natural-language question is not. Search terms appear in full Datatracker request URLs and can therefore appear in retrieval diagnostics, errors, and upstream access logs.
+
+Requested RFC Editor plain text is cached individually with its canonical URL, integrity hash, ETag, and HTTP freshness deadline. Fresh text is reused without a network request. Stale text is conditionally revalidated and is never used when authoritative revalidation fails. Each evidence passage contains an exact quote, absolute UTF-8 byte offsets into the SHA-256 source, the declared `offsetUnit: "utf8-byte"`, canonical URLs, and a nullable best-effort section label. Bundle diagnostics report full upstream URLs, attempts and statuses, request-local timings and counts, candidate or traversal bounds, and the source-cache outcome instead of catalog freshness.
 
 Known-RFC currency research never silently replaces the requested RFC: update and obsoletion relationships are traversed deterministically with bounded, cycle-safe paths, and terminal current RFC contexts are researched independently. Requested/current evidence retains context-aware provenance and diagnostics. Incomplete successor coverage is reported as `partial` or `needs_review`; changed or ambiguous normative wording is not accepted as compatible.
 
@@ -46,7 +49,7 @@ The optional `offset` is an absolute UTF-8 byte offset into the exact authoritat
 
 Errors are versioned JSON envelopes on standard error and return a nonzero exit code. Valid domain outcomes, including `fabricated`, use standard output and a zero exit code.
 
-The opt-in `bun run benchmark:topic` command warms the topic cache, records repeated research timings, reports p95 JSON, and fails when p95 reaches the three-second target. Set `RFC_TOPIC_BENCHMARK=1` and `RFC_CACHE_DIRECTORY` before running it; it never runs as part of the normal test suite.
+The opt-in `bun run benchmark:topic` command warms requested RFC source-cache entries, records repeated research timings, reports p95 JSON, and fails when p95 reaches the three-second target. Set `RFC_TOPIC_BENCHMARK=1` and `RFC_CACHE_DIRECTORY` before running it; it never runs as part of the normal test suite.
 
 ## Provider credentials
 

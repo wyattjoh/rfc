@@ -21,9 +21,10 @@ import {
   type RfcSourceFetcher,
 } from "../src/index";
 import type * as Decision from "effect/unstable/ai/Decision";
+import type { RfcCalibrationClientOptions } from "../src/internal-calibration";
 
 const clients: Array<RfcClient> = [];
-type TestClientOptions = Omit<RfcClientOptions, "automaticAnswerActivation"> & {
+type TestClientOptions = RfcCalibrationClientOptions & {
   readonly automaticAnswerActivation?: RfcClientOptions["automaticAnswerActivation"];
 };
 const createRfcClient = (options: TestClientOptions) =>

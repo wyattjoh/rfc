@@ -2,12 +2,11 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
-import { Effect } from "effect";
+import { Cause, Effect } from "effect";
 import type * as Decision from "effect/unstable/ai/Decision";
 import * as DecisionModel from "effect/unstable/ai/DecisionModel";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 import {
-  CatalogRefreshError,
   InvalidInputError,
   RfcClientClosedError,
   RfcDiscoveryError,
@@ -22,6 +21,7 @@ import {
 const clients: Array<RfcClient> = [];
 type TestClientOptions = Omit<RfcClientOptions, "automaticAnswerActivation"> & {
   readonly automaticAnswerActivation?: RfcClientOptions["automaticAnswerActivation"];
+  readonly catalogPath?: undefined;
 };
 const createRfcClient = (options: TestClientOptions) =>
   createCoreRfcClient({
@@ -104,7 +104,7 @@ afterEach(async () => {
 });
 
 describe("createRfcClient", () => {
-  test("reports a missing catalog through the Promise facade", async () => {
+  test("does not expose catalog or bulk-prefetch operations", async () => {
     const cacheDirectory = await makeCacheDirectory();
     const client = await createRfcClient({
       cacheDirectory,
@@ -115,60 +115,10 @@ describe("createRfcClient", () => {
     });
     clients.push(client);
 
-    await expect(client.catalogStatus()).resolves.toEqual({
-      schemaVersion: 1,
-      kind: "catalog_status",
-      state: "missing",
-      catalogPath: join(cacheDirectory, "catalog.json"),
-      cacheIdentity: "rfc-catalog-v1",
-      fetchedAt: null,
-      refreshedAt: null,
-      ageMs: null,
-      documentCount: 0,
-    });
+    expect("catalogStatus" in client).toBe(false);
+    expect("catalogRefresh" in client).toBe(false);
+    expect("prefetchSources" in client).toBe(false);
 
-    await rm(cacheDirectory, { recursive: true, force: true });
-  });
-
-  test("prefetches and caches authoritative sources through the Promise facade", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    let sourceFetches = 0;
-    const client = await createRfcClient({
-      cacheDirectory,
-      catalogPath: undefined,
-      modelAlias: undefined,
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      catalogSource: async () => [
-        {
-          identifier: "RFC9110",
-          rfcNumber: 9110,
-          title: "HTTP Semantics",
-          abstract: "HTTP semantics.",
-          status: "published",
-          stream: "ietf",
-          canonicalUrl: "https://datatracker.ietf.org/doc/rfc9110/",
-          updates: [],
-          updatedBy: [],
-          obsoletes: [],
-          obsoletedBy: [],
-        },
-      ],
-      rfcSourceFetcher: async () => {
-        sourceFetches += 1;
-        return {
-          sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
-          text: "cached source",
-        };
-      },
-    });
-    clients.push(client);
-
-    await client.catalogRefresh();
-    await client.prefetchSources(["RFC9110"]);
-    await client.prefetchSources(["RFC9110"]);
-
-    expect(sourceFetches).toBe(1);
     await rm(cacheDirectory, { recursive: true, force: true });
   });
 
@@ -265,6 +215,224 @@ describe("createRfcClient", () => {
     await rm(cacheDirectory, { recursive: true, force: true });
   });
 
+  test("recursively discovers successor metadata before resolving current RFCs", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const documents = new Map([
+      ["rfc9110", datatrackerDocument],
+      [
+        "rfc9111",
+        {
+          ...datatrackerDocument,
+          name: "rfc9111",
+          rfc_number: 9111,
+          title: "HTTP Update",
+          resource_uri: "/api/v1/doc/document/rfc9111/",
+        },
+      ],
+      [
+        "rfc9112",
+        {
+          ...datatrackerDocument,
+          name: "rfc9112",
+          rfc_number: 9112,
+          title: "HTTP Replacement",
+          resource_uri: "/api/v1/doc/document/rfc9112/",
+        },
+      ],
+    ]);
+    const datatracker = makeDatatrackerHttpClient((url) => {
+      const name = url.pathname.match(/\/document\/(rfc\d+)\/$/)?.[1];
+      if (name !== undefined) return Response.json(documents.get(name));
+      if (url.pathname.endsWith("/relateddocument/")) {
+        const target = url.searchParams.get("target__name");
+        const successor =
+          target === "rfc9110" ? "rfc9111" : target === "rfc9111" ? "rfc9112" : null;
+        return Response.json({
+          meta: { limit: 64, offset: 0, total_count: successor === null ? 0 : 1, next: null },
+          objects:
+            successor === null
+              ? []
+              : [
+                  {
+                    source: `/api/v1/doc/document/${successor}/`,
+                    target: `/api/v1/doc/document/${target}/`,
+                    relationship:
+                      target === "rfc9110"
+                        ? "/api/v1/name/docrelationshipname/updates/"
+                        : "/api/v1/name/docrelationshipname/obs/",
+                  },
+                ],
+        });
+      }
+      return new Response("not found", { status: 404 });
+    });
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      datatrackerHttpClient: datatracker.client,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      rfcSourceFetcher: async (document) => ({
+        sourceUrl: `https://www.rfc-editor.org/rfc/rfc${document.rfcNumber}.txt`,
+        text: sourceText,
+      }),
+      decisionModel: makeDecisionModel(),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 2,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+      searchTerms: undefined,
+    });
+
+    expect(result.currency).toMatchObject({
+      requested: "RFC9110",
+      current: ["RFC9112"],
+      complete: true,
+      unresolved: [],
+    });
+    expect(result.currency?.paths).toContainEqual({
+      identifier: "RFC9112",
+      path: [
+        { from: "RFC9110", to: "RFC9111", relationship: "updates" },
+        { from: "RFC9111", to: "RFC9112", relationship: "obsoletes" },
+      ],
+    });
+    expect(result.diagnostics.retrieval).toMatchObject({
+      datatrackerRequestCount: 6,
+      traversalComplete: true,
+      traversalContexts: 3,
+      traversalDepth: 2,
+      successorRows: 2,
+      contextLimit: 8,
+      depthLimit: 16,
+      relationshipLimit: 64,
+    });
+  });
+
+  test("forces review when successor relationship results hit their bound", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const datatracker = makeDatatrackerHttpClient((url) => {
+      const name = url.pathname.match(/\/document\/(rfc\d+)\/$/)?.[1];
+      if (name !== undefined) {
+        return Response.json(
+          name === "rfc9110"
+            ? datatrackerDocument
+            : {
+                ...datatrackerDocument,
+                name: "rfc9111",
+                rfc_number: 9111,
+                resource_uri: "/api/v1/doc/document/rfc9111/",
+              },
+        );
+      }
+      const target = url.searchParams.get("target__name");
+      return Response.json(
+        target === "rfc9110"
+          ? {
+              meta: {
+                limit: 64,
+                offset: 0,
+                total_count: 65,
+                next: "/api/v1/doc/relateddocument/?offset=64",
+              },
+              objects: [
+                {
+                  source: "/api/v1/doc/document/rfc9111/",
+                  target: "/api/v1/doc/document/rfc9110/",
+                  relationship: "/api/v1/name/docrelationshipname/updates/",
+                },
+              ],
+            }
+          : { meta: { limit: 64, offset: 0, total_count: 0, next: null }, objects: [] },
+      );
+    });
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      datatrackerHttpClient: datatracker.client,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      rfcSourceFetcher: async (document) => ({
+        sourceUrl: `https://www.rfc-editor.org/rfc/rfc${document.rfcNumber}.txt`,
+        text: sourceText,
+      }),
+      decisionModel: makeDecisionModel(),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 2,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+      searchTerms: undefined,
+    });
+
+    expect(result.status).toBe("needs_review");
+    expect(result.currency).toMatchObject({
+      complete: false,
+      issues: expect.arrayContaining(["traversal_limit"]),
+    });
+    expect(result.diagnostics.retrieval).toMatchObject({
+      traversalComplete: false,
+      successorRows: 1,
+      relationshipLimit: 64,
+    });
+  });
+
+  test("discovers topic candidates from ordered bounded caller-supplied terms", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const datatracker = makeDatatrackerHttpClient(() =>
+      Response.json({
+        meta: { limit: 20, offset: 0, total_count: 1, next: null },
+        objects: [datatrackerDocument],
+      }),
+    );
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      datatrackerHttpClient: datatracker.client,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      rfcSourceFetcher: async () => ({
+        sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+        text: sourceText,
+      }),
+      decisionModel: makeDecisionModel(),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 2,
+      question: "Which requirements apply?",
+      rfc: null,
+      searchTerms: ["HTTP semantics", "client request"],
+    });
+
+    expect(result.rfc?.identifier).toBe("RFC9110");
+    expect(
+      datatracker.urls.map((value) => {
+        const url = new URL(value);
+        return (
+          url.searchParams.get("title__icontains") ?? url.searchParams.get("abstract__icontains")
+        );
+      }),
+    ).toEqual(["HTTP semantics", "HTTP semantics", "client request", "client request"]);
+    expect(datatracker.urls.every((value) => !value.includes("Which+requirements"))).toBe(true);
+    expect(result.diagnostics.retrieval).toMatchObject({
+      datatrackerRequestCount: 4,
+      upstreamRows: 4,
+      uniqueCandidates: 1,
+    });
+  });
+
   test("retries transient Datatracker responses within three attempts", async () => {
     const cacheDirectory = await makeCacheDirectory();
     let documentAttempts = 0;
@@ -309,6 +477,304 @@ describe("createRfcClient", () => {
       statuses: [503, 503, 200],
     });
     await rm(cacheDirectory, { recursive: true, force: true });
+  });
+
+  test("honors Retry-After for 429 responses and records the retry", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    let documentAttempts = 0;
+    const datatracker = makeDatatrackerHttpClient((url) => {
+      if (url.pathname.endsWith("/document/rfc9110/")) {
+        documentAttempts += 1;
+        return documentAttempts === 1
+          ? new Response("rate limited", { status: 429, headers: { "retry-after": "0" } })
+          : Response.json(datatrackerDocument);
+      }
+      return Response.json({
+        meta: { limit: 64, offset: 0, total_count: 0, next: null },
+        objects: [],
+      });
+    });
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      datatrackerHttpClient: datatracker.client,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      decisionModel: makeDecisionModel(),
+      rfcSourceFetcher: async () => ({
+        sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+        text: sourceText,
+      }),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 2,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+      searchTerms: undefined,
+    });
+
+    expect(documentAttempts).toBe(2);
+    expect(result.diagnostics.retrieval?.requests[0]).toMatchObject({
+      attempts: 2,
+      statuses: [429, 200],
+    });
+  });
+
+  test("retries timeout failures before succeeding", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    let documentAttempts = 0;
+    const http = HttpClient.make((request, url) => {
+      if (url.pathname.endsWith("/document/rfc9110/")) {
+        documentAttempts += 1;
+        if (documentAttempts === 1) {
+          return Effect.fail(new Cause.TimeoutError()) as unknown as Effect.Effect<
+            HttpClientResponse.HttpClientResponse,
+            never
+          >;
+        }
+        return Effect.succeed(
+          HttpClientResponse.fromWeb(request, Response.json(datatrackerDocument)),
+        );
+      }
+      return Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          Response.json({
+            meta: { limit: 64, offset: 0, total_count: 0, next: null },
+            objects: [],
+          }),
+        ),
+      );
+    });
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      datatrackerHttpClient: http,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      decisionModel: makeDecisionModel(),
+      rfcSourceFetcher: async () => ({
+        sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+        text: sourceText,
+      }),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 2,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+      searchTerms: undefined,
+    });
+
+    expect(documentAttempts).toBe(2);
+    expect(result.diagnostics.retrieval?.requests[0]?.statuses).toEqual([null, 200]);
+  });
+
+  test("exhausts three attempts across the full server-error range", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const datatracker = makeDatatrackerHttpClient(
+      () => new Response("server failure", { status: 599 }),
+    );
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      datatrackerHttpClient: datatracker.client,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      decisionModel: makeDecisionModel(),
+    });
+    clients.push(client);
+
+    await expect(
+      client.research({
+        schemaVersion: 2,
+        question: "What must the client send?",
+        rfc: "RFC9110",
+        searchTerms: undefined,
+      }),
+    ).rejects.toMatchObject({
+      _tag: "RfcDiscoveryError",
+      stage: "request",
+      attempts: 3,
+    } satisfies Partial<RfcDiscoveryError>);
+    expect(datatracker.urls).toHaveLength(3);
+  });
+
+  test("refuses a retry whose delay would cross the ten-second fetch deadline", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    let clockReads = 0;
+    const datatracker = makeDatatrackerHttpClient(
+      () => new Response("rate limited", { status: 429, headers: { "retry-after": "1" } }),
+    );
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      datatrackerHttpClient: datatracker.client,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      decisionModel: makeDecisionModel(),
+      now: () => (clockReads++ < 3 ? 0 : 9_500),
+    });
+    clients.push(client);
+
+    await expect(
+      client.research({
+        schemaVersion: 2,
+        question: "What must the client send?",
+        rfc: "RFC9110",
+        searchTerms: undefined,
+      }),
+    ).rejects.toMatchObject({
+      _tag: "RfcDiscoveryError",
+      stage: "request",
+      attempts: 1,
+    } satisfies Partial<RfcDiscoveryError>);
+    expect(datatracker.urls).toHaveLength(1);
+  });
+
+  test("uses freshness and ETag validators for the RFC source cache", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    let now = 0;
+    const datatracker = makeDatatrackerHttpClient((url) =>
+      url.pathname.endsWith("/document/rfc9110/")
+        ? Response.json(datatrackerDocument)
+        : Response.json({
+            meta: { limit: 64, offset: 0, total_count: 0, next: null },
+            objects: [],
+          }),
+    );
+    const validators: Array<string | undefined> = [];
+    let sourceRequests = 0;
+    const sourceHttp = HttpClient.make((request) => {
+      sourceRequests += 1;
+      validators.push(request.headers["if-none-match"]);
+      if (sourceRequests === 2) {
+        return Effect.succeed(
+          HttpClientResponse.fromWeb(
+            request,
+            new Response(null, {
+              status: 304,
+              headers: { etag: '"one"', "cache-control": "max-age=60" },
+            }),
+          ),
+        );
+      }
+      const text = sourceRequests === 1 ? sourceText : sourceText.replace("target", "selected");
+      return Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          new Response(text, {
+            status: 200,
+            headers: {
+              etag: sourceRequests === 1 ? '"one"' : '"two"',
+              "cache-control": "max-age=60",
+              "content-type": "text/plain; charset=utf-8",
+            },
+          }),
+        ),
+      );
+    });
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      datatrackerHttpClient: datatracker.client,
+      rfcSourceHttpClient: sourceHttp,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      decisionModel: makeDecisionModel(),
+      now: () => now,
+    });
+    clients.push(client);
+    const request = {
+      schemaVersion: 2 as const,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+      searchTerms: undefined,
+    };
+
+    const miss = await client.research(request);
+    now = 30_000;
+    const hit = await client.research(request);
+    now = 61_000;
+    const revalidated = await client.research(request);
+    now = 122_000;
+    const replaced = await client.research(request);
+
+    expect(
+      [miss, hit, revalidated, replaced].map(
+        (result) => result.diagnostics.retrieval?.sourceCacheOutcome,
+      ),
+    ).toEqual(["miss", "hit", "revalidated", "replaced"]);
+    expect(validators).toEqual([undefined, '"one"', '"one"']);
+    expect(sourceRequests).toBe(3);
+    expect(replaced.evidence[0]?.provenance.sourceHash).toBe(
+      hashRfcSource(sourceText.replace("target", "selected")),
+    );
+  });
+
+  test("fails closed when stale RFC text cannot be revalidated", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    let now = 0;
+    const datatracker = makeDatatrackerHttpClient((url) =>
+      url.pathname.endsWith("/document/rfc9110/")
+        ? Response.json(datatrackerDocument)
+        : Response.json({
+            meta: { limit: 64, offset: 0, total_count: 0, next: null },
+            objects: [],
+          }),
+    );
+    let sourceRequests = 0;
+    const sourceHttp = HttpClient.make((request) => {
+      sourceRequests += 1;
+      return Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          sourceRequests === 1
+            ? new Response(sourceText, {
+                status: 200,
+                headers: {
+                  etag: '"one"',
+                  "cache-control": "max-age=0",
+                  "content-type": "text/plain",
+                },
+              })
+            : new Response("unavailable", { status: 503 }),
+        ),
+      );
+    });
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      datatrackerHttpClient: datatracker.client,
+      rfcSourceHttpClient: sourceHttp,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      decisionModel: makeDecisionModel(),
+      now: () => now,
+    });
+    clients.push(client);
+    const request = {
+      schemaVersion: 2 as const,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+      searchTerms: undefined,
+    };
+
+    await client.research(request);
+    now = 1;
+    await expect(client.research(request)).rejects.toMatchObject({
+      _tag: "RfcSourceRevalidationError",
+    });
+    expect(sourceRequests).toBe(2);
   });
 
   test("fails malformed Datatracker metadata immediately without local fallback", async () => {
@@ -430,6 +896,37 @@ describe("createRfcClient", () => {
         rfc: null,
       }),
     ).toThrow(InvalidInputError);
+    expect(() =>
+      decodeResearchRequest({
+        schemaVersion: 2,
+        question: "What is HTTP?",
+        rfc: null,
+        searchTerms: ["one", "two", "three", "four", "five"],
+      }),
+    ).toThrow(InvalidInputError);
+    expect(() =>
+      decodeResearchRequest({
+        schemaVersion: 2,
+        question: "What is HTTP?",
+        rfc: null,
+        searchTerms: [""],
+      }),
+    ).toThrow(InvalidInputError);
+    expect(
+      decodeResearchRequest({
+        schemaVersion: 2,
+        question: "What is HTTP?",
+        rfc: null,
+        searchTerms: ["   "],
+      }),
+    ).toMatchObject({ searchTerms: ["   "] });
+    expect(() =>
+      decodeResearchRequest({
+        schemaVersion: 1,
+        question: "What is HTTP?",
+        rfc: "RFC9110",
+      }),
+    ).toThrow(InvalidInputError);
   });
 
   test("rejects work after explicit close and makes close idempotent", async () => {
@@ -444,7 +941,14 @@ describe("createRfcClient", () => {
 
     await client.close();
     await expect(client.close()).resolves.toBeUndefined();
-    await expect(client.catalogStatus()).rejects.toBeInstanceOf(RfcClientClosedError);
+    await expect(
+      client.research({
+        schemaVersion: 2,
+        question: "What is HTTP?",
+        rfc: "RFC9110",
+        searchTerms: undefined,
+      }),
+    ).rejects.toBeInstanceOf(RfcClientClosedError);
 
     await rm(cacheDirectory, { recursive: true, force: true });
   });
@@ -460,35 +964,25 @@ describe("createRfcClient", () => {
     });
 
     await client[Symbol.asyncDispose]();
-    await expect(client.catalogStatus()).rejects.toBeInstanceOf(RfcClientClosedError);
+    await expect(
+      client.research({
+        schemaVersion: 2,
+        question: "What is HTTP?",
+        rfc: "RFC9110",
+        searchTerms: undefined,
+      }),
+    ).rejects.toBeInstanceOf(RfcClientClosedError);
 
     await rm(cacheDirectory, { recursive: true, force: true });
   });
 
   test("maps typed failures to a safe versioned error envelope", () => {
     expect(toErrorEnvelope(new RfcClientClosedError({}))).toEqual({
-      schemaVersion: 1,
+      schemaVersion: 2,
       kind: "error",
       error: {
         code: "client_closed",
         message: "The RFC client is already closed",
-      },
-    });
-
-    expect(
-      toErrorEnvelope(
-        new CatalogRefreshError({
-          stage: "decode",
-          url: "https://datatracker.example/api/v1/doc/document/",
-          reason: "Malformed response",
-        }),
-      ),
-    ).toEqual({
-      schemaVersion: 1,
-      kind: "error",
-      error: {
-        code: "catalog_refresh_failed",
-        message: "Unable to refresh catalog: Malformed response",
       },
     });
 
@@ -502,7 +996,7 @@ describe("createRfcClient", () => {
         }),
       ),
     ).toEqual({
-      schemaVersion: 1,
+      schemaVersion: 2,
       kind: "error",
       error: {
         code: "discovery_failed",

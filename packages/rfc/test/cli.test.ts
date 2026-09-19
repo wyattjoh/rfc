@@ -54,6 +54,30 @@ const runCli = async (
   return { exitCode, stdout, stderr };
 };
 
+const writeLiveSourceCache = async (
+  cacheDirectory: string,
+  sourceText: string,
+  fetchedAt: string,
+): Promise<void> => {
+  await mkdir(join(cacheDirectory, "sources", "v2"), { recursive: true });
+  await writeFile(
+    join(cacheDirectory, "sources", "v2", "RFC9110.json"),
+    JSON.stringify({
+      schemaVersion: 2,
+      kind: "rfc_source_cache_entry",
+      cacheIdentity: "rfc-source-v2",
+      identifier: "RFC9110",
+      rfcNumber: 9110,
+      sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+      text: sourceText,
+      contentHash: hashRfcSource(sourceText),
+      etag: '"fixture"',
+      fetchedAt,
+      freshUntil: "9999-12-31T23:59:59.999Z",
+    }),
+  );
+};
+
 const writeUnattestedCalibrationReport = async (path: string): Promise<void> => {
   const observations = evaluationCorpus.cases.map((evaluationCase) => {
     const expectedOutcome =
@@ -148,89 +172,11 @@ afterEach(() => {
 });
 
 describe("rfc process protocol", () => {
-  test("writes a versioned catalog status response to stdout", async () => {
-    const cacheDirectory = await mkdtemp(join(tmpdir(), "rfc-cli-test-"));
-    const result = await runCli(["catalog", "status", "--cache-directory", cacheDirectory]);
+  test("does not register the removed catalog command", async () => {
+    const result = await runCli(["catalog", "status"]);
 
-    expect(result.exitCode).toBe(0);
-    expect(JSON.parse(result.stdout)).toEqual({
-      schemaVersion: 1,
-      kind: "catalog_status",
-      state: "missing",
-      catalogPath: join(cacheDirectory, "catalog.json"),
-      cacheIdentity: "rfc-catalog-v1",
-      fetchedAt: null,
-      refreshedAt: null,
-      ageMs: null,
-      documentCount: 0,
-    });
-    expect(result.stderr).toBe("");
-
-    const human = await runCli([
-      "catalog",
-      "status",
-      "--cache-directory",
-      cacheDirectory,
-      "--format",
-      "human",
-    ]);
-    expect(human.exitCode).toBe(0);
-    expect(human.stderr).toBe("");
-    expect(human.stdout).toContain("Catalog: missing");
-    expect(human.stdout).toContain(`Path: ${join(cacheDirectory, "catalog.json")}`);
-  });
-
-  test("refreshes the catalog through the JSON process protocol", async () => {
-    const cacheDirectory = await mkdtemp(join(tmpdir(), "rfc-cli-refresh-test-"));
-    const server = Bun.serve({
-      port: 0,
-      fetch(request) {
-        const url = new URL(request.url);
-        if (url.pathname.endsWith("/document/")) {
-          return Response.json({
-            meta: { limit: 500, offset: 0, total_count: 1, next: null, previous: null },
-            objects: [
-              {
-                name: "rfc9110",
-                rfc_number: 9110,
-                title: "HTTP Semantics",
-                abstract: "HTTP semantics.",
-                resource_uri: "/api/v1/doc/document/rfc9110/",
-                stream: "/api/v1/name/streamname/ietf/",
-                states: [],
-              },
-            ],
-          });
-        }
-        if (url.pathname.endsWith("/relateddocument/")) {
-          return Response.json({
-            meta: { limit: 500, offset: 0, total_count: 0, next: null, previous: null },
-            objects: [],
-          });
-        }
-        return new Response("not found", { status: 404 });
-      },
-    });
-    servers.push(server);
-
-    const result = await runCli([
-      "catalog",
-      "refresh",
-      "--cache-directory",
-      cacheDirectory,
-      "--datatracker-api-url",
-      `${server.url}api/v1/`,
-    ]);
-
-    expect(result.exitCode).toBe(0);
-    expect(JSON.parse(result.stdout)).toMatchObject({
-      schemaVersion: 1,
-      kind: "catalog_refresh",
-      state: "fresh",
-      documentCount: 1,
-      cacheIdentity: "rfc-catalog-v1",
-    });
-    expect(result.stderr).toBe("");
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toBe("");
   });
 
   test("accepts version 2 known-RFC JSON and convenience input", async () => {
@@ -261,6 +207,7 @@ describe("rfc process protocol", () => {
         fetchedAt,
       }),
     );
+    await writeLiveSourceCache(cacheDirectory, sourceText, fetchedAt);
 
     const datatrackerUrls: Array<string> = [];
     let modelCalls = 0;
@@ -374,6 +321,112 @@ describe("rfc process protocol", () => {
     expect(await Bun.file(join(cacheDirectory, "catalog.json")).exists()).toBe(false);
   });
 
+  test("routes repeatable topic terms through bounded live discovery", async () => {
+    const cacheDirectory = await mkdtemp(join(tmpdir(), "rfc-cli-live-topic-test-"));
+    const sourceText =
+      "1. Requirements\n\nThe client MUST send a request containing the target resource.\n";
+    const fetchedAt = new Date().toISOString();
+    await writeLiveSourceCache(cacheDirectory, sourceText, fetchedAt);
+    const topicUrls: Array<string> = [];
+    let modelCalls = 0;
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const url = new URL(request.url);
+        if (url.pathname.endsWith("/document/")) {
+          topicUrls.push(url.toString());
+          return Response.json({
+            meta: { limit: 20, offset: 0, total_count: 1, next: null, previous: null },
+            objects: [
+              {
+                name: "rfc9110",
+                rfc_number: 9110,
+                title: "HTTP Semantics",
+                abstract: "HTTP semantics.",
+                resource_uri: "/api/v1/doc/document/rfc9110/",
+                stream: "/api/v1/name/streamname/ietf/",
+                states: [],
+              },
+            ],
+          });
+        }
+        if (url.pathname !== "/systemone") return new Response("not found", { status: 404 });
+        modelCalls += 1;
+        const payload = (await request.json()) as {
+          readonly questions: Readonly<Record<string, unknown>>;
+        };
+        return Response.json({
+          model: "jev-1.13.0",
+          answers: Object.fromEntries(
+            Object.keys(payload.questions).map((key) =>
+              key === "question_atomicity"
+                ? [
+                    key,
+                    {
+                      type: "choice",
+                      choice: "atomic",
+                      probabilities: { atomic: 0.99, compound: 0.01 },
+                      confidence: 0.99,
+                    },
+                  ]
+                : modelCalls < 3
+                  ? [key, { type: "noul", noul: 0.99 }]
+                  : [
+                      key,
+                      {
+                        type: "choice",
+                        choice: "direct_answer",
+                        probabilities: {
+                          direct_answer: 0.99,
+                          partial_answer: 0.0025,
+                          background_only: 0.0025,
+                          contradictory: 0.0025,
+                          irrelevant: 0.0025,
+                        },
+                        confidence: 0.99,
+                      },
+                    ],
+            ),
+          ),
+          usage: { input_tokens: 10, output_tokens: 6 },
+        });
+      },
+    });
+    servers.push(server);
+
+    const result = await runCli([
+      "research",
+      "--cache-directory",
+      cacheDirectory,
+      "--datatracker-api-url",
+      `${server.url}api/v1/`,
+      "--typesafe-api-url",
+      server.url.toString(),
+      "--question",
+      "Which HTTP requirements apply?",
+      "--search-term",
+      "HTTP semantics",
+      "--search-term",
+      "client request",
+    ]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      schemaVersion: 2,
+      kind: "evidence_bundle",
+      rfc: { identifier: "RFC9110" },
+    });
+    expect(
+      topicUrls.map((value) => {
+        const url = new URL(value);
+        return (
+          url.searchParams.get("title__icontains") ?? url.searchParams.get("abstract__icontains")
+        );
+      }),
+    ).toEqual(["HTTP semantics", "HTTP semantics", "client request", "client request"]);
+  });
+
   test("requires the exact release attestation even when automatic answers are enabled", async () => {
     const cacheDirectory = await mkdtemp(join(tmpdir(), "rfc-cli-research-test-"));
     const sourceText =
@@ -426,6 +479,7 @@ describe("rfc process protocol", () => {
         fetchedAt,
       }),
     );
+    await writeLiveSourceCache(cacheDirectory, sourceText, fetchedAt);
 
     const evaluationOutput = join(cacheDirectory, "accepted-evaluation.json");
     await writeUnattestedCalibrationReport(evaluationOutput);
@@ -434,7 +488,25 @@ describe("rfc process protocol", () => {
     const server = Bun.serve({
       port: 0,
       fetch(request) {
-        if (new URL(request.url).pathname !== "/systemone") {
+        const url = new URL(request.url);
+        if (url.pathname.endsWith("/document/rfc9110/")) {
+          return Response.json({
+            name: "rfc9110",
+            rfc_number: 9110,
+            title: "HTTP Semantics",
+            abstract: "HTTP semantics.",
+            resource_uri: "/api/v1/doc/document/rfc9110/",
+            stream: "/api/v1/name/streamname/ietf/",
+            states: [],
+          });
+        }
+        if (url.pathname.endsWith("/relateddocument/")) {
+          return Response.json({
+            meta: { limit: 64, offset: 0, total_count: 0, next: null, previous: null },
+            objects: [],
+          });
+        }
+        if (url.pathname !== "/systemone") {
           return new Response("not found", { status: 404 });
         }
         modelCalls += 1;
@@ -482,8 +554,10 @@ describe("rfc process protocol", () => {
         cacheDirectory,
         "--typesafe-api-url",
         server.url.toString(),
+        "--datatracker-api-url",
+        `${server.url}api/v1/`,
       ],
-      JSON.stringify({ schemaVersion: 1, question: "What must the client send?", rfc: "9110" }),
+      JSON.stringify({ schemaVersion: 2, question: "What must the client send?", rfc: "9110" }),
     );
 
     expect(result.exitCode).toBe(0);
@@ -503,10 +577,12 @@ describe("rfc process protocol", () => {
         cacheDirectory,
         "--typesafe-api-url",
         server.url.toString(),
+        "--datatracker-api-url",
+        `${server.url}api/v1/`,
         "--format",
         "human",
       ],
-      JSON.stringify({ schemaVersion: 1, question: "What must the client send?", rfc: "9110" }),
+      JSON.stringify({ schemaVersion: 2, question: "What must the client send?", rfc: "9110" }),
     );
     expect(human.exitCode).toBe(0);
     expect(human.stderr).toBe("");
@@ -548,6 +624,24 @@ describe("rfc process protocol", () => {
     const server = Bun.serve({
       port: 0,
       async fetch(request) {
+        const url = new URL(request.url);
+        if (url.pathname.endsWith("/document/rfc9110/")) {
+          return Response.json({
+            name: "rfc9110",
+            rfc_number: 9110,
+            title: "HTTP Semantics",
+            abstract: "HTTP semantics.",
+            resource_uri: "/api/v1/doc/document/rfc9110/",
+            stream: "/api/v1/name/streamname/ietf/",
+            states: [],
+          });
+        }
+        if (url.pathname.endsWith("/relateddocument/")) {
+          return Response.json({
+            meta: { limit: 64, offset: 0, total_count: 0, next: null, previous: null },
+            objects: [],
+          });
+        }
         requestCount += 1;
         const payload = (await request.json()) as {
           readonly questions: Readonly<Record<string, unknown>>;
@@ -665,6 +759,7 @@ describe("rfc process protocol", () => {
           fetchedAt,
         }),
       );
+      await writeLiveSourceCache(cacheDirectory, sourceText, fetchedAt);
 
       const result = await runCli(
         [
@@ -673,14 +768,16 @@ describe("rfc process protocol", () => {
           cacheDirectory,
           "--typesafe-api-url",
           server.url.toString(),
+          "--datatracker-api-url",
+          `${server.url}api/v1/`,
         ],
-        JSON.stringify({ schemaVersion: 1, question: currentCase.question, rfc: "9110" }),
+        JSON.stringify({ schemaVersion: 2, question: currentCase.question, rfc: "9110" }),
       );
 
       expect(result.exitCode).toBe(0);
       expect(result.stderr).toBe("");
       expect(JSON.parse(result.stdout)).toMatchObject({
-        schemaVersion: 1,
+        schemaVersion: 2,
         kind: "evidence_bundle",
         status: currentCase.status,
       });
@@ -822,18 +919,19 @@ describe("rfc process protocol", () => {
     expect(result.exitCode).not.toBe(0);
     expect(result.stdout).toBe("");
     expect(JSON.parse(result.stderr)).toEqual({
-      schemaVersion: 1,
+      schemaVersion: 2,
       kind: "error",
       error: {
         code: "invalid_input",
-        message: "Research input must use schema version 1 or a version 2 known-RFC request",
+        message:
+          "Research input must use schema version 2 with an RFC or one to four bounded search terms",
       },
     });
   });
 
   test("reports a missing credential before constructing a provider", async () => {
     const result = await runCli(
-      ["research", "--question", "What is HTTP?"],
+      ["research", "--question", "What is HTTP?", "--rfc", "RFC9110"],
       undefined,
       makeFixtureCredentialStore(null),
     );
@@ -841,7 +939,7 @@ describe("rfc process protocol", () => {
     expect(result.exitCode).toBe(1);
     expect(result.stdout).toBe("");
     expect(JSON.parse(result.stderr)).toEqual({
-      schemaVersion: 1,
+      schemaVersion: 2,
       kind: "error",
       error: {
         code: "credential_missing",

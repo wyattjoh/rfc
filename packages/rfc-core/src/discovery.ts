@@ -19,7 +19,7 @@ import { defaultDatatrackerApiUrl, type CatalogDocument } from "./catalog";
 export const datatrackerMaxAttempts = 3;
 
 /**
- * Maximum elapsed time for one required Datatracker request, including retries.
+ * Maximum elapsed time for one complete Datatracker fetch/decode/retry operation.
  */
 export const datatrackerRequestDeadlineMilliseconds = 10_000;
 
@@ -27,6 +27,26 @@ export const datatrackerRequestDeadlineMilliseconds = 10_000;
  * Maximum successor relationship rows requested for one RFC.
  */
 export const datatrackerSuccessorLimit = 64;
+
+/**
+ * Maximum number of rows requested for one topic-search stream.
+ */
+export const datatrackerTopicResultLimit = 20;
+
+/**
+ * Maximum number of merged document candidates returned by live discovery.
+ */
+export const datatrackerDocumentCandidateLimit = 32;
+
+/**
+ * Maximum number of RFC contexts visited during live currency traversal.
+ */
+export const datatrackerCurrencyContextLimit = 8;
+
+/**
+ * Maximum successor depth visited during live currency traversal.
+ */
+export const datatrackerCurrencyDepthLimit = 16;
 
 /**
  * One request-local upstream request trace.
@@ -55,7 +75,23 @@ export const LiveRetrievalTraceSchema = Schema.Struct({
   sourceRequestCount: Schema.Natural,
   metadataMs: Schema.Number,
   sourceMs: Schema.Number,
-  sourceCacheOutcome: Schema.Literals(["hit", "miss"]),
+  sourceCacheOutcome: Schema.Literals([
+    "hit",
+    "miss",
+    "revalidated",
+    "replaced",
+    "repaired",
+    "not_requested",
+  ]),
+  upstreamRows: Schema.optionalKey(Schema.Natural),
+  uniqueCandidates: Schema.optionalKey(Schema.Natural),
+  traversalComplete: Schema.optionalKey(Schema.Boolean),
+  traversalContexts: Schema.optionalKey(Schema.Natural),
+  traversalDepth: Schema.optionalKey(Schema.Natural),
+  successorRows: Schema.optionalKey(Schema.Natural),
+  contextLimit: Schema.optionalKey(Schema.Natural),
+  depthLimit: Schema.optionalKey(Schema.Natural),
+  relationshipLimit: Schema.optionalKey(Schema.Natural),
   requests: Schema.Array(RetrievalRequestTraceSchema),
 });
 
@@ -78,13 +114,33 @@ export class RfcDiscoveryError extends Schema.TaggedError<RfcDiscoveryError>()(
 ) {}
 
 /**
- * Request-local exact RFC metadata and direct successor information.
+ * Request-local exact RFC metadata and bounded successor information.
  */
 export interface LiveRfcLookup {
   /**
    * Exact normalized metadata for the requested published RFC.
    */
   readonly document: CatalogDocument;
+  /**
+   * Request-local metadata for every RFC visited during bounded currency traversal.
+   */
+  readonly documents: ReadonlyArray<CatalogDocument>;
+  /**
+   * Whether every discovered successor fit within traversal bounds.
+   */
+  readonly traversalComplete: boolean;
+  /**
+   * Number of RFC contexts visited during traversal.
+   */
+  readonly traversalContexts: number;
+  /**
+   * Greatest successor depth visited from the requested RFC.
+   */
+  readonly traversalDepth: number;
+  /**
+   * Number of successor relationship rows observed.
+   */
+  readonly successorRows: number;
   /**
    * Datatracker request traces produced by this lookup.
    */
@@ -96,13 +152,41 @@ export interface LiveRfcLookup {
 }
 
 /**
+ * Request-local topic-discovery candidates and diagnostics.
+ */
+export interface LiveTopicDiscovery {
+  /**
+   * Deterministically merged RFC metadata candidates.
+   */
+  readonly documents: ReadonlyArray<CatalogDocument>;
+  /**
+   * Datatracker request traces produced by topic discovery.
+   */
+  readonly requests: ReadonlyArray<RetrievalRequestTrace>;
+  /**
+   * Number of rows returned before RFC deduplication.
+   */
+  readonly upstreamRows: number;
+  /**
+   * Total time spent retrieving and merging candidates.
+   */
+  readonly metadataMs: number;
+}
+
+/**
  * Service for bounded request-local RFC discovery.
  */
 export interface RfcDiscoveryService {
   /**
-   * Retrieve exact metadata and direct successor relationships for one RFC.
+   * Retrieve exact metadata and recursively traverse successor relationships.
    */
   readonly lookupKnownRfc: (identifier: string) => Effect.Effect<LiveRfcLookup, RfcDiscoveryError>;
+  /**
+   * Discover bounded RFC candidates for ordered caller-supplied terms.
+   */
+  readonly discoverTopic: (
+    searchTerms: ReadonlyArray<string>,
+  ) => Effect.Effect<LiveTopicDiscovery, RfcDiscoveryError>;
 }
 
 /**
@@ -143,6 +227,16 @@ const DatatrackerRelationshipPageSchema = Schema.Struct({
 });
 
 type DatatrackerRelationshipPage = Schema.Schema.Type<typeof DatatrackerRelationshipPageSchema>;
+
+const DatatrackerDocumentPageSchema = Schema.Struct({
+  meta: Schema.Struct({
+    next: Schema.NullOr(Schema.String),
+    total_count: Schema.Natural,
+  }),
+  objects: Schema.Array(DatatrackerDocumentSchema),
+});
+
+type DatatrackerDocumentPage = Schema.Schema.Type<typeof DatatrackerDocumentPageSchema>;
 
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : "The upstream operation failed";
@@ -188,6 +282,18 @@ const makeExactDocumentUrl = (baseUrl: string, name: string): string => {
   return url.toString();
 };
 
+const makeTopicUrl = (baseUrl: string, term: string, field: "title" | "abstract"): string => {
+  const base = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
+  const url = new URL("doc/document/", base);
+  url.searchParams.set("format", "json");
+  url.searchParams.set("limit", String(datatrackerTopicResultLimit));
+  url.searchParams.set("offset", "0");
+  url.searchParams.set("order_by", "-rfc_number");
+  url.searchParams.set("type__slug", "rfc");
+  url.searchParams.set(`${field}__icontains`, term);
+  return url.toString();
+};
+
 const makeSuccessorUrl = (baseUrl: string, name: string): string => {
   const base = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
   const url = new URL("doc/relateddocument/", base);
@@ -200,19 +306,14 @@ const makeSuccessorUrl = (baseUrl: string, name: string): string => {
 };
 
 const isTransientStatus = (status: number): boolean =>
-  status === 408 ||
-  status === 429 ||
-  status === 500 ||
-  status === 502 ||
-  status === 503 ||
-  status === 504;
+  status === 408 || status === 429 || (status >= 500 && status <= 599);
 
 const retryAfterMilliseconds = (
   response: HttpClientResponse.HttpClientResponse,
   now: number,
 ): number | undefined => {
   const value = Option.getOrUndefined(Headers.get("retry-after")(response.headers));
-  if (value === undefined) return undefined;
+  if (value === undefined || value.trim().length === 0) return undefined;
   const seconds = Number(value);
   if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1_000;
   const date = Date.parse(value);
@@ -237,19 +338,35 @@ type FetchedJson = {
   readonly trace: RetrievalRequestTrace;
 };
 
-const fetchJson = Effect.fnUntraced(function* (
+type RequestDeadline = {
+  readonly startedAt: number;
+  elapsedFloor: number;
+};
+
+type FetchState = {
+  attempts: number;
+  readonly deadline: RequestDeadline;
+};
+
+const fetchJsonWithinDeadline = Effect.fnUntraced(function* (
   http: HttpClient.HttpClient,
   url: string,
   kind: "metadata" | "relationships",
+  state: FetchState,
 ): Effect.fn.Return<FetchedJson, RfcDiscoveryError> {
-  const startedAt = yield* Clock.currentTimeMillis;
+  const operationStartedAt = yield* Clock.currentTimeMillis;
   let scheduledDelay = 0;
   let lastStatus: number | null = null;
   const statuses: Array<number | null> = [];
 
   for (let attempt = 1; attempt <= datatrackerMaxAttempts; attempt += 1) {
+    state.attempts = attempt;
     const attemptStartedAt = yield* Clock.currentTimeMillis;
-    const elapsedBeforeAttempt = Math.max(0, attemptStartedAt - startedAt, scheduledDelay);
+    const elapsedBeforeAttempt = Math.max(
+      0,
+      attemptStartedAt - state.deadline.startedAt,
+      state.deadline.elapsedFloor,
+    );
     if (elapsedBeforeAttempt >= datatrackerRequestDeadlineMilliseconds) {
       return yield* new RfcDiscoveryError({
         stage: "request",
@@ -261,17 +378,45 @@ const fetchJson = Effect.fnUntraced(function* (
 
     const remaining = datatrackerRequestDeadlineMilliseconds - elapsedBeforeAttempt;
     const requestResult = yield* Effect.result(
-      http.get(url).pipe(Effect.timeout(Duration.millis(remaining))),
+      Effect.gen(function* () {
+        const response = yield* http.get(url);
+        const responseUrl = response.url || url;
+        const responseOrigin = yield* Effect.try({
+          try: () => new URL(responseUrl).origin,
+          catch: () =>
+            new RfcDiscoveryError({
+              stage: "request",
+              url: responseUrl,
+              reason: "Datatracker returned an invalid response URL",
+              attempts: attempt,
+            }),
+        });
+        if (responseOrigin !== new URL(url).origin) {
+          return yield* new RfcDiscoveryError({
+            stage: "request",
+            url: responseUrl,
+            reason: "Datatracker redirected outside the configured API origin",
+            attempts: attempt,
+          });
+        }
+        if (response.status < 200 || response.status >= 300) {
+          return { response, value: undefined } as const;
+        }
+
+        const value = yield* response.json;
+        return { response, value } as const;
+      }).pipe(Effect.timeout(Duration.millis(remaining))),
     );
     if (Result.isFailure(requestResult)) {
       statuses.push(null);
       const failure = requestResult.failure;
+      if (failure instanceof RfcDiscoveryError) return yield* failure;
       const transient =
         Cause.isTimeoutError(failure) ||
         (HttpClientError.isHttpClientError(failure) && failure.reason._tag === "TransportError");
       if (!transient || attempt >= datatrackerMaxAttempts) {
         return yield* new RfcDiscoveryError({
-          stage: "request",
+          stage: transient ? "request" : "decode",
           url,
           reason: transient
             ? `Datatracker retry budget exhausted after ${attempt} attempts`
@@ -280,7 +425,12 @@ const fetchJson = Effect.fnUntraced(function* (
         });
       }
       const delay = yield* retryDelayMilliseconds(undefined, attempt);
-      if (elapsedBeforeAttempt + delay > datatrackerRequestDeadlineMilliseconds) {
+      const failureObservedAt = yield* Clock.currentTimeMillis;
+      const elapsedAtFailure = Math.max(
+        failureObservedAt - state.deadline.startedAt,
+        state.deadline.elapsedFloor,
+      );
+      if (elapsedAtFailure + delay >= datatrackerRequestDeadlineMilliseconds) {
         return yield* new RfcDiscoveryError({
           stage: "request",
           url,
@@ -288,19 +438,25 @@ const fetchJson = Effect.fnUntraced(function* (
           attempts: attempt,
         });
       }
+      state.deadline.elapsedFloor = elapsedAtFailure + delay;
       yield* Effect.sleep(Duration.millis(delay));
       scheduledDelay += delay;
       continue;
     }
 
-    const response = requestResult.success;
+    const { response, value } = requestResult.success;
     lastStatus = response.status;
     statuses.push(response.status);
     if (isTransientStatus(response.status)) {
       const delay = yield* retryDelayMilliseconds(response, attempt);
+      const responseObservedAt = yield* Clock.currentTimeMillis;
+      const elapsedAtResponse = Math.max(
+        responseObservedAt - state.deadline.startedAt,
+        state.deadline.elapsedFloor,
+      );
       if (
         attempt >= datatrackerMaxAttempts ||
-        elapsedBeforeAttempt + delay > datatrackerRequestDeadlineMilliseconds
+        elapsedAtResponse + delay >= datatrackerRequestDeadlineMilliseconds
       ) {
         return yield* new RfcDiscoveryError({
           stage: "request",
@@ -309,6 +465,7 @@ const fetchJson = Effect.fnUntraced(function* (
           attempts: attempt,
         });
       }
+      state.deadline.elapsedFloor = elapsedAtResponse + delay;
       yield* Effect.sleep(Duration.millis(delay));
       scheduledDelay += delay;
       continue;
@@ -323,45 +480,20 @@ const fetchJson = Effect.fnUntraced(function* (
       });
     }
 
-    const responseUrl = response.url || url;
-    const responseOrigin = yield* Effect.try({
-      try: () => new URL(responseUrl).origin,
-      catch: () =>
-        new RfcDiscoveryError({
-          stage: "request",
-          url: responseUrl,
-          reason: "Datatracker returned an invalid response URL",
-          attempts: attempt,
-        }),
-    });
-    if (responseOrigin !== new URL(url).origin) {
-      return yield* new RfcDiscoveryError({
-        stage: "request",
-        url: responseUrl,
-        reason: "Datatracker redirected outside the configured API origin",
-        attempts: attempt,
-      });
-    }
-
-    const jsonResult = yield* Effect.result(response.json);
-    if (Result.isFailure(jsonResult)) {
-      return yield* new RfcDiscoveryError({
-        stage: "decode",
-        url,
-        reason: errorMessage(jsonResult.failure),
-        attempts: attempt,
-      });
-    }
     const finishedAt = yield* Clock.currentTimeMillis;
+    state.deadline.elapsedFloor = Math.max(
+      state.deadline.elapsedFloor,
+      finishedAt - state.deadline.startedAt,
+    );
     return {
-      value: jsonResult.success,
+      value,
       trace: {
         kind,
         url,
         attempts: attempt,
         status: response.status,
         statuses,
-        durationMs: Math.max(0, finishedAt - startedAt, scheduledDelay),
+        durationMs: Math.max(0, finishedAt - operationStartedAt, scheduledDelay),
       },
     };
   }
@@ -371,6 +503,18 @@ const fetchJson = Effect.fnUntraced(function* (
     url,
     reason: `Datatracker retry policy ended after ${datatrackerMaxAttempts} attempts (HTTP ${lastStatus ?? "unknown"})`,
     attempts: datatrackerMaxAttempts,
+  });
+});
+
+const fetchJson = Effect.fnUntraced(function* (
+  http: HttpClient.HttpClient,
+  url: string,
+  kind: "metadata" | "relationships",
+): Effect.fn.Return<FetchedJson, RfcDiscoveryError> {
+  const startedAt = yield* Clock.currentTimeMillis;
+  return yield* fetchJsonWithinDeadline(http, url, kind, {
+    attempts: 0,
+    deadline: { startedAt, elapsedFloor: 0 },
   });
 });
 
@@ -403,9 +547,8 @@ const decodeRelationships = (
     try: () => {
       const page = Schema.decodeUnknownSync(DatatrackerRelationshipPageSchema)(value);
       if (
-        page.meta.next !== null ||
-        page.meta.total_count > datatrackerSuccessorLimit ||
-        page.objects.length > datatrackerSuccessorLimit
+        page.objects.length > datatrackerSuccessorLimit ||
+        page.meta.total_count < page.objects.length
       ) {
         throw new Error("successor relationship response exceeded its bound");
       }
@@ -416,6 +559,32 @@ const decodeRelationships = (
         stage: "decode",
         url,
         reason: "Datatracker returned malformed or unbounded successor relationships",
+        attempts,
+      }),
+  });
+
+const decodeDocumentPage = (
+  value: unknown,
+  url: string,
+  attempts: number,
+): Effect.Effect<DatatrackerDocumentPage, RfcDiscoveryError> =>
+  Effect.try({
+    try: () => {
+      const page = Schema.decodeUnknownSync(DatatrackerDocumentPageSchema)(value);
+      if (
+        page.meta.next !== null ||
+        page.meta.total_count > datatrackerTopicResultLimit ||
+        page.objects.length > datatrackerTopicResultLimit
+      ) {
+        throw new Error("topic response exceeded its bound");
+      }
+      return page;
+    },
+    catch: () =>
+      new RfcDiscoveryError({
+        stage: "decode",
+        url,
+        reason: "Datatracker returned malformed or unbounded topic metadata",
         attempts,
       }),
   });
@@ -468,22 +637,18 @@ const normalizeDocument = (
       }),
   });
 
-const lookupKnownRfc = Effect.fnUntraced(function* (
+type ExactLookup = {
+  readonly document: CatalogDocument;
+  readonly successorNames: ReadonlyArray<string>;
+  readonly relationshipBoundHit: boolean;
+  readonly requests: ReadonlyArray<RetrievalRequestTrace>;
+};
+
+const lookupOneRfc = Effect.fnUntraced(function* (
   http: HttpClient.HttpClient,
   baseUrl: string,
-  identifier: string,
-): Effect.fn.Return<LiveRfcLookup, RfcDiscoveryError> {
-  const startedAt = yield* Clock.currentTimeMillis;
-  const name = normalizeRfcName(identifier);
-  if (name === undefined) {
-    return yield* new RfcDiscoveryError({
-      stage: "request",
-      url: baseUrl,
-      reason: "RFC identifier must contain a positive published RFC number",
-      attempts: 0,
-    });
-  }
-
+  name: string,
+): Effect.fn.Return<ExactLookup, RfcDiscoveryError> {
   const documentUrl = yield* Effect.try({
     try: () => makeExactDocumentUrl(baseUrl, name),
     catch: (error) =>
@@ -522,10 +687,145 @@ const lookupKnownRfc = Effect.fnUntraced(function* (
     relationshipUrl,
     relationshipResponse.trace.attempts,
   );
-  const finishedAt = yield* Clock.currentTimeMillis;
   return {
     document: normalized,
+    successorNames: [...normalized.updatedBy, ...normalized.obsoletedBy]
+      .map((identifier) => identifier.toLowerCase())
+      .sort(),
+    relationshipBoundHit:
+      relationshipPage.meta.next !== null ||
+      relationshipPage.meta.total_count > relationshipPage.objects.length ||
+      relationshipPage.objects.length >= datatrackerSuccessorLimit,
     requests: [documentResponse.trace, relationshipResponse.trace],
+  };
+});
+
+const lookupKnownRfc = Effect.fnUntraced(function* (
+  http: HttpClient.HttpClient,
+  baseUrl: string,
+  identifier: string,
+): Effect.fn.Return<LiveRfcLookup, RfcDiscoveryError> {
+  const startedAt = yield* Clock.currentTimeMillis;
+  const requestedName = normalizeRfcName(identifier);
+  if (requestedName === undefined) {
+    return yield* new RfcDiscoveryError({
+      stage: "request",
+      url: baseUrl,
+      reason: "RFC identifier must contain a positive published RFC number",
+      attempts: 0,
+    });
+  }
+
+  const queue: Array<{ readonly name: string; readonly depth: number }> = [
+    { name: requestedName, depth: 0 },
+  ];
+  const queued = new Set([requestedName]);
+  const visited = new Set<string>();
+  const documents: Array<CatalogDocument> = [];
+  const requests: Array<RetrievalRequestTrace> = [];
+  let traversalComplete = true;
+  let traversalDepth = 0;
+  let successorRows = 0;
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (current === undefined || visited.has(current.name)) continue;
+    if (documents.length >= datatrackerCurrencyContextLimit) {
+      traversalComplete = false;
+      break;
+    }
+    visited.add(current.name);
+    const lookup = yield* lookupOneRfc(http, baseUrl, current.name);
+    documents.push(lookup.document);
+    requests.push(...lookup.requests);
+    traversalDepth = Math.max(traversalDepth, current.depth);
+    successorRows += lookup.successorNames.length;
+    if (lookup.relationshipBoundHit) traversalComplete = false;
+
+    for (const successorName of lookup.successorNames) {
+      if (visited.has(successorName) || queued.has(successorName)) continue;
+      if (current.depth >= datatrackerCurrencyDepthLimit) {
+        traversalComplete = false;
+        continue;
+      }
+      if (queued.size >= datatrackerCurrencyContextLimit) {
+        traversalComplete = false;
+        continue;
+      }
+      queued.add(successorName);
+      queue.push({ name: successorName, depth: current.depth + 1 });
+    }
+  }
+
+  const requested = documents.find(
+    (document) => document.identifier.toLowerCase() === requestedName,
+  );
+  if (requested === undefined) {
+    return yield* new RfcDiscoveryError({
+      stage: "decode",
+      url: makeExactDocumentUrl(baseUrl, requestedName),
+      reason: "Datatracker did not return the requested RFC metadata",
+      attempts: 1,
+    });
+  }
+  const finishedAt = yield* Clock.currentTimeMillis;
+  return {
+    document: requested,
+    documents,
+    traversalComplete,
+    traversalContexts: documents.length,
+    traversalDepth,
+    successorRows,
+    requests,
+    metadataMs: Math.max(0, finishedAt - startedAt),
+  };
+});
+
+const discoverTopic = Effect.fnUntraced(function* (
+  http: HttpClient.HttpClient,
+  baseUrl: string,
+  searchTerms: ReadonlyArray<string>,
+): Effect.fn.Return<LiveTopicDiscovery, RfcDiscoveryError> {
+  const startedAt = yield* Clock.currentTimeMillis;
+  const queries = searchTerms.flatMap((term) => [
+    { term, field: "title" as const },
+    { term, field: "abstract" as const },
+  ]);
+  const streams = yield* Effect.forEach(
+    queries,
+    Effect.fnUntraced(function* ({ field, term }) {
+      const url = makeTopicUrl(baseUrl, term, field);
+      const response = yield* fetchJson(http, url, "metadata");
+      const page = yield* decodeDocumentPage(response.value, url, response.trace.attempts);
+      const documents = yield* Effect.forEach(page.objects, (document) =>
+        normalizeDocument(document, [], url, response.trace.attempts),
+      );
+      return { documents, trace: response.trace };
+    }),
+    { concurrency: 4 },
+  );
+
+  const merged: Array<CatalogDocument> = [];
+  const seen = new Set<string>();
+  for (let row = 0; merged.length < datatrackerDocumentCandidateLimit; row += 1) {
+    let found = false;
+    for (const stream of streams) {
+      const document = stream.documents[row];
+      if (document === undefined) continue;
+      found = true;
+      if (seen.has(document.identifier)) continue;
+      seen.add(document.identifier);
+      merged.push(document);
+      if (merged.length >= datatrackerDocumentCandidateLimit) break;
+    }
+    if (!found) break;
+  }
+
+  const finishedAt = yield* Clock.currentTimeMillis;
+  return {
+    documents: merged,
+    requests: streams.map(({ trace }) => trace),
+    upstreamRows: streams.reduce((count, stream) => count + stream.documents.length, 0),
     metadataMs: Math.max(0, finishedAt - startedAt),
   };
 });
@@ -545,6 +845,7 @@ export const makeRfcDiscoveryHttpLayer = (
     RfcDiscovery,
     RfcDiscovery.of({
       lookupKnownRfc: (identifier) => lookupKnownRfc(http, baseUrl, identifier),
+      discoverTopic: (searchTerms) => discoverTopic(http, baseUrl, searchTerms),
     }),
   );
 
@@ -563,6 +864,7 @@ export const makeDefaultRfcDiscoveryLayer = (
       const http = yield* HttpClient.HttpClient;
       return RfcDiscovery.of({
         lookupKnownRfc: (identifier) => lookupKnownRfc(http, baseUrl, identifier),
+        discoverTopic: (searchTerms) => discoverTopic(http, baseUrl, searchTerms),
       });
     }),
   );

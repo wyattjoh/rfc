@@ -6,25 +6,16 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { Effect, FileSystem, Layer } from "effect";
 import * as PlatformError from "effect/PlatformError";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
+import { CatalogRefreshError, CatalogStore, catalogStoreLayer, makeCatalog } from "../src/catalog";
 import {
-  CatalogRefreshError,
-  CatalogStore,
-  catalogStoreLayer,
-  createRfcClient as createCoreRfcClient,
-  makeCatalog,
-  type RfcClient,
-  type RfcClientOptions,
-} from "../src/index";
+  createRfcCalibrationClient,
+  type RfcCalibrationClient,
+  type RfcCalibrationClientOptions,
+} from "../src/internal-calibration";
 
-const clients: Array<RfcClient> = [];
-type TestClientOptions = Omit<RfcClientOptions, "automaticAnswerActivation"> & {
-  readonly automaticAnswerActivation?: RfcClientOptions["automaticAnswerActivation"];
-};
-const createRfcClient = (options: TestClientOptions) =>
-  createCoreRfcClient({
-    ...options,
-    automaticAnswerActivation: options.automaticAnswerActivation,
-  });
+const clients: Array<RfcCalibrationClient> = [];
+type TestClientOptions = RfcCalibrationClientOptions;
+const createRfcClient = (options: TestClientOptions) => createRfcCalibrationClient(options);
 
 const makeCacheDirectory = async () => mkdtemp(join(tmpdir(), "rfc-core-catalog-test-"));
 
