@@ -14,6 +14,7 @@ import {
 import * as AiError from "effect/unstable/ai/AiError";
 import * as Decision from "effect/unstable/ai/Decision";
 import * as DecisionModel from "effect/unstable/ai/DecisionModel";
+import { LiveRetrievalTraceSchema } from "./discovery";
 import { makeUtf8OffsetMap, moveToUtf8Boundary, utf8OffsetUnit } from "./offsets";
 import { isAutomaticAnswerActivation, type AutomaticAnswerActivation } from "./activation";
 import {
@@ -397,7 +398,7 @@ const ContextDiagnosticsSchema = Schema.Struct({
  * Bounded diagnostics for one semantic research operation.
  */
 export const ResearchDiagnosticsSchema = Schema.Struct({
-  schemaVersion: Schema.Literal(1),
+  schemaVersion: Schema.Literals([1, 2]),
   policyVersion: Schema.NonEmptyString,
   requestedModel: Schema.NonEmptyString,
   resolvedModel: Schema.NonEmptyString,
@@ -410,7 +411,8 @@ export const ResearchDiagnosticsSchema = Schema.Struct({
     Schema.Array(ContextSourceDiagnosticSchema),
     Schema.Undefined,
   ]),
-  catalog: CatalogStatusSchema,
+  catalog: Schema.optionalKey(CatalogStatusSchema),
+  retrieval: Schema.optionalKey(LiveRetrievalTraceSchema),
   currency: Schema.optionalKey(RfcCurrencyReportSchema),
   candidates: CandidateCountsSchema,
   atomicity: AtomicityDiagnosticSchema,
@@ -429,7 +431,7 @@ export type ResearchDiagnostics = Schema.Schema.Type<typeof ResearchDiagnosticsS
  * The versioned public result of known-RFC research.
  */
 export const EvidenceBundleSchema = Schema.Struct({
-  schemaVersion: Schema.Literal(1),
+  schemaVersion: Schema.Literals([1, 2]),
   kind: Schema.Literal("evidence_bundle"),
   status: ResearchStatusSchema,
   question: Schema.NonEmptyString,

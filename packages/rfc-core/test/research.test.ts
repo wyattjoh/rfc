@@ -1761,7 +1761,7 @@ describe("known RFC research", () => {
 
     expect(result.status).toBe("answered");
     expect(refreshes).toBe(1);
-    expect(result.diagnostics.catalog.state).toBe("fresh");
+    expect(result.diagnostics.catalog?.state).toBe("fresh");
   });
 
   test("fetches RFC Editor plain text through the dedicated source HTTP client", async () => {

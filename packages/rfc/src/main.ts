@@ -5,6 +5,7 @@ import {
   decodeCitationVerificationRequest,
   decodeResearchRequest,
   defaultCacheDirectory,
+  liveResearchSchemaVersion,
   schemaVersion,
   toErrorEnvelope,
 } from "@wyattjoh/rfc-core";
@@ -59,12 +60,12 @@ const format = Flag.Literals("format", ["json", "human"] as const).pipe(
 );
 
 const cacheDirectory = Flag.String("cache-directory").pipe(
-  Flag.withDescription("Directory containing the local RFC metadata cache"),
+  Flag.withDescription("Directory containing RFC source-cache and legacy catalog data"),
   Flag.withDefault(defaultCacheDirectory),
 );
 
 const datatrackerApiUrl = Flag.String("datatracker-api-url").pipe(
-  Flag.withDescription("Datatracker API base URL used for catalog refresh"),
+  Flag.withDescription("Datatracker API base URL used for live discovery or catalog refresh"),
   Flag.optional,
 );
 
@@ -497,11 +498,18 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
         standardInput.trim().length > 0
           ? decodeResearchInput(standardInput)
           : Option.isSome(flags.question)
-            ? decodeResearchRequest({
-                schemaVersion,
-                question: flags.question.value,
-                rfc: Option.getOrUndefined(flags.rfc) ?? null,
-              })
+            ? Option.isSome(flags.rfc)
+              ? decodeResearchRequest({
+                  schemaVersion: liveResearchSchemaVersion,
+                  question: flags.question.value,
+                  rfc: flags.rfc.value,
+                  searchTerms: undefined,
+                })
+              : decodeResearchRequest({
+                  schemaVersion,
+                  question: flags.question.value,
+                  rfc: null,
+                })
             : (() => {
                 throw new InvalidInputError({
                   reason: "Research requires JSON standard input or --question",

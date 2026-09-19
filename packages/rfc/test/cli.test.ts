@@ -233,6 +233,147 @@ describe("rfc process protocol", () => {
     expect(result.stderr).toBe("");
   });
 
+  test("accepts version 2 known-RFC JSON and convenience input", async () => {
+    const cacheDirectory = await mkdtemp(join(tmpdir(), "rfc-cli-live-research-test-"));
+    const sourceText =
+      "1. Requirements\n\nThe client MUST send a request containing the target resource.\n";
+    const fetchedAt = new Date().toISOString();
+    const sourceHash = hashRfcSource(sourceText);
+    await mkdir(join(cacheDirectory, "sources"), { recursive: true });
+    await writeFile(
+      join(cacheDirectory, "sources", `${sourceHash}.json`),
+      JSON.stringify({
+        schemaVersion: 1,
+        kind: "rfc_source_content",
+        contentHash: sourceHash,
+        text: sourceText,
+      }),
+    );
+    await writeFile(
+      join(cacheDirectory, "sources", "RFC9110.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        kind: "rfc_source_index",
+        identifier: "RFC9110",
+        rfcNumber: 9110,
+        sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+        contentHash: sourceHash,
+        fetchedAt,
+      }),
+    );
+
+    const datatrackerUrls: Array<string> = [];
+    let modelCalls = 0;
+    const server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        const url = new URL(request.url);
+        if (url.pathname.endsWith("/document/rfc9110/")) {
+          datatrackerUrls.push(url.toString());
+          return Response.json({
+            name: "rfc9110",
+            rfc_number: 9110,
+            title: "HTTP Semantics",
+            abstract: "HTTP semantics.",
+            resource_uri: "/api/v1/doc/document/rfc9110/",
+            stream: "/api/v1/name/streamname/ietf/",
+            states: [],
+          });
+        }
+        if (url.pathname.endsWith("/relateddocument/")) {
+          datatrackerUrls.push(url.toString());
+          return Response.json({
+            meta: { limit: 64, offset: 0, total_count: 0, next: null, previous: null },
+            objects: [],
+          });
+        }
+        if (url.pathname === "/systemone") {
+          modelCalls += 1;
+          const answers = Object.fromEntries([
+            [
+              "question_atomicity",
+              {
+                type: "choice",
+                choice: "atomic",
+                probabilities: { atomic: 0.99, compound: 0.01 },
+                confidence: 0.99,
+              },
+            ],
+            ...Array.from({ length: 8 }, (_, index) => [
+              `passage_${index}`,
+              modelCalls % 2 === 1
+                ? { type: "noul", noul: 0.99 }
+                : {
+                    type: "choice",
+                    choice: "direct_answer",
+                    probabilities: {
+                      direct_answer: 0.99,
+                      partial_answer: 0.005,
+                      background_only: 0.001,
+                      contradictory: 0.001,
+                      irrelevant: 0.003,
+                    },
+                    confidence: 0.99,
+                  },
+            ]),
+          ]);
+          return Response.json({
+            model: "jev-1.13.0",
+            answers,
+            usage: { input_tokens: 10, output_tokens: 6 },
+          });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    servers.push(server);
+    const commonArgs = [
+      "research",
+      "--cache-directory",
+      cacheDirectory,
+      "--datatracker-api-url",
+      `${server.url}api/v1/`,
+      "--typesafe-api-url",
+      server.url.toString(),
+    ];
+
+    const canonical = await runCli(
+      [...commonArgs, "--question", "ignored", "--rfc", "RFC9999"],
+      JSON.stringify({
+        schemaVersion: 2,
+        question: "What must the client send?",
+        rfc: "RFC9110",
+      }),
+    );
+    const convenience = await runCli([
+      ...commonArgs,
+      "--question",
+      "What must the client send?",
+      "--rfc",
+      "RFC9110",
+    ]);
+
+    expect(canonical.exitCode).toBe(0);
+    expect(canonical.stderr).toBe("");
+    expect(JSON.parse(canonical.stdout)).toMatchObject({
+      schemaVersion: 2,
+      rfc: { identifier: "RFC9110" },
+      diagnostics: {
+        schemaVersion: 2,
+        retrieval: { sourceCacheOutcome: "hit", sourceRequestCount: 0 },
+      },
+    });
+    expect(convenience.exitCode).toBe(0);
+    expect(convenience.stderr).toBe("");
+    expect(JSON.parse(convenience.stdout)).toMatchObject({
+      schemaVersion: 2,
+      rfc: { identifier: "RFC9110" },
+    });
+    expect(datatrackerUrls).toHaveLength(4);
+    expect(datatrackerUrls.every((url) => url.includes("rfc9110"))).toBe(true);
+    expect(await Bun.file(join(cacheDirectory, "catalog.json")).exists()).toBe(false);
+  });
+
   test("requires the exact release attestation even when automatic answers are enabled", async () => {
     const cacheDirectory = await mkdtemp(join(tmpdir(), "rfc-cli-research-test-"));
     const sourceText =
@@ -685,7 +826,7 @@ describe("rfc process protocol", () => {
       kind: "error",
       error: {
         code: "invalid_input",
-        message: "Research input must use schema version 1",
+        message: "Research input must use schema version 1 or a version 2 known-RFC request",
       },
     });
   });
