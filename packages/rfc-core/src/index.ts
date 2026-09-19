@@ -1,8 +1,9 @@
-import { TypeSafeClient, TypeSafeDecisionModel } from "@effect/ai-typesafe";
+import { TypeSafeClient as TypeSafeClientApi, TypeSafeDecisionModel } from "@effect/ai-typesafe";
 import { NodeFileSystem, NodePath } from "@effect/platform-node";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { Clock, Effect, Layer, ManagedRuntime, Path, Redacted, Schema } from "effect";
+import { Clock, Context, Effect, Layer, ManagedRuntime, Path, Redacted, Ref, Schema } from "effect";
+import * as DecisionModel from "effect/unstable/ai/DecisionModel";
 import { FetchHttpClient, HttpClient } from "effect/unstable/http";
 import {
   CatalogReadError,
@@ -19,8 +20,28 @@ import {
   makeDefaultCatalogSourceLayer,
 } from "./catalog";
 import type { CatalogRefreshResult, CatalogSource, CatalogStatus } from "./catalog";
+import {
+  DecisionModelError,
+  ResearchPolicyError,
+  ResolvedModelName,
+  RfcNotFoundError,
+  researchKnownRfc,
+} from "./research";
+import type { EvidenceBundle } from "./research";
+import {
+  RfcSourceCacheError,
+  RfcSourceFetchError,
+  defaultRfcEditorBaseUrl,
+  makeDefaultRfcSourceLayer,
+  makeRfcSourceHttpLayer,
+  makeRfcSourceLayer,
+  rfcSourceStoreLayer,
+} from "./source";
+import type { RfcSourceFetcher } from "./source";
 
 export * from "./catalog";
+export * from "./research";
+export * from "./source";
 
 const defaultCacheDirectoryRoot = (() => {
   if (process.platform === "darwin") {
@@ -78,6 +99,10 @@ export interface RfcClientOptions {
    */
   readonly typeSafeApiUrl: string | undefined;
   /**
+   * Optional HTTP client used by deterministic TypeSafe provider tests.
+   */
+  readonly typeSafeHttpClient?: HttpClient.HttpClient | undefined;
+  /**
    * Optional clock function used by deterministic tests and embedded callers.
    */
   readonly now?: (() => number) | undefined;
@@ -93,6 +118,26 @@ export interface RfcClientOptions {
    * Optional fetch implementation used by deterministic redirect tests.
    */
   readonly catalogFetch?: typeof globalThis.fetch | undefined;
+  /**
+   * Optional source fetcher used by deterministic source and provenance tests.
+   */
+  readonly rfcSourceFetcher?: RfcSourceFetcher | undefined;
+  /**
+   * Optional HTTP client used by deterministic RFC source tests.
+   */
+  readonly rfcSourceHttpClient?: HttpClient.HttpClient | undefined;
+  /**
+   * Optional source cache directory, defaulting below the configured cache directory.
+   */
+  readonly sourceDirectory?: string | undefined;
+  /**
+   * Named policy preset recorded in research diagnostics.
+   */
+  readonly policyPreset?: string | undefined;
+  /**
+   * A deterministic DecisionModel replacement for tests and embedded callers.
+   */
+  readonly decisionModel?: DecisionModel.DecisionModel | undefined;
 }
 
 /**
@@ -139,8 +184,13 @@ export type RfcCoreError =
   | CatalogRefreshError
   | CatalogStaleError
   | CatalogWriteError
+  | RfcSourceCacheError
+  | RfcSourceFetchError
   | RfcClientClosedError
   | ResearchUnavailableError
+  | RfcNotFoundError
+  | DecisionModelError
+  | ResearchPolicyError
   | InvalidInputError
   | ConfigurationError;
 
@@ -152,8 +202,13 @@ export type ErrorCode =
   | "catalog_refresh_failed"
   | "catalog_stale"
   | "catalog_write_failed"
+  | "source_cache_failed"
+  | "source_fetch_failed"
   | "client_closed"
   | "research_unavailable"
+  | "rfc_not_found"
+  | "decision_model_failed"
+  | "policy_error"
   | "invalid_input"
   | "configuration_error"
   | "internal_error";
@@ -163,8 +218,13 @@ const ErrorCodeSchema = Schema.Literals([
   "catalog_refresh_failed",
   "catalog_stale",
   "catalog_write_failed",
+  "source_cache_failed",
+  "source_fetch_failed",
   "client_closed",
   "research_unavailable",
+  "rfc_not_found",
+  "decision_model_failed",
+  "policy_error",
   "invalid_input",
   "configuration_error",
   "internal_error",
@@ -252,9 +312,9 @@ export interface RfcClient {
    */
   readonly catalogRefresh: () => Promise<CatalogRefreshResult>;
   /**
-   * Reserve the research operation for a later implementation slice.
+   * Research one known published RFC and return exact evidence.
    */
-  readonly research: (request: ResearchRequest) => Promise<never>;
+  readonly research: (request: ResearchRequest) => Promise<EvidenceBundle>;
   /**
    * Release the managed runtime and any resources it owns.
    */
@@ -275,17 +335,46 @@ const makeClock = (now: () => number): Clock.Clock => ({
   sleep: () => Effect.void,
 });
 
-const typeSafeDecisionModelLayer = (options: RfcClientOptions) =>
-  TypeSafeDecisionModel.layer({ model: options.modelAlias ?? "jev-latest" }).pipe(
-    Layer.provide(
-      TypeSafeClient.layer({
+const typeSafeDecisionModelLayer = (options: RfcClientOptions) => {
+  const observedClientLayer = Layer.fromBuildMemo(() =>
+    Effect.gen(function* () {
+      const resolvedModel = yield* Ref.make(options.modelAlias ?? "jev-latest");
+      const client = yield* TypeSafeClientApi.make({
         apiKey:
           options.typeSafeApiKey === undefined ? undefined : Redacted.make(options.typeSafeApiKey),
         apiUrl: options.typeSafeApiUrl,
-      }),
+      });
+      const observedClient = {
+        ...client,
+        systemOne: (request: Parameters<typeof client.systemOne>[0]) =>
+          client
+            .systemOne(request)
+            .pipe(Effect.tap((response) => Ref.set(resolvedModel, response.model))),
+      };
+      return Context.make(TypeSafeClientApi.TypeSafeClient, observedClient).pipe(
+        Context.add(ResolvedModelName, resolvedModel),
+      );
+    }),
+  ).pipe(
+    Layer.provide(
+      options.typeSafeHttpClient === undefined
+        ? FetchHttpClient.layer
+        : Layer.succeed(HttpClient.HttpClient, options.typeSafeHttpClient),
     ),
-    Layer.provide(FetchHttpClient.layer),
   );
+
+  return TypeSafeDecisionModel.model(options.modelAlias ?? "jev-latest").pipe(
+    Layer.provideMerge(observedClientLayer),
+  );
+};
+
+const decisionModelLayer = (options: RfcClientOptions) =>
+  options.decisionModel === undefined
+    ? typeSafeDecisionModelLayer(options)
+    : Layer.merge(
+        Layer.succeed(DecisionModel.DecisionModel, options.decisionModel),
+        Layer.succeed(ResolvedModelName, Ref.makeUnsafe(options.modelAlias ?? "jev-latest")),
+      );
 
 const platformLayer = (options: RfcClientOptions) => {
   const fetchOptions = Layer.succeed(FetchHttpClient.RequestInit, {
@@ -310,15 +399,24 @@ const platformLayer = (options: RfcClientOptions) => {
 };
 
 const clientLayer = (options: RfcClientOptions) => {
-  const sourceLayer =
+  const catalogSourceLayer =
     options.catalogSource === undefined
       ? makeDefaultCatalogSourceLayer(options.datatrackerApiUrl ?? defaultDatatrackerApiUrl)
       : makeCatalogSourceLayer(options.catalogSource);
-  const services = Layer.merge(catalogStoreLayer, sourceLayer).pipe(
-    Layer.provideMerge(platformLayer(options)),
-  );
+  const rfcSourceLayer =
+    options.rfcSourceFetcher !== undefined
+      ? makeRfcSourceLayer(options.rfcSourceFetcher)
+      : options.rfcSourceHttpClient === undefined
+        ? makeDefaultRfcSourceLayer(defaultRfcEditorBaseUrl)
+        : makeRfcSourceHttpLayer(options.rfcSourceHttpClient, defaultRfcEditorBaseUrl);
+  const services = Layer.mergeAll(
+    catalogStoreLayer,
+    rfcSourceStoreLayer,
+    catalogSourceLayer,
+    rfcSourceLayer,
+  ).pipe(Layer.provideMerge(platformLayer(options)));
 
-  return Layer.merge(services, typeSafeDecisionModelLayer(options)).pipe(
+  return Layer.merge(services, decisionModelLayer(options)).pipe(
     Layer.provideMerge(platformLayer(options)),
   );
 };
@@ -327,6 +425,12 @@ const resolveCatalogPath = Effect.fnUntraced(function* (options: RfcClientOption
   const path = yield* Path.Path;
   const cacheDirectory = options.cacheDirectory ?? defaultCacheDirectory;
   return options.catalogPath ?? path.join(cacheDirectory, "catalog.json");
+});
+
+const resolveSourceDirectory = Effect.fnUntraced(function* (options: RfcClientOptions) {
+  const path = yield* Path.Path;
+  const cacheDirectory = options.cacheDirectory ?? defaultCacheDirectory;
+  return options.sourceDirectory ?? path.join(cacheDirectory, "sources");
 });
 
 const catalogStatusProgram = (options: RfcClientOptions) =>
@@ -357,19 +461,47 @@ const catalogRefreshProgram = (options: RfcClientOptions) =>
     return catalogRefreshResultFromValue(catalogPath, catalog, now);
   });
 
-const researchProgram = (options: RfcClientOptions) =>
+const researchProgram = (options: RfcClientOptions, request: ResearchRequest) =>
   Effect.gen(function* () {
     const store = yield* CatalogStore;
+    const startedAt = yield* Clock.currentTimeMillis;
     const catalogPath = yield* resolveCatalogPath(options);
-    const status = yield* store.status(catalogPath);
-    if (status.state === "stale") {
+    const initialStatus = yield* store.status(catalogPath);
+    if (request.rfc === null) {
+      if (initialStatus.state === "stale") {
+        return yield* new CatalogStaleError({
+          catalogPath,
+          fetchedAt: initialStatus.refreshedAt ?? "",
+          ageMs: initialStatus.ageMs ?? Number.POSITIVE_INFINITY,
+        });
+      }
+      return yield* new ResearchUnavailableError({});
+    }
+
+    if (initialStatus.state !== "fresh") {
+      yield* catalogRefreshProgram(options);
+    }
+    const catalogStatus = yield* store.status(catalogPath);
+    const catalog = yield* store.read(catalogPath);
+    if (catalog === undefined) {
       return yield* new CatalogStaleError({
         catalogPath,
-        fetchedAt: status.refreshedAt ?? "",
-        ageMs: status.ageMs ?? Number.POSITIVE_INFINITY,
+        fetchedAt: catalogStatus.refreshedAt ?? "",
+        ageMs: catalogStatus.ageMs ?? Number.POSITIVE_INFINITY,
       });
     }
-    return yield* new ResearchUnavailableError({});
+    const sourceDirectory = yield* resolveSourceDirectory(options);
+    const finishedAt = yield* Clock.currentTimeMillis;
+
+    return yield* researchKnownRfc(request.question, request.rfc, {
+      catalog,
+      catalogStatus,
+      sourceDirectory,
+      policyPreset: options.policyPreset ?? "precision-v1",
+      modelAlias: options.modelAlias ?? "jev-latest",
+      catalogMs: Math.max(0, finishedAt - startedAt),
+      startedAt,
+    });
   });
 
 /**
@@ -423,6 +555,61 @@ export const toErrorEnvelope = (error: unknown): ErrorEnvelope => {
     };
   }
 
+  if (error instanceof RfcSourceCacheError) {
+    return {
+      schemaVersion,
+      kind: "error",
+      error: {
+        code: "source_cache_failed",
+        message: `Unable to read RFC source cache: ${error.reason}`,
+      },
+    };
+  }
+
+  if (error instanceof RfcSourceFetchError) {
+    return {
+      schemaVersion,
+      kind: "error",
+      error: {
+        code: "source_fetch_failed",
+        message: `Unable to fetch RFC source: ${error.reason}`,
+      },
+    };
+  }
+
+  if (error instanceof RfcNotFoundError) {
+    return {
+      schemaVersion,
+      kind: "error",
+      error: {
+        code: "rfc_not_found",
+        message: `RFC ${error.rfc} is not an exact published catalog entry`,
+      },
+    };
+  }
+
+  if (error instanceof DecisionModelError) {
+    return {
+      schemaVersion,
+      kind: "error",
+      error: {
+        code: "decision_model_failed",
+        message: `DecisionModel ${error.stage} failed: ${error.reason}`,
+      },
+    };
+  }
+
+  if (error instanceof ResearchPolicyError) {
+    return {
+      schemaVersion,
+      kind: "error",
+      error: {
+        code: "policy_error",
+        message: `Unknown research policy preset: ${error.policyPreset}`,
+      },
+    };
+  }
+
   if (error instanceof RfcClientClosedError) {
     return {
       schemaVersion,
@@ -440,7 +627,7 @@ export const toErrorEnvelope = (error: unknown): ErrorEnvelope => {
       kind: "error",
       error: {
         code: "research_unavailable",
-        message: "Research is not available in this bootstrap release",
+        message: "Topic-only research is not available in this release",
       },
     };
   }
@@ -484,10 +671,16 @@ const defaultClientOptions: RfcClientOptions = {
   modelAlias: undefined,
   typeSafeApiKey: undefined,
   typeSafeApiUrl: undefined,
+  typeSafeHttpClient: undefined,
   now: undefined,
   catalogSource: undefined,
   catalogHttpClient: undefined,
   catalogFetch: undefined,
+  rfcSourceFetcher: undefined,
+  rfcSourceHttpClient: undefined,
+  sourceDirectory: undefined,
+  policyPreset: undefined,
+  decisionModel: undefined,
 };
 
 /**
@@ -525,9 +718,10 @@ export const createRfcClient = async (
       assertOpen();
       return runtime.runPromise(catalogRefreshProgram(options));
     },
-    research: async (_request) => {
+    research: async (request) => {
       assertOpen();
-      return runtime.runPromise(researchProgram(options));
+      const decodedRequest = decodeResearchRequest(request);
+      return runtime.runPromise(researchProgram(options, decodedRequest));
     },
     close,
     [Symbol.asyncDispose]: close,

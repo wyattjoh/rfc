@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   CatalogRefreshError,
+  InvalidInputError,
   RfcClientClosedError,
   createRfcClient,
   toErrorEnvelope,
@@ -43,6 +44,26 @@ describe("createRfcClient", () => {
     });
 
     await rm(cacheDirectory, { recursive: true, force: true });
+  });
+
+  test("decodes research input at the Promise facade boundary", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: undefined,
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+    });
+    clients.push(client);
+
+    await expect(
+      client.research({
+        schemaVersion: 2,
+        question: "What is HTTP?",
+        rfc: null,
+      } as never),
+    ).rejects.toBeInstanceOf(InvalidInputError);
   });
 
   test("rejects work after explicit close and makes close idempotent", async () => {

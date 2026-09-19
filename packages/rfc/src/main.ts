@@ -129,6 +129,11 @@ const rfc = Flag.String("rfc").pipe(
   Flag.optional,
 );
 
+const typeSafeApiUrl = Flag.String("typesafe-api-url").pipe(
+  Flag.withDescription("TypeSafe API URL used for deterministic or self-hosted providers"),
+  Flag.optional,
+);
+
 const readStandardInput = async (): Promise<string> => {
   if (process.stdin.isTTY) {
     return "";
@@ -150,8 +155,12 @@ const decodeResearchInput = (input: string) => {
 const researchCommand = Command.make(
   "research",
   {
+    cacheDirectory,
+    datatrackerApiUrl,
+    format,
     question,
     rfc,
+    typeSafeApiUrl,
   },
   Effect.fn(function* (flags) {
     const standardInput = yield* Effect.tryPromise({
@@ -185,22 +194,36 @@ const researchCommand = Command.make(
     const client = yield* Effect.tryPromise({
       try: () =>
         createRfcClient({
-          cacheDirectory: undefined,
+          cacheDirectory: flags.cacheDirectory,
           catalogPath: undefined,
+          datatrackerApiUrl: Option.getOrUndefined(flags.datatrackerApiUrl),
           modelAlias: cliConfig.modelAlias,
+          policyPreset: cliConfig.policyPreset,
           typeSafeApiKey: cliConfig.apiKey,
-          typeSafeApiUrl: undefined,
+          typeSafeApiUrl: Option.getOrUndefined(flags.typeSafeApiUrl),
         }),
       catch: (error) => error,
     });
 
-    yield* Effect.acquireUseRelease(
+    const result = yield* Effect.acquireUseRelease(
       Effect.succeed(client),
       (activeClient) =>
         Effect.tryPromise({ try: () => activeClient.research(request), catch: (error) => error }),
       (activeClient) =>
         Effect.tryPromise({ try: () => activeClient.close(), catch: (error) => error }),
     );
+
+    if (flags.format === "human") {
+      yield* writeStdout(`Status: ${result.status}`);
+      yield* writeStdout(`RFC: ${result.rfc.identifier}`);
+      for (const passage of result.evidence) {
+        yield* writeStdout(`Section: ${passage.provenance.section ?? "unknown"}`);
+        yield* writeStdout(`Quote: ${passage.quote}`);
+      }
+      return;
+    }
+
+    yield* writeStdout(JSON.stringify(result));
   }),
 ).pipe(
   Command.withDescription("Research an RFC question from versioned JSON input"),

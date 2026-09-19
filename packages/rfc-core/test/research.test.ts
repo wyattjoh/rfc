@@ -1,0 +1,567 @@
+import { readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, test } from "bun:test";
+import { Effect, Schema } from "effect";
+import * as DecisionModel from "effect/unstable/ai/DecisionModel";
+import { HttpClient, HttpClientResponse } from "effect/unstable/http";
+import {
+  EvidenceBundleSchema,
+  RfcSourceCacheError,
+  RfcSourceFetchError,
+  RfcSourceServiceTag,
+  createRfcClient,
+  hashRfcSource,
+  makeRfcSourceHttpLayer,
+  parseSourceBlocks,
+  type RfcClient,
+  type RfcSourceFetcher,
+} from "../src/index";
+import type * as Decision from "effect/unstable/ai/Decision";
+
+const clients: Array<RfcClient> = [];
+
+const makeCacheDirectory = async () => mkdtemp(join(tmpdir(), "rfc-core-research-test-"));
+
+const catalogDocument = {
+  identifier: "RFC9110",
+  rfcNumber: 9110,
+  title: "HTTP Semantics",
+  abstract: "HTTP semantics.",
+  status: "published",
+  stream: "ietf",
+  canonicalUrl: "https://datatracker.ietf.org/doc/rfc9110/",
+  updates: [],
+  updatedBy: [],
+  obsoletes: [],
+  obsoletedBy: [],
+};
+
+const sourceText = [
+  "Network Working Group",
+  "Request for Comments: 9110",
+  "",
+  "1. Requirements",
+  "",
+  "The client MUST send a request containing the target resource.",
+  "",
+  "2. Background",
+  "",
+  "This section gives background context.",
+  "",
+].join("\n");
+
+const makeDecisionModel = (
+  calls: Array<unknown>,
+  atomicity: "atomic" | "compound" = "atomic",
+  relation:
+    | "direct_answer"
+    | "partial_answer"
+    | "background_only"
+    | "contradictory"
+    | "irrelevant" = "direct_answer",
+  relationProbability = 0.9,
+  relationConfidence = 0.95,
+): DecisionModel.DecisionModel => {
+  const model = {
+    [DecisionModel.TypeId]: DecisionModel.TypeId,
+    decide: (definition: { readonly decisions: Readonly<Record<string, Decision.Any>> }) => {
+      calls.push(definition);
+      const answers = Object.fromEntries(
+        Object.entries(definition.decisions).map(([key, decision]) =>
+          decision._tag === "Probability"
+            ? [key, { probability: 0.95 }]
+            : "atomic" in decision.criteria
+              ? [
+                  key,
+                  {
+                    label: atomicity,
+                    probabilities:
+                      atomicity === "atomic"
+                        ? { atomic: 0.95, compound: 0.05 }
+                        : { atomic: 0.05, compound: 0.95 },
+                    confidence: 0.95,
+                  },
+                ]
+              : [
+                  key,
+                  {
+                    label: relation,
+                    probabilities: {
+                      direct_answer:
+                        relation === "direct_answer"
+                          ? relationProbability
+                          : (1 - relationProbability) / 4,
+                      partial_answer:
+                        relation === "partial_answer"
+                          ? relationProbability
+                          : (1 - relationProbability) / 4,
+                      background_only:
+                        relation === "background_only"
+                          ? relationProbability
+                          : (1 - relationProbability) / 4,
+                      contradictory:
+                        relation === "contradictory"
+                          ? relationProbability
+                          : (1 - relationProbability) / 4,
+                      irrelevant:
+                        relation === "irrelevant"
+                          ? relationProbability
+                          : (1 - relationProbability) / 4,
+                    },
+                    confidence: relationConfidence,
+                  },
+                ],
+        ),
+      );
+      return Effect.succeed({
+        answers,
+        usage: { inputTokens: 12, outputTokens: 8 },
+      });
+    },
+  } as unknown as DecisionModel.DecisionModel;
+  return model;
+};
+
+const makeSourceFetcher =
+  (text: string): RfcSourceFetcher =>
+  async () => ({
+    sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+    text,
+  });
+
+const makeTypeSafeHttpClient = () => {
+  let calls = 0;
+  const client = HttpClient.make((request) => {
+    calls += 1;
+    const answers = Object.fromEntries([
+      [
+        "question_atomicity",
+        {
+          type: "choice",
+          choice: "atomic",
+          probabilities: { atomic: 0.99, compound: 0.01 },
+          confidence: 0.99,
+        },
+      ],
+      ...Array.from({ length: 8 }, (_, index) => [
+        `passage_${index}`,
+        calls === 1
+          ? { type: "noul", noul: 0.99 }
+          : {
+              type: "choice",
+              choice: "direct_answer",
+              probabilities: {
+                direct_answer: 0.99,
+                partial_answer: 0.005,
+                background_only: 0.001,
+                contradictory: 0.001,
+                irrelevant: 0.003,
+              },
+              confidence: 0.99,
+            },
+      ]),
+    ]);
+    return Effect.succeed(
+      HttpClientResponse.fromWeb(
+        request,
+        new Response(
+          JSON.stringify({
+            model: "jev-1.13.0",
+            answers,
+            usage: { input_tokens: 10, output_tokens: 6 },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      ),
+    );
+  });
+  return { client, calls: () => calls };
+};
+
+afterEach(async () => {
+  await Promise.all(clients.splice(0).map((client) => client.close()));
+});
+
+describe("known RFC research", () => {
+  test("refreshes a missing catalog, caches source text, and runs two semantic stages", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const calls: Array<unknown> = [];
+    let sourceFetches = 0;
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [catalogDocument],
+      rfcSourceFetcher: async (document) => {
+        sourceFetches += 1;
+        expect(document.identifier).toBe("RFC9110");
+        return makeSourceFetcher(sourceText)(document);
+      },
+      decisionModel: makeDecisionModel(calls),
+      policyPreset: "precision-v1",
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 1,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+    });
+
+    expect(result.status).toBe("answered");
+    expect(result.rfc.identifier).toBe("RFC9110");
+    expect(result.evidence).toHaveLength(1);
+    const evidence = result.evidence[0];
+    expect(evidence).toBeDefined();
+    if (evidence === undefined) throw new Error("Expected evidence");
+    expect(sourceText.slice(evidence.provenance.startOffset, evidence.provenance.endOffset)).toBe(
+      evidence.quote,
+    );
+    expect(evidence.provenance.sourceHash).toBe(hashRfcSource(sourceText));
+    expect(evidence.provenance.section).toBe("1. Requirements");
+    expect(result.diagnostics).toMatchObject({
+      schemaVersion: 1,
+      policyVersion: "precision-v1",
+      requestedModel: "jev-test",
+      resolvedModel: "jev-test",
+      usage: { inputTokens: 24, outputTokens: 16 },
+      atomicity: { label: "atomic", confidence: 0.95 },
+      candidates: { selectedPassages: 1 },
+    });
+    expect(calls).toHaveLength(2);
+    expect(sourceFetches).toBe(1);
+    expect(Schema.decodeUnknownSync(EvidenceBundleSchema)(result)).toEqual(result);
+
+    await client.research({
+      schemaVersion: 1,
+      question: "What must the client send?",
+      rfc: "9110",
+    });
+    expect(sourceFetches).toBe(1);
+    expect(calls).toHaveLength(4);
+  });
+
+  test("records the provider-resolved model identifier", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const typeSafe = makeTypeSafeHttpClient();
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-latest",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      typeSafeHttpClient: typeSafe.client,
+      catalogSource: async () => [catalogDocument],
+      rfcSourceFetcher: makeSourceFetcher(sourceText),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 1,
+      question: "What must the client send?",
+      rfc: "9110",
+    });
+
+    expect(result.diagnostics.requestedModel).toBe("jev-latest");
+    expect(result.diagnostics.resolvedModel).toBe("jev-1.13.0");
+    expect(typeSafe.calls()).toBe(2);
+  });
+
+  test("returns needs_split for a confidently compound request", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const calls: Array<unknown> = [];
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [catalogDocument],
+      rfcSourceFetcher: makeSourceFetcher(sourceText),
+      decisionModel: makeDecisionModel(calls, "compound"),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 1,
+      question: "What must the client send and what should the server cache?",
+      rfc: "9110",
+    });
+
+    expect(result.status).toBe("needs_split");
+    expect(result.evidence).toEqual([]);
+    expect(result.diagnostics.atomicity.label).toBe("compound");
+    expect(calls).toHaveLength(1);
+  });
+
+  test("fails closed for partial, unsupported, uncertain, and contradictory evidence", async () => {
+    const cases = [
+      {
+        relation: "partial_answer" as const,
+        probability: 0.9,
+        confidence: 0.95,
+        status: "partial",
+      },
+      {
+        relation: "background_only" as const,
+        probability: 0.9,
+        confidence: 0.95,
+        status: "unsupported",
+      },
+      {
+        relation: "direct_answer" as const,
+        probability: 0.5,
+        confidence: 0.5,
+        status: "needs_review",
+      },
+      {
+        relation: "contradictory" as const,
+        probability: 0.9,
+        confidence: 0.95,
+        status: "needs_review",
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      const cacheDirectory = await makeCacheDirectory();
+      const client = await createRfcClient({
+        cacheDirectory,
+        catalogPath: undefined,
+        modelAlias: "jev-test",
+        typeSafeApiKey: undefined,
+        typeSafeApiUrl: undefined,
+        catalogSource: async () => [catalogDocument],
+        rfcSourceFetcher: makeSourceFetcher(sourceText),
+        decisionModel: makeDecisionModel(
+          [],
+          "atomic",
+          testCase.relation,
+          testCase.probability,
+          testCase.confidence,
+        ),
+        now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+      });
+      clients.push(client);
+
+      const result = await client.research({
+        schemaVersion: 1,
+        question: "What must the client send?",
+        rfc: "9110",
+      });
+
+      expect(result.status).toBe(testCase.status);
+    }
+  });
+
+  test("refreshes a stale catalog before known-RFC research", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    await writeFile(
+      join(cacheDirectory, "catalog.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        kind: "rfc_catalog",
+        cacheIdentity: "rfc-catalog-v1",
+        fetchedAt: "2026-01-01T00:00:00.000Z",
+        documents: [catalogDocument],
+      }),
+    );
+    let refreshes = 0;
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => {
+        refreshes += 1;
+        return [catalogDocument];
+      },
+      rfcSourceFetcher: makeSourceFetcher(sourceText),
+      decisionModel: makeDecisionModel([]),
+      now: () => Date.parse("2026-01-09T00:00:01.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 1,
+      question: "What must the client send?",
+      rfc: "9110",
+    });
+
+    expect(result.status).toBe("answered");
+    expect(refreshes).toBe(1);
+    expect(result.diagnostics.catalog.state).toBe("fresh");
+  });
+
+  test("fetches RFC Editor plain text through the dedicated source HTTP client", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const requests: Array<string> = [];
+    const sourceHttpClient = HttpClient.make((request, url) => {
+      requests.push(url.toString());
+      return Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          new Response(sourceText, { headers: { "content-type": "text/plain; charset=utf-8" } }),
+        ),
+      );
+    });
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [catalogDocument],
+      decisionModel: makeDecisionModel([]),
+      rfcSourceHttpClient: sourceHttpClient,
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 1,
+      question: "What must the client send?",
+      rfc: "9110",
+    });
+
+    expect(result.status).toBe("answered");
+    expect(requests).toEqual(["https://www.rfc-editor.org/rfc/rfc9110.txt"]);
+  });
+
+  test("rejects a noncanonical RFC Editor source path before HTTP", async () => {
+    let requests = 0;
+    const sourceHttpClient = HttpClient.make((request) => {
+      requests += 1;
+      return Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          new Response(sourceText, { headers: { "content-type": "text/plain" } }),
+        ),
+      );
+    });
+    const program = Effect.gen(function* () {
+      const service = yield* RfcSourceServiceTag;
+      return yield* service.fetch(catalogDocument);
+    }).pipe(
+      Effect.provide(
+        makeRfcSourceHttpLayer(sourceHttpClient, "https://www.rfc-editor.org/rfc/substituted/"),
+      ),
+    );
+
+    await expect(Effect.runPromise(program)).rejects.toBeInstanceOf(RfcSourceFetchError);
+    expect(requests).toBe(0);
+  });
+
+  test("rejects a substituted final RFC Editor response URL", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const sourceHttpClient = HttpClient.make((request) => {
+      const response = new Response(sourceText, { headers: { "content-type": "text/plain" } });
+      Object.defineProperty(response, "url", {
+        value: "https://www.rfc-editor.org/rfc/rfc9999.txt",
+      });
+      return Effect.succeed(HttpClientResponse.fromWeb(request, response));
+    });
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [catalogDocument],
+      decisionModel: makeDecisionModel([]),
+      rfcSourceHttpClient: sourceHttpClient,
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    await expect(
+      client.research({
+        schemaVersion: 1,
+        question: "What must the client send?",
+        rfc: "9110",
+      }),
+    ).rejects.toBeInstanceOf(RfcSourceFetchError);
+  });
+
+  test("rejects a corrupted content-addressed source cache", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: undefined,
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [catalogDocument],
+      rfcSourceFetcher: makeSourceFetcher(sourceText),
+      decisionModel: makeDecisionModel([]),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    await client.research({
+      schemaVersion: 1,
+      question: "What must the client send?",
+      rfc: "9110",
+    });
+    const sourceFiles = await readdir(join(cacheDirectory, "sources"));
+    const contentFile = sourceFiles.find((file) => file.length > 10 && !file.startsWith("RFC"));
+    expect(contentFile).toBeDefined();
+    if (contentFile === undefined) throw new Error("Expected content-addressed source file");
+    const contentPath = join(cacheDirectory, "sources", contentFile);
+    const content = JSON.parse(await readFile(contentPath, "utf8")) as { readonly text: string };
+    await writeFile(contentPath, JSON.stringify({ ...content, text: "tampered" }));
+
+    await expect(
+      client.research({ schemaVersion: 1, question: "What must the client send?", rfc: "9110" }),
+    ).rejects.toBeInstanceOf(RfcSourceCacheError);
+  });
+
+  test("keeps oversized source-block overlap bounded and exact", () => {
+    const text = `1. Requirements\n\n${"x".repeat(4_200)}\nThe client MUST send a request.\n`;
+    const blocks = parseSourceBlocks(text);
+    expect(blocks.length).toBeGreaterThan(1);
+    expect(blocks[1]?.startOffset).toBe(blocks[0]?.endOffset - 200);
+    expect(blocks[1]?.startOffset).toBeGreaterThanOrEqual(0);
+    for (const block of blocks) {
+      expect(block.endOffset - block.startOffset).toBeLessThanOrEqual(4_000);
+      expect(text.slice(block.startOffset, block.endOffset)).toBe(block.text);
+    }
+  });
+
+  test("keeps exact offsets valid when a source has no recoverable section headings", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const text = "An irregular RFC body states that clients send requests.\n";
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: undefined,
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [catalogDocument],
+      rfcSourceFetcher: makeSourceFetcher(text),
+      decisionModel: makeDecisionModel([]),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 1,
+      question: "What do clients send?",
+      rfc: "RFC9110",
+    });
+    const evidence = result.evidence[0];
+    expect(evidence?.provenance.section).toBeNull();
+    expect(
+      evidence === undefined
+        ? ""
+        : text.slice(evidence.provenance.startOffset, evidence.provenance.endOffset),
+    ).toBe(evidence?.quote);
+  });
+});
