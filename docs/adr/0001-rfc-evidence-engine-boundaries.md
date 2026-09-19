@@ -1,0 +1,5 @@
+# RFC evidence engine boundaries
+
+**Status:** accepted
+
+The RFC research product is split into private `@wyattjoh/rfc-core` and `@wyattjoh/rfc` Bun workspaces. The core exposes a Promise-based facade backed by one managed Effect runtime; its consumer-facing methods return plain data and Promises while its internal catalog, filesystem, path, and DecisionModel services remain replaceable Effect layers. The CLI is the composition root: it activates Varlock before importing application modules, validates configuration, and passes provider options into the core without letting the core read environment variables. The core constructs the official `@effect/ai-typesafe` DecisionModel layer from those explicit options. Retrieval remains deterministic and bounded before semantic judgments, and uncertain or unsupported evidence fails closed through explicit versioned statuses and typed errors. This boundary avoids legacy Raycast coupling while preserving provider, storage, and policy replaceability.

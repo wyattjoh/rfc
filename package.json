@@ -1,10 +1,17 @@
 {
   "name": "rfc",
   "private": true,
+  "workspaces": [
+    "packages/rfc-core",
+    "packages/rfc"
+  ],
   "scripts": {
+    "build": "bun run --cwd packages/rfc-core build && bun run --cwd packages/rfc build",
     "format": "oxfmt",
     "format:check": "oxfmt --check",
     "lint": "oxlint --no-error-on-unmatched-pattern",
+    "test": "bun test packages",
+    "typecheck": "bun run --cwd packages/rfc-core typecheck && bun run --cwd packages/rfc typecheck",
     "hooks:install": "lefthook install"
   },
   "devDependencies": {

@@ -1,0 +1,29 @@
+{
+  "name": "@wyattjoh/rfc",
+  "version": "0.1.0",
+  "private": true,
+  "bin": {
+    "rfc": "./src/bin.ts"
+  },
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "bun build src/bin.ts --outdir dist --target bun",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@effect/platform-node": "4.0.0-rc.116",
+    "@wyattjoh/rfc-core": "workspace:*",
+    "effect": "4.0.0-rc.116",
+    "varlock": "1.20.0"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.2",
+    "typescript": "5.9.3"
+  }
+}

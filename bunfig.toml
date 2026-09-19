@@ -1,0 +1,2 @@
+# Varlock is the sole environment authority for the CLI.
+env = false
