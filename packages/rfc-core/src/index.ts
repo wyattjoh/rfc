@@ -44,6 +44,7 @@ import {
   ResolvedModelName,
   RfcNotFoundError,
   researchKnownRfc,
+  researchTopic,
 } from "./research";
 import type { EvidenceBundle } from "./research";
 import {
@@ -303,7 +304,7 @@ export const ResearchRequestSchema = Schema.Struct({
 });
 
 /**
- * A decoded research request accepted by the future research operation.
+ * A decoded research request accepted by the research operation.
  */
 export interface ResearchRequest {
   readonly schemaVersion: typeof schemaVersion;
@@ -342,7 +343,7 @@ export interface RfcClient {
    */
   readonly catalogRefresh: () => Promise<CatalogRefreshResult>;
   /**
-   * Research one known published RFC and return exact evidence.
+   * Research one topic or known published RFC and return exact evidence.
    */
   readonly research: (request: ResearchRequest) => Promise<EvidenceBundle>;
   /**
@@ -537,26 +538,15 @@ const knownCatalogProgram = (options: RfcClientOptions) =>
 
 const researchProgram = (options: RfcClientOptions, request: ResearchRequest) =>
   Effect.gen(function* () {
-    if (request.rfc === null) {
-      const store = yield* CatalogStore;
-      const catalogPath = yield* resolveCatalogPath(options);
-      const initialStatus = yield* store.status(catalogPath);
-      if (initialStatus.state === "stale") {
-        return yield* new CatalogStaleError({
-          catalogPath,
-          fetchedAt: initialStatus.refreshedAt ?? "",
-          ageMs: initialStatus.ageMs ?? Number.POSITIVE_INFINITY,
-        });
-      }
-      return yield* new ResearchUnavailableError({});
-    }
-
     const context = yield* knownCatalogProgram(options);
-    return yield* researchKnownRfc(request.question, request.rfc, {
+    const researchOptions = {
       ...context,
       policyPreset: options.policyPreset ?? "precision-v1",
       modelAlias: options.modelAlias ?? "jev-latest",
-    });
+    };
+    return request.rfc === null
+      ? yield* researchTopic(request.question, researchOptions)
+      : yield* researchKnownRfc(request.question, request.rfc, researchOptions);
   });
 
 const citationProgram = (options: RfcClientOptions, request: CitationVerificationRequest) =>

@@ -28,6 +28,7 @@ import {
   RfcSourceServiceTag,
   RfcSourceStore,
   loadRfcSource,
+  type RfcSource,
 } from "./source";
 
 /**
@@ -70,10 +71,13 @@ export const ResearchStatusSchema = Schema.Literals([
 export type ResearchStatus = Schema.Schema.Type<typeof ResearchStatusSchema>;
 
 /**
- * Versioned policy values for known-RFC research.
+ * Versioned policy values shared by known-RFC and topic-only research.
  */
 export const knownRfcPolicy = {
   policyVersion: "precision-v1",
+  maxDocumentCandidates: 8,
+  maxAcceptedDocumentCandidates: 3,
+  documentProbabilityThreshold: 0.65,
   maxPassageCandidates: 8,
   sourceBlockMaxCharacters: 4_000,
   sourceBlockOverlapCharacters: 200,
@@ -185,12 +189,16 @@ const TimingSchema = Schema.Struct({
   selectionMs: Schema.Number,
   relationMs: Schema.Number,
   totalMs: Schema.Number,
+  documentMs: Schema.Union([Schema.Number, Schema.Undefined]),
 });
 
 const CandidateCountsSchema = Schema.Struct({
   sourceBlocks: Schema.Natural,
   passageCandidates: Schema.Natural,
   selectedPassages: Schema.Natural,
+  catalogDocuments: Schema.Union([Schema.Natural, Schema.Undefined]),
+  documentCandidates: Schema.Union([Schema.Natural, Schema.Undefined]),
+  acceptedDocuments: Schema.Union([Schema.Natural, Schema.Undefined]),
 });
 
 const SelectionDiagnosticSchema = Schema.Struct({
@@ -220,7 +228,7 @@ const SourceDiagnosticSchema = Schema.Struct({
 });
 
 /**
- * Bounded diagnostics for one known-RFC research operation.
+ * Bounded diagnostics for one semantic research operation.
  */
 export const ResearchDiagnosticsSchema = Schema.Struct({
   schemaVersion: Schema.Literal(1),
@@ -229,10 +237,12 @@ export const ResearchDiagnosticsSchema = Schema.Struct({
   resolvedModel: Schema.NonEmptyString,
   usage: TokenUsageSchema,
   timings: TimingSchema,
-  source: SourceDiagnosticSchema,
+  source: Schema.NullOr(SourceDiagnosticSchema),
+  sources: Schema.Union([Schema.Array(SourceDiagnosticSchema), Schema.Undefined]),
   catalog: CatalogStatusSchema,
   candidates: CandidateCountsSchema,
   atomicity: AtomicityDiagnosticSchema,
+  documentSelection: Schema.Union([Schema.Array(SelectionDiagnosticSchema), Schema.Undefined]),
   selection: Schema.Array(SelectionDiagnosticSchema),
   classification: Schema.Array(ClassificationDiagnosticSchema),
 });
@@ -243,14 +253,14 @@ export const ResearchDiagnosticsSchema = Schema.Struct({
 export type ResearchDiagnostics = Schema.Schema.Type<typeof ResearchDiagnosticsSchema>;
 
 /**
- * The versioned public result of known-RFC research.
+ * The versioned public result of known-RFC or topic-only research.
  */
 export const EvidenceBundleSchema = Schema.Struct({
   schemaVersion: Schema.Literal(1),
   kind: Schema.Literal("evidence_bundle"),
   status: ResearchStatusSchema,
   question: Schema.NonEmptyString,
-  rfc: CatalogDocumentSchema,
+  rfc: Schema.NullOr(CatalogDocumentSchema),
   evidence: Schema.Array(EvidencePassageSchema),
   diagnostics: ResearchDiagnosticsSchema,
 });
@@ -273,14 +283,14 @@ export class RfcNotFoundError extends Schema.TaggedError<RfcNotFoundError>()("Rf
 export class DecisionModelError extends Schema.TaggedError<DecisionModelError>()(
   "DecisionModelError",
   {
-    stage: Schema.Literals(["selection", "relation", "citation"]),
+    stage: Schema.Literals(["document", "selection", "relation", "citation"]),
     reason: Schema.String,
     attempts: Schema.optionalKey(Schema.Natural),
   },
 ) {}
 
 /**
- * Configuration needed by the known-RFC research pipeline.
+ * Configuration needed by a semantic RFC research pipeline.
  */
 export interface KnownRfcResearchOptions {
   /**
@@ -334,24 +344,55 @@ const atomicityCriteria = {
 
 type AtomicityLabel = keyof typeof atomicityCriteria;
 
+const PassageInputSchema = Schema.Struct({
+  id: Schema.NonEmptyString,
+  section: Schema.NullOr(Schema.String),
+  text: Schema.String,
+});
+
 const PassageBatchInputSchema = Schema.Struct({
   question: Schema.NonEmptyString,
-  passages: Schema.Array(
-    Schema.Struct({
-      id: Schema.NonEmptyString,
-      section: Schema.NullOr(Schema.String),
-      text: Schema.String,
-    }),
-  ),
+  passages: Schema.Record(Schema.String, PassageInputSchema),
 });
+
+const DocumentInputSchema = Schema.Struct({
+  identifier: Schema.NonEmptyString,
+  title: Schema.String,
+  abstract: Schema.String,
+});
+
+const DocumentBatchInputSchema = Schema.Struct({
+  question: Schema.NonEmptyString,
+  documents: Schema.Record(Schema.String, DocumentInputSchema),
+});
+
+type AtomicityResult = {
+  readonly label: AtomicityLabel;
+  readonly probabilities: Readonly<Record<string, number>>;
+  readonly confidence: number | undefined;
+};
+
+type DocumentCandidate = {
+  readonly document: CatalogDocument;
+  readonly lexicalScore: number;
+};
+
+type DocumentSelectionResult = {
+  readonly accepted: ReadonlyArray<{
+    readonly document: CatalogDocument;
+    readonly probability: number;
+  }>;
+  readonly atomicity: AtomicityResult;
+  readonly diagnostics: ReadonlyArray<{
+    readonly candidateId: string;
+    readonly probability: number;
+  }>;
+  readonly usage: DecisionModel.DecisionUsage;
+};
 
 type SelectionResult = {
   readonly selected: ReadonlyArray<{ readonly block: SourceBlock; readonly probability: number }>;
-  readonly atomicity: {
-    readonly label: AtomicityLabel;
-    readonly probabilities: Readonly<Record<string, number>>;
-    readonly confidence: number | undefined;
-  };
+  readonly atomicity: AtomicityResult | undefined;
   readonly diagnostics: ReadonlyArray<{
     readonly candidateId: string;
     readonly probability: number;
@@ -379,7 +420,7 @@ type RelationResult = {
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : "The DecisionModel request failed";
 
-type DecisionStage = "selection" | "relation";
+type DecisionStage = "document" | "selection" | "relation";
 
 const providerErrorTag = (error: unknown): string =>
   AiError.isAiError(error) ? error.reason._tag : "UnknownProviderError";
@@ -618,6 +659,20 @@ const combineUsage = (
   outputTokens: addUsage(left.outputTokens, right.outputTokens),
 });
 
+const combineUsages = (
+  usages: ReadonlyArray<DecisionModel.DecisionUsage>,
+): { readonly inputTokens: number | undefined; readonly outputTokens: number | undefined } =>
+  usages.reduce<{
+    readonly inputTokens: number | undefined;
+    readonly outputTokens: number | undefined;
+  }>(
+    (total, usage) => ({
+      inputTokens: addUsage(total.inputTokens, usage.inputTokens),
+      outputTokens: addUsage(total.outputTokens, usage.outputTokens),
+    }),
+    { inputTokens: undefined, outputTokens: undefined },
+  );
+
 const linesOf = (text: string): ReadonlyArray<LineRecord> => {
   const lines: Array<LineRecord> = [];
   let start = 0;
@@ -751,11 +806,122 @@ export const shortlistPassageCandidates = (
     });
 };
 
-const selectionStage = Effect.fnUntraced(function* (
+const rankDocumentCandidates = (
+  documents: ReadonlyArray<CatalogDocument>,
   question: string,
-  candidates: ReadonlyArray<SourceBlock>,
+  limit: number = knownRfcPolicy.maxDocumentCandidates,
+): ReadonlyArray<DocumentCandidate> => {
+  if (documents.length === 0 || question.trim().length === 0 || limit <= 0) return [];
+
+  const search = new MiniSearch<CatalogDocument>({
+    fields: ["identifier", "title", "abstract"],
+    storeFields: ["identifier", "title", "abstract"],
+    searchOptions: {
+      boost: { identifier: 3, title: 2, abstract: 1 },
+      combineWith: "OR",
+      prefix: true,
+      fuzzy: 0.2,
+    },
+  });
+  search.addAll(documents.map((document) => ({ ...document, id: document.identifier })));
+  const byIdentifier = new Map(documents.map((document) => [document.identifier, document]));
+
+  return search
+    .search(question)
+    .sort(
+      (left, right) =>
+        right.score - left.score ||
+        Number(byIdentifier.get(String(left.id))?.rfcNumber ?? 0) -
+          Number(byIdentifier.get(String(right.id))?.rfcNumber ?? 0),
+    )
+    .slice(0, limit)
+    .flatMap((result) => {
+      const document = byIdentifier.get(String(result.id));
+      return document === undefined ? [] : [{ document, lexicalScore: result.score }];
+    });
+};
+
+/**
+ * Deterministically shortlist published catalog documents for topic discovery.
+ *
+ * @param documents Published RFC metadata from a fresh catalog.
+ * @param question Atomic research question.
+ * @param limit Maximum number of document candidates.
+ * @returns Ranked, bounded published RFC documents.
+ */
+export const shortlistDocumentCandidates = (
+  documents: ReadonlyArray<CatalogDocument>,
+  question: string,
+  limit: number = knownRfcPolicy.maxDocumentCandidates,
+): ReadonlyArray<CatalogDocument> =>
+  rankDocumentCandidates(documents, question, limit).map(({ document }) => document);
+
+const isConfidentAtomic = (atomicity: AtomicityResult, policy: ResearchPolicy): boolean =>
+  atomicity.label === "atomic" &&
+  (atomicity.probabilities.atomic ?? 0) >= policy.relationConfidenceThreshold &&
+  atomicity.confidence !== undefined &&
+  atomicity.confidence >= policy.relationConfidenceThreshold;
+
+const documentDecisionKey = (index: number): string => `document_${index}`;
+
+const passageDecisionKey = (index: number): string => `passage_${index}`;
+
+const documentDecision = (candidate: DocumentCandidate, index: number): Decision.Any => {
+  const key = documentDecisionKey(index);
+  const { document } = candidate;
+  return Decision.probability({
+    instructions: [
+      `Evaluate only published RFC candidate ${key} at index ${index}.`,
+      `The exact candidate is keyed as input.documents["${key}"], with identifier, title, and abstract fields.`,
+      `Its identifier is ${document.identifier}, its title is ${document.title}, and its abstract is ${document.abstract}.`,
+      "Ignore every other document candidate when answering this decision.",
+    ].join(" "),
+    criteria: {
+      false: `Candidate ${key} (${document.identifier}) is not likely to contain evidence that answers the question.`,
+      true: `Candidate ${key} (${document.identifier}) is likely to contain evidence that answers the question.`,
+    },
+  });
+};
+
+const passageSelectionDecision = (candidate: SourceBlock, index: number): Decision.Any => {
+  const key = passageDecisionKey(index);
+  return Decision.probability({
+    instructions: [
+      `Evaluate only exact RFC source block candidate ${key} at index ${index}.`,
+      `The exact candidate is keyed as input.passages["${key}"], and its full passage content is input.passages["${key}"].text.`,
+      `Its source-block identifier is ${candidate.id} and its section is ${candidate.section ?? "unknown"}.`,
+      "Ignore every other passage candidate when answering this decision.",
+    ].join(" "),
+    criteria: {
+      false: `Source block ${key} (${candidate.id}) does not contain evidence that answers the question.`,
+      true: `Source block ${key} (${candidate.id}) contains evidence that answers the question.`,
+    },
+  });
+};
+
+const passageRelationDecision = (candidate: SourceBlock, index: number): Decision.Any => {
+  const key = passageDecisionKey(index);
+  return Decision.classify({
+    instructions: [
+      `Classify only exact RFC source block candidate ${key} at index ${index}.`,
+      `The exact candidate is keyed as input.passages["${key}"], and its full passage content is input.passages["${key}"].text.`,
+      `Its source-block identifier is ${candidate.id} and its section is ${candidate.section ?? "unknown"}.`,
+      "Ignore every other passage candidate when answering this decision.",
+    ].join(" "),
+    criteria: Object.fromEntries(
+      Object.entries(answerRelationCriteria).map(([label, description]) => [
+        label,
+        `Candidate ${key} (${candidate.id}): ${description}`,
+      ]),
+    ),
+  });
+};
+
+const documentSelectionStage = Effect.fnUntraced(function* (
+  question: string,
+  candidates: ReadonlyArray<DocumentCandidate>,
   policy: ResearchPolicy,
-): Effect.fn.Return<SelectionResult, DecisionModelError, DecisionModel.DecisionModel> {
+): Effect.fn.Return<DocumentSelectionResult, DecisionModelError, DecisionModel.DecisionModel> {
   const decisions = Object.fromEntries([
     [
       "question_atomicity",
@@ -766,15 +932,128 @@ const selectionStage = Effect.fnUntraced(function* (
       }),
     ],
     ...candidates.map((candidate, index) => [
-      `passage_${index}`,
-      Decision.probability({
-        instructions:
-          "Estimate whether this exact RFC source block contains evidence that answers the question.",
-        criteria: {
-          false: "The source block does not answer the question.",
-          true: "The source block contains evidence that answers the question.",
+      documentDecisionKey(index),
+      documentDecision(candidate, index),
+    ]),
+  ]) as Record<string, Decision.Any>;
+  const definition = Decision.make({ input: DocumentBatchInputSchema, decisions });
+  const model = yield* DecisionModel.DecisionModel;
+  const response = yield* decideWithRetry(
+    "document",
+    () =>
+      model.decide(definition, {
+        input: {
+          question,
+          documents: Object.fromEntries(
+            candidates.map(({ document }, index) => [
+              documentDecisionKey(index),
+              {
+                identifier: document.identifier,
+                title: document.title,
+                abstract: document.abstract,
+              },
+            ]),
+          ),
         },
       }),
+    policy,
+  );
+  const answers = yield* providerAnswers("document", response);
+  const atomicityAnswer = answers.question_atomicity;
+  if (!Predicate.isObject(atomicityAnswer)) {
+    return yield* new DecisionModelError({
+      stage: "document",
+      reason: "Provider omitted the question atomicity answer",
+    });
+  }
+  const label = atomicityAnswer.label;
+  if (
+    !Predicate.isString(label) ||
+    !Object.prototype.hasOwnProperty.call(atomicityCriteria, label)
+  ) {
+    return yield* new DecisionModelError({
+      stage: "document",
+      reason: "Provider returned an unknown question atomicity label",
+    });
+  }
+  const atomicity: AtomicityResult = {
+    label: label as AtomicityLabel,
+    probabilities: yield* decodeProbabilityMap(
+      "document",
+      "question_atomicity",
+      atomicityAnswer.probabilities,
+      Object.keys(atomicityCriteria),
+    ),
+    confidence: yield* decodeConfidence(
+      "document",
+      "question_atomicity",
+      atomicityAnswer.confidence,
+    ),
+  };
+  const diagnostics: Array<{ readonly candidateId: string; readonly probability: number }> = [];
+  for (const [index, candidate] of candidates.entries()) {
+    const candidateId = documentDecisionKey(index);
+    const answer = answers[candidateId];
+    if (!Predicate.isObject(answer)) {
+      return yield* new DecisionModelError({
+        stage: "document",
+        reason: `Provider omitted the document probability for ${candidate.document.identifier}`,
+      });
+    }
+    diagnostics.push({
+      candidateId: candidate.document.identifier,
+      probability: yield* decodeProbability(
+        "document",
+        candidate.document.identifier,
+        answer.probability,
+      ),
+    });
+  }
+  const usage = yield* decodeUsage(
+    "document",
+    Predicate.isObject(response) ? response.usage : undefined,
+  );
+  const accepted = isConfidentAtomic(atomicity, policy)
+    ? candidates
+        .map((candidate, index) => ({
+          document: candidate.document,
+          lexicalScore: candidate.lexicalScore,
+          probability: diagnostics[index]?.probability ?? 0,
+        }))
+        .filter(({ probability }) => probability >= policy.documentProbabilityThreshold)
+        .sort(
+          (left, right) =>
+            right.probability - left.probability ||
+            right.lexicalScore - left.lexicalScore ||
+            left.document.rfcNumber - right.document.rfcNumber,
+        )
+        .slice(0, policy.maxAcceptedDocumentCandidates)
+    : [];
+  return { accepted, atomicity, diagnostics, usage };
+});
+
+const selectionStage = Effect.fnUntraced(function* (
+  question: string,
+  candidates: ReadonlyArray<SourceBlock>,
+  policy: ResearchPolicy,
+  includeAtomicity: boolean,
+): Effect.fn.Return<SelectionResult, DecisionModelError, DecisionModel.DecisionModel> {
+  const decisions = Object.fromEntries([
+    ...(includeAtomicity
+      ? [
+          [
+            "question_atomicity",
+            Decision.classify({
+              instructions:
+                "Determine whether the request contains one atomic question or multiple questions.",
+              criteria: atomicityCriteria,
+            }),
+          ],
+        ]
+      : []),
+    ...candidates.map((candidate, index) => [
+      passageDecisionKey(index),
+      passageSelectionDecision(candidate, index),
     ]),
   ]) as Record<string, Decision.Any>;
   const definition = Decision.make({ input: PassageBatchInputSchema, decisions });
@@ -785,50 +1064,58 @@ const selectionStage = Effect.fnUntraced(function* (
       model.decide(definition, {
         input: {
           question,
-          passages: candidates.map((candidate) => ({
-            id: candidate.id,
-            section: candidate.section,
-            text: candidate.text,
-          })),
+          passages: Object.fromEntries(
+            candidates.map((candidate, index) => [
+              passageDecisionKey(index),
+              {
+                id: candidate.id,
+                section: candidate.section,
+                text: candidate.text,
+              },
+            ]),
+          ),
         },
       }),
     policy,
   );
   const answers = yield* providerAnswers("selection", response);
-  const atomicityAnswer = answers.question_atomicity;
-  if (!Predicate.isObject(atomicityAnswer)) {
-    return yield* new DecisionModelError({
-      stage: "selection",
-      reason: "Provider omitted the question atomicity answer",
-    });
+  let atomicity: AtomicityResult | undefined;
+  if (includeAtomicity) {
+    const atomicityAnswer = answers.question_atomicity;
+    if (!Predicate.isObject(atomicityAnswer)) {
+      return yield* new DecisionModelError({
+        stage: "selection",
+        reason: "Provider omitted the question atomicity answer",
+      });
+    }
+    const label = atomicityAnswer.label;
+    if (
+      !Predicate.isString(label) ||
+      !Object.prototype.hasOwnProperty.call(atomicityCriteria, label)
+    ) {
+      return yield* new DecisionModelError({
+        stage: "selection",
+        reason: "Provider returned an unknown question atomicity label",
+      });
+    }
+    atomicity = {
+      label: label as AtomicityLabel,
+      probabilities: yield* decodeProbabilityMap(
+        "selection",
+        "question_atomicity",
+        atomicityAnswer.probabilities,
+        Object.keys(atomicityCriteria),
+      ),
+      confidence: yield* decodeConfidence(
+        "selection",
+        "question_atomicity",
+        atomicityAnswer.confidence,
+      ),
+    };
   }
-  const label = atomicityAnswer.label;
-  if (
-    !Predicate.isString(label) ||
-    !Object.prototype.hasOwnProperty.call(atomicityCriteria, label)
-  ) {
-    return yield* new DecisionModelError({
-      stage: "selection",
-      reason: "Provider returned an unknown question atomicity label",
-    });
-  }
-  const atomicity = {
-    label: label as AtomicityLabel,
-    probabilities: yield* decodeProbabilityMap(
-      "selection",
-      "question_atomicity",
-      atomicityAnswer.probabilities,
-      Object.keys(atomicityCriteria),
-    ),
-    confidence: yield* decodeConfidence(
-      "selection",
-      "question_atomicity",
-      atomicityAnswer.confidence,
-    ),
-  };
   const diagnostics: Array<{ readonly candidateId: string; readonly probability: number }> = [];
   for (const [index, candidate] of candidates.entries()) {
-    const candidateId = `passage_${index}`;
+    const candidateId = passageDecisionKey(index);
     const answer = answers[candidateId];
     if (!Predicate.isObject(answer)) {
       return yield* new DecisionModelError({
@@ -845,20 +1132,16 @@ const selectionStage = Effect.fnUntraced(function* (
     "selection",
     Predicate.isObject(response) ? response.usage : undefined,
   );
-  const atomic =
-    atomicity.label === "atomic" &&
-    (atomicity.probabilities.atomic ?? 0) >= policy.relationConfidenceThreshold &&
-    atomicity.confidence !== undefined &&
-    atomicity.confidence >= policy.relationConfidenceThreshold;
   return {
-    selected: atomic
-      ? candidates.flatMap((candidate, index) => {
-          const probability = diagnostics[index]?.probability ?? 0;
-          return probability >= policy.selectionProbabilityThreshold
-            ? [{ block: candidate, probability }]
-            : [];
-        })
-      : [],
+    selected:
+      atomicity === undefined || isConfidentAtomic(atomicity, policy)
+        ? candidates.flatMap((candidate, index) => {
+            const probability = diagnostics[index]?.probability ?? 0;
+            return probability >= policy.selectionProbabilityThreshold
+              ? [{ block: candidate, probability }]
+              : [];
+          })
+        : [],
     atomicity,
     diagnostics,
     usage,
@@ -878,13 +1161,9 @@ const relationStage = Effect.fnUntraced(function* (
     };
   }
   const decisions = Object.fromEntries(
-    selected.map((candidate, index) => [
-      `passage_${index}`,
-      Decision.classify({
-        instructions:
-          "Classify the selected exact RFC passage's relationship to the research question.",
-        criteria: answerRelationCriteria,
-      }),
+    selected.map(({ block }, index) => [
+      passageDecisionKey(index),
+      passageRelationDecision(block, index),
     ]),
   ) as Record<string, Decision.Any>;
   const definition = Decision.make({ input: PassageBatchInputSchema, decisions });
@@ -895,11 +1174,16 @@ const relationStage = Effect.fnUntraced(function* (
       model.decide(definition, {
         input: {
           question,
-          passages: selected.map(({ block }) => ({
-            id: block.id,
-            section: block.section,
-            text: block.text,
-          })),
+          passages: Object.fromEntries(
+            selected.map(({ block }, index) => [
+              passageDecisionKey(index),
+              {
+                id: block.id,
+                section: block.section,
+                text: block.text,
+              },
+            ]),
+          ),
         },
       }),
     policy,
@@ -907,7 +1191,7 @@ const relationStage = Effect.fnUntraced(function* (
   const answers = yield* providerAnswers("relation", response);
   const decodedAnswers: Array<RelationResult["answers"][number]> = [];
   for (const [index, candidate] of selected.entries()) {
-    const candidateId = `passage_${index}`;
+    const candidateId = passageDecisionKey(index);
     const answer = answers[candidateId];
     if (!Predicate.isObject(answer)) {
       return yield* new DecisionModelError({
@@ -1015,10 +1299,11 @@ const confidentNegativeRelation = (
 
 const statusFromRelations = (
   answers: ReadonlyArray<RelationResult["answers"][number]>,
-  atomicity: SelectionResult["atomicity"],
+  atomicity: SelectionResult["atomicity"] | AtomicityResult | undefined,
   selectionDiagnostics: ReadonlyArray<SelectionResult["diagnostics"][number]>,
   policy: ResearchPolicy,
 ): ResearchStatus => {
+  if (atomicity === undefined) return "needs_review";
   const atomicityConfident =
     atomicity.confidence !== undefined &&
     atomicity.confidence >= policy.relationConfidenceThreshold &&
@@ -1056,6 +1341,60 @@ const statusFromRelations = (
   }
   return "needs_review";
 };
+
+type PassageSource = {
+  readonly document: CatalogDocument;
+  readonly source: RfcSource;
+};
+
+const sourceDiagnostic = (source: RfcSource) => ({
+  identifier: source.identifier,
+  rfcNumber: source.rfcNumber,
+  sourceUrl: source.sourceUrl,
+  sourceHash: source.contentHash,
+  fetchedAt: source.fetchedAt,
+});
+
+const evidenceFromRelations = (
+  answers: ReadonlyArray<RelationResult["answers"][number]>,
+  sources: ReadonlyMap<string, PassageSource>,
+  policy: ResearchPolicy,
+): ReadonlyArray<EvidencePassage> =>
+  answers
+    .filter((answer) =>
+      acceptedRelation(answer.relation, answer.probabilities, answer.confidence, policy),
+    )
+    .flatMap((answer) => {
+      const context = sources.get(answer.block.id);
+      if (context === undefined) return [];
+      const offsets = makeUtf8OffsetMap(context.source.text);
+      const startOffset = offsets.byteOffsetAtCodeUnit(answer.block.startOffset);
+      const endOffset = offsets.byteOffsetAtCodeUnit(answer.block.endOffset);
+      if (startOffset === undefined || endOffset === undefined) return [];
+      const quote = context.source.text.slice(answer.block.startOffset, answer.block.endOffset);
+      return [
+        {
+          id: answer.block.id,
+          quote,
+          relation: answer.relation,
+          selectionProbability: answer.selectionProbability,
+          relationProbabilities: answer.probabilities,
+          confidence: answer.confidence ?? null,
+          provenance: {
+            identifier: context.document.identifier,
+            rfcNumber: context.document.rfcNumber,
+            sourceUrl: context.source.sourceUrl,
+            canonicalUrl: context.document.canonicalUrl,
+            sourceHash: context.source.contentHash,
+            offsetUnit: utf8OffsetUnit,
+            startOffset,
+            endOffset,
+            section: answer.block.section,
+            fetchedAt: context.source.fetchedAt,
+          },
+        } satisfies EvidencePassage,
+      ];
+    });
 
 /**
  * Run the complete known-RFC retrieval and semantic evidence pipeline.
@@ -1103,48 +1442,24 @@ export const researchKnownRfc = Effect.fnUntraced(function* (
   const candidates = shortlistPassageCandidates(blocks, question, policy.maxPassageCandidates);
   const lexicalFinished = yield* Clock.currentTimeMillis;
   const selectionStarted = lexicalFinished;
-  const selection = yield* selectionStage(question, candidates, policy);
+  const selection = yield* selectionStage(question, candidates, policy, true);
   const selectionFinished = yield* Clock.currentTimeMillis;
+  if (selection.atomicity === undefined) {
+    return yield* new DecisionModelError({
+      stage: "selection",
+      reason: "Provider response did not include atomicity diagnostics",
+    });
+  }
   const relationStarted = selectionFinished;
   const relation = yield* relationStage(question, selection.selected, policy);
   const relationFinished = yield* Clock.currentTimeMillis;
   const resolvedModel = yield* Ref.get(resolvedModelRef);
   const usage = combineUsage(selection.usage, relation.usage);
-  const offsets = makeUtf8OffsetMap(source.text);
-  const evidence: Array<EvidencePassage> = [];
-  for (const answer of relation.answers.filter((candidate) =>
-    acceptedRelation(candidate.relation, candidate.probabilities, candidate.confidence, policy),
-  )) {
-    const startOffset = offsets.byteOffsetAtCodeUnit(answer.block.startOffset);
-    const endOffset = offsets.byteOffsetAtCodeUnit(answer.block.endOffset);
-    if (startOffset === undefined || endOffset === undefined) {
-      return yield* new DecisionModelError({
-        stage: "relation",
-        reason: "The accepted evidence range is not a UTF-8 source boundary",
-      });
-    }
-    const quote = source.text.slice(answer.block.startOffset, answer.block.endOffset);
-    evidence.push({
-      id: answer.block.id,
-      quote,
-      relation: answer.relation,
-      selectionProbability: answer.selectionProbability,
-      relationProbabilities: answer.probabilities,
-      confidence: answer.confidence ?? null,
-      provenance: {
-        identifier: document.identifier,
-        rfcNumber: document.rfcNumber,
-        sourceUrl: source.sourceUrl,
-        canonicalUrl: document.canonicalUrl,
-        sourceHash: source.contentHash,
-        offsetUnit: utf8OffsetUnit,
-        startOffset,
-        endOffset,
-        section: answer.block.section,
-        fetchedAt: source.fetchedAt,
-      },
-    });
-  }
+  const evidence = evidenceFromRelations(
+    relation.answers,
+    new Map(candidates.map((candidate) => [candidate.id, { document, source }] as const)),
+    policy,
+  );
   const status = statusFromRelations(
     relation.answers,
     selection.atomicity,
@@ -1168,25 +1483,25 @@ export const researchKnownRfc = Effect.fnUntraced(function* (
       selectionMs: elapsed(selectionStarted, selectionFinished),
       relationMs: elapsed(relationStarted, relationFinished),
       totalMs: elapsed(options.startedAt, finishedAt),
+      documentMs: undefined,
     },
-    source: {
-      identifier: source.identifier,
-      rfcNumber: source.rfcNumber,
-      sourceUrl: source.sourceUrl,
-      sourceHash: source.contentHash,
-      fetchedAt: source.fetchedAt,
-    },
+    source: sourceDiagnostic(source),
+    sources: undefined,
     catalog: options.catalogStatus,
     candidates: {
       sourceBlocks: blocks.length,
       passageCandidates: candidates.length,
       selectedPassages: selection.selected.length,
+      catalogDocuments: undefined,
+      documentCandidates: undefined,
+      acceptedDocuments: undefined,
     },
     atomicity: {
       label: selection.atomicity.label,
       probabilities: selection.atomicity.probabilities,
       confidence: selection.atomicity.confidence ?? null,
     },
+    documentSelection: undefined,
     selection: selection.diagnostics,
     classification: relation.diagnostics,
   } satisfies ResearchDiagnostics;
@@ -1197,6 +1512,211 @@ export const researchKnownRfc = Effect.fnUntraced(function* (
     status,
     question,
     rfc: document,
+    evidence,
+    diagnostics,
+  });
+});
+
+/**
+ * Run topic-only RFC discovery, retrieval, and semantic evidence research.
+ *
+ * @param question Atomic research question without an RFC hint.
+ * @param options Fresh catalog, cache, provider, and timing configuration.
+ * @returns A versioned evidence bundle with exact provenance and discovery diagnostics.
+ */
+export const researchTopic = Effect.fnUntraced(function* (
+  question: string,
+  options: KnownRfcResearchOptions,
+): Effect.fn.Return<
+  EvidenceBundle,
+  | RfcSourceCacheError
+  | RfcSourceFetchError
+  | DecisionModelError
+  | ResearchPolicyError
+  | import("./catalog").CatalogReadError
+  | import("./catalog").CatalogStaleError,
+  | FileSystem.FileSystem
+  | RfcSourceStore
+  | RfcSourceServiceTag
+  | DecisionModel.DecisionModel
+  | ResolvedModelName
+> {
+  const policy = yield* policyFor(options.policyPreset);
+  const resolvedModelRef = yield* ResolvedModelName;
+  const documentLexicalStarted = yield* Clock.currentTimeMillis;
+  const documentCandidates = rankDocumentCandidates(
+    options.catalog.documents,
+    question,
+    policy.maxDocumentCandidates,
+  );
+  const documentLexicalFinished = yield* Clock.currentTimeMillis;
+  const documentStarted = documentLexicalFinished;
+  const documentSelection = yield* documentSelectionStage(question, documentCandidates, policy);
+  const documentFinished = yield* Clock.currentTimeMillis;
+
+  const makeEmptyDiagnostics = (
+    finishedAt: number,
+    resolvedModel: string,
+  ): ResearchDiagnostics => ({
+    schemaVersion: 1,
+    policyVersion: policy.policyVersion,
+    requestedModel: options.modelAlias,
+    resolvedModel,
+    usage: {
+      inputTokens: documentSelection.usage.inputTokens ?? null,
+      outputTokens: documentSelection.usage.outputTokens ?? null,
+    },
+    timings: {
+      catalogMs: options.catalogMs,
+      sourceMs: 0,
+      lexicalMs: elapsed(documentLexicalStarted, documentLexicalFinished),
+      selectionMs: 0,
+      relationMs: 0,
+      totalMs: elapsed(options.startedAt, finishedAt),
+      documentMs: elapsed(documentStarted, documentFinished),
+    },
+    source: null,
+    sources: [],
+    catalog: options.catalogStatus,
+    candidates: {
+      catalogDocuments: options.catalog.documents.length,
+      documentCandidates: documentCandidates.length,
+      acceptedDocuments: 0,
+      sourceBlocks: 0,
+      passageCandidates: 0,
+      selectedPassages: 0,
+    },
+    atomicity: {
+      label: documentSelection.atomicity.label,
+      probabilities: documentSelection.atomicity.probabilities,
+      confidence: documentSelection.atomicity.confidence ?? null,
+    },
+    documentSelection: documentSelection.diagnostics,
+    selection: [],
+    classification: [],
+  });
+
+  if (documentSelection.accepted.length === 0) {
+    const finishedAt = yield* Clock.currentTimeMillis;
+    const status = statusFromRelations([], documentSelection.atomicity, [], policy);
+    const resolvedModel = yield* Ref.get(resolvedModelRef);
+    const diagnostics = makeEmptyDiagnostics(finishedAt, resolvedModel);
+    return Schema.decodeUnknownSync(EvidenceBundleSchema)({
+      schemaVersion: 1,
+      kind: "evidence_bundle",
+      status,
+      question,
+      rfc: null,
+      evidence: [],
+      diagnostics,
+    });
+  }
+
+  const primaryDocument = documentSelection.accepted[0]?.document;
+  if (primaryDocument === undefined) {
+    return yield* new DecisionModelError({
+      stage: "document",
+      reason: "No accepted document was available for source research",
+    });
+  }
+
+  const sourceStarted = yield* Clock.currentTimeMillis;
+  const sourceContexts: Array<PassageSource> = [];
+  for (const accepted of documentSelection.accepted) {
+    sourceContexts.push({
+      document: accepted.document,
+      source: yield* loadRfcSource(accepted.document, options.sourceDirectory),
+    });
+  }
+  const sourceFinished = yield* Clock.currentTimeMillis;
+  const primarySource = sourceContexts[0];
+  if (primarySource === undefined) {
+    return yield* new DecisionModelError({
+      stage: "document",
+      reason: "No accepted document source was loaded",
+    });
+  }
+  const allBlocks: Array<SourceBlock> = [];
+  const blockSources = new Map<string, PassageSource>();
+  for (const context of sourceContexts) {
+    const blocks = parseSourceBlocks(
+      context.source.text,
+      policy.sourceBlockMaxCharacters,
+      policy.sourceBlockOverlapCharacters,
+    );
+    for (const block of blocks) {
+      const namespacedBlock = {
+        ...block,
+        id: `${context.document.identifier}:${block.id}`,
+      };
+      const decodedBlock = Schema.decodeUnknownSync(SourceBlockSchema)(namespacedBlock);
+      allBlocks.push(decodedBlock);
+      blockSources.set(decodedBlock.id, context);
+    }
+  }
+  const candidates = shortlistPassageCandidates(allBlocks, question, policy.maxPassageCandidates);
+  const lexicalFinished = yield* Clock.currentTimeMillis;
+  const selectionStarted = lexicalFinished;
+  const selection = yield* selectionStage(question, candidates, policy, false);
+  const selectionFinished = yield* Clock.currentTimeMillis;
+  const relationStarted = selectionFinished;
+  const relation = yield* relationStage(question, selection.selected, policy);
+  const relationFinished = yield* Clock.currentTimeMillis;
+  const finishedAt = yield* Clock.currentTimeMillis;
+  const resolvedModel = yield* Ref.get(resolvedModelRef);
+  const usage = combineUsages([documentSelection.usage, selection.usage, relation.usage]);
+  const evidence = evidenceFromRelations(relation.answers, blockSources, policy);
+  const status = statusFromRelations(
+    relation.answers,
+    documentSelection.atomicity,
+    selection.diagnostics,
+    policy,
+  );
+  const diagnostics = {
+    schemaVersion: 1 as const,
+    policyVersion: policy.policyVersion,
+    requestedModel: options.modelAlias,
+    resolvedModel,
+    usage: {
+      inputTokens: usage.inputTokens ?? null,
+      outputTokens: usage.outputTokens ?? null,
+    },
+    timings: {
+      catalogMs: options.catalogMs,
+      sourceMs: elapsed(sourceStarted, sourceFinished),
+      lexicalMs: elapsed(documentLexicalStarted, lexicalFinished),
+      selectionMs: elapsed(selectionStarted, selectionFinished),
+      relationMs: elapsed(relationStarted, relationFinished),
+      totalMs: elapsed(options.startedAt, finishedAt),
+      documentMs: elapsed(documentStarted, documentFinished),
+    },
+    source: sourceDiagnostic(primarySource.source),
+    sources: sourceContexts.map((context) => sourceDiagnostic(context.source)),
+    catalog: options.catalogStatus,
+    candidates: {
+      catalogDocuments: options.catalog.documents.length,
+      documentCandidates: documentCandidates.length,
+      acceptedDocuments: documentSelection.accepted.length,
+      sourceBlocks: allBlocks.length,
+      passageCandidates: candidates.length,
+      selectedPassages: selection.selected.length,
+    },
+    atomicity: {
+      label: documentSelection.atomicity.label,
+      probabilities: documentSelection.atomicity.probabilities,
+      confidence: documentSelection.atomicity.confidence ?? null,
+    },
+    documentSelection: documentSelection.diagnostics,
+    selection: selection.diagnostics,
+    classification: relation.diagnostics,
+  } satisfies ResearchDiagnostics;
+
+  return Schema.decodeUnknownSync(EvidenceBundleSchema)({
+    schemaVersion: 1,
+    kind: "evidence_bundle",
+    status,
+    question,
+    rfc: primaryDocument,
     evidence,
     diagnostics,
   });

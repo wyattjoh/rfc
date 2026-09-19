@@ -11,7 +11,8 @@
   "scripts": {
     "build": "bun build src/index.ts --outdir dist --target bun",
     "test": "bun test",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "benchmark:topic": "bun run benchmark/topic-discovery.ts"
   },
   "dependencies": {
     "@effect/ai-typesafe": "4.0.0-rc.116",

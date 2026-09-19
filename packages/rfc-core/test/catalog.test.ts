@@ -8,7 +8,6 @@ import * as PlatformError from "effect/PlatformError";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 import {
   CatalogRefreshError,
-  CatalogStaleError,
   CatalogStore,
   catalogStoreLayer,
   createRfcClient,
@@ -425,7 +424,7 @@ describe("catalog status", () => {
     await expect(client.catalogStatus()).rejects.toMatchObject({ _tag: "CatalogReadError" });
   });
 
-  test("does not make stale catalog data research-ready", async () => {
+  test("does not fall back to stale data when a topic refresh fails", async () => {
     const cacheDirectory = await makeCacheDirectory();
     const client = await createRfcClient({
       cacheDirectory,
@@ -434,6 +433,9 @@ describe("catalog status", () => {
       modelAlias: undefined,
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
+      catalogSource: async () => {
+        throw new Error("refresh unavailable");
+      },
       now: () => Date.parse("2026-01-09T00:00:01.000Z"),
     });
     clients.push(client);
@@ -451,6 +453,9 @@ describe("catalog status", () => {
 
     await expect(
       client.research({ schemaVersion: 1, question: "What is HTTP?", rfc: null }),
-    ).rejects.toBeInstanceOf(CatalogStaleError);
+    ).rejects.toMatchObject({
+      _tag: "CatalogRefreshError",
+      reason: "refresh unavailable",
+    });
   });
 });

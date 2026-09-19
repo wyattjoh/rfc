@@ -55,6 +55,32 @@ const sourceText = [
   "",
 ].join("\n");
 
+type TopicDecisionCall = {
+  readonly definition: {
+    readonly decisions: Readonly<Record<string, Decision.Any>>;
+  };
+  readonly input: {
+    readonly question: string;
+    readonly documents?: Readonly<
+      Record<
+        string,
+        { readonly identifier: string; readonly title: string; readonly abstract: string }
+      >
+    >;
+    readonly passages?: Readonly<
+      Record<
+        string,
+        { readonly id: string; readonly section: string | null; readonly text: string }
+      >
+    >;
+  };
+};
+
+type InspectableDecision = {
+  readonly instructions: string;
+  readonly criteria: Readonly<Record<string, string>>;
+};
+
 const makeDecisionModel = (
   calls: Array<unknown>,
   atomicity: "atomic" | "compound" = "atomic",
@@ -218,7 +244,7 @@ describe("known RFC research", () => {
     });
 
     expect(result.status).toBe("answered");
-    expect(result.rfc.identifier).toBe("RFC9110");
+    expect(result.rfc?.identifier).toBe("RFC9110");
     expect(result.evidence).toHaveLength(1);
     const evidence = result.evidence[0];
     expect(evidence).toBeDefined();
@@ -1008,5 +1034,347 @@ describe("known RFC research", () => {
             sourceBytes.slice(evidence.provenance.startOffset, evidence.provenance.endOffset),
           ),
     ).toBe(evidence?.quote);
+  });
+
+  test("discovers a topic across the fresh catalog and uses three semantic stages", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const secondDocument = {
+      ...catalogDocument,
+      identifier: "RFC7230",
+      rfcNumber: 7230,
+      title: "HTTP/1.1 Message Syntax and Routing",
+      abstract: "HTTP message syntax and routing.",
+      canonicalUrl: "https://datatracker.ietf.org/doc/rfc7230/",
+    };
+    const calls: Array<unknown> = [];
+    const fetched: Array<string> = [];
+    const model = {
+      [DecisionModel.TypeId]: DecisionModel.TypeId,
+      decide: (
+        definition: { readonly decisions: Readonly<Record<string, Decision.Any>> },
+        options: { readonly input: TopicDecisionCall["input"] },
+      ) => {
+        calls.push({ definition, input: options.input });
+        const answers = Object.fromEntries(
+          Object.entries(definition.decisions).map(([key, decision]) => {
+            if (key === "question_atomicity") {
+              return [
+                key,
+                {
+                  label: "atomic",
+                  probabilities: { atomic: 0.99, compound: 0.01 },
+                  confidence: 0.99,
+                },
+              ];
+            }
+            if (decision._tag === "Probability") {
+              return [key, { probability: 0.95 }];
+            }
+            return [
+              key,
+              {
+                label: "direct_answer",
+                probabilities: {
+                  direct_answer: 0.99,
+                  partial_answer: 0.005,
+                  background_only: 0.001,
+                  contradictory: 0.001,
+                  irrelevant: 0.003,
+                },
+                confidence: 0.99,
+              },
+            ];
+          }),
+        );
+        return Effect.succeed({
+          answers,
+          usage: { inputTokens: 10, outputTokens: 6 },
+        });
+      },
+    } as unknown as DecisionModel.DecisionModel;
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-topic-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [catalogDocument, secondDocument],
+      rfcSourceFetcher: async (document) => {
+        fetched.push(document.identifier);
+        return {
+          sourceUrl: `https://www.rfc-editor.org/rfc/rfc${document.rfcNumber}.txt`,
+          text: `1. Requirements\n\nThe HTTP client MUST send a request.\n`,
+        };
+      },
+      decisionModel: model,
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 1,
+      question: "What must an HTTP client send?",
+      rfc: null,
+    });
+
+    expect(result.status).toBe("answered");
+    expect(result.rfc?.identifier).toBe(fetched[0]);
+    expect(result.evidence).toHaveLength(2);
+    expect(result.evidence.every((passage) => passage.quote.includes("MUST send"))).toBe(true);
+    expect(fetched).toHaveLength(2);
+    expect(new Set(fetched)).toEqual(new Set(["RFC9110", "RFC7230"]));
+    expect(calls).toHaveLength(3);
+
+    const topicCalls = calls as Array<TopicDecisionCall>;
+    const documentCall = topicCalls[0];
+    const documentInputs = documentCall?.input.documents ?? {};
+    expect(Object.keys(documentInputs)).toEqual(["document_0", "document_1"]);
+    for (const [key, inputDocument] of Object.entries(documentInputs)) {
+      const expectedDocument = [catalogDocument, secondDocument].find(
+        ({ identifier }) => identifier === inputDocument.identifier,
+      );
+      const decision = documentCall?.definition.decisions[key] as InspectableDecision | undefined;
+      expect(expectedDocument).toBeDefined();
+      expect(decision?.instructions).toContain(`candidate ${key}`);
+      expect(decision?.instructions).toContain(`input.documents["${key}"]`);
+      expect(decision?.instructions).toContain(inputDocument.identifier);
+      expect(decision?.instructions).toContain(inputDocument.title);
+      expect(decision?.instructions).toContain(inputDocument.abstract);
+      expect(decision?.criteria.true).toContain(inputDocument.identifier);
+    }
+
+    for (const call of [topicCalls[1], topicCalls[2]]) {
+      const passageInputs = call?.input.passages ?? {};
+      expect(Object.keys(passageInputs)).toEqual(["passage_0", "passage_1"]);
+      for (const [key, inputPassage] of Object.entries(passageInputs)) {
+        const decision = call?.definition.decisions[key] as InspectableDecision | undefined;
+        expect(decision?.instructions).toContain(`candidate ${key}`);
+        expect(decision?.instructions).toContain(`input.passages["${key}"].text`);
+        expect(decision?.instructions).toContain(inputPassage.id);
+        expect(inputPassage.text).toContain("MUST send a request");
+        expect(decision?.criteria).toBeDefined();
+        expect(Object.values(decision?.criteria ?? {}).join(" ")).toContain(inputPassage.id);
+      }
+    }
+
+    expect(result.diagnostics.candidates).toMatchObject({
+      documentCandidates: 2,
+      acceptedDocuments: 2,
+      selectedPassages: 2,
+    });
+    expect(result.diagnostics.documentSelection).toHaveLength(2);
+    expect(result.diagnostics.timings.documentMs).toBeGreaterThanOrEqual(0);
+  });
+
+  test("bounds lexical document flow and rejects irrelevant catalog matches semantically", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const documents = [
+      catalogDocument,
+      ...Array.from({ length: 19 }, (_, index) => ({
+        ...catalogDocument,
+        identifier: `RFC${8000 + index}`,
+        rfcNumber: 8000 + index,
+        title: `HTTP topic ${index}`,
+        abstract: "HTTP topic background.",
+        canonicalUrl: `https://datatracker.ietf.org/doc/rfc${8000 + index}/`,
+      })),
+    ];
+    const documentBatchSizes: Array<number> = [];
+    const fetched: Array<string> = [];
+    const model = {
+      [DecisionModel.TypeId]: DecisionModel.TypeId,
+      decide: (
+        definition: { readonly decisions: Readonly<Record<string, Decision.Any>> },
+        options: {
+          readonly input: TopicDecisionCall["input"];
+        },
+      ) => {
+        if (options.input.documents !== undefined) {
+          documentBatchSizes.push(Object.keys(options.input.documents).length);
+        }
+        const answers = Object.fromEntries(
+          Object.entries(definition.decisions).map(([key, decision]) => {
+            if (key === "question_atomicity") {
+              return [
+                key,
+                {
+                  label: "atomic",
+                  probabilities: { atomic: 0.99, compound: 0.01 },
+                  confidence: 0.99,
+                },
+              ];
+            }
+            if (decision._tag === "Probability") {
+              const identifier = options.input.documents?.[key]?.identifier;
+              return [
+                key,
+                {
+                  probability:
+                    options.input.documents === undefined
+                      ? 0.95
+                      : identifier === "RFC9110"
+                        ? 0.95
+                        : 0.1,
+                },
+              ];
+            }
+            return [
+              key,
+              {
+                label: "direct_answer",
+                probabilities: {
+                  direct_answer: 0.99,
+                  partial_answer: 0.005,
+                  background_only: 0.001,
+                  contradictory: 0.001,
+                  irrelevant: 0.003,
+                },
+                confidence: 0.99,
+              },
+            ];
+          }),
+        );
+        return Effect.succeed({ answers, usage: { inputTokens: 4, outputTokens: 2 } });
+      },
+    } as unknown as DecisionModel.DecisionModel;
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-topic-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => documents,
+      rfcSourceFetcher: async (document) => {
+        fetched.push(document.identifier);
+        return makeSourceFetcher(sourceText)(document);
+      },
+      decisionModel: model,
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 1,
+      question: "What does HTTP semantics require?",
+      rfc: null,
+    });
+
+    expect(result.status).toBe("answered");
+    expect(documentBatchSizes).toEqual([8]);
+    expect(result.diagnostics.candidates).toMatchObject({
+      catalogDocuments: 20,
+      documentCandidates: 8,
+      acceptedDocuments: 1,
+    });
+    expect(fetched).toEqual(["RFC9110"]);
+    expect(result.evidence.every((passage) => passage.provenance.identifier === "RFC9110")).toBe(
+      true,
+    );
+  });
+
+  test("returns needs_review without fetching sources when no document is accepted", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const calls: Array<unknown> = [];
+    let sourceFetches = 0;
+    const model = {
+      [DecisionModel.TypeId]: DecisionModel.TypeId,
+      decide: (definition: { readonly decisions: Readonly<Record<string, Decision.Any>> }) => {
+        calls.push(definition);
+        const answers = Object.fromEntries(
+          Object.entries(definition.decisions).map(([key, decision]) =>
+            key === "question_atomicity"
+              ? [
+                  key,
+                  {
+                    label: "atomic",
+                    probabilities: { atomic: 0.99, compound: 0.01 },
+                    confidence: 0.99,
+                  },
+                ]
+              : decision._tag === "Probability"
+                ? [key, { probability: 0.1 }]
+                : [key, { probability: 0.1 }],
+          ),
+        );
+        return Effect.succeed({
+          answers,
+          usage: { inputTokens: 3, outputTokens: 2 },
+        });
+      },
+    } as unknown as DecisionModel.DecisionModel;
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-topic-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [catalogDocument],
+      rfcSourceFetcher: async () => {
+        sourceFetches += 1;
+        return sourceText;
+      },
+      decisionModel: model,
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 1,
+      question: "What must an HTTP client send?",
+      rfc: null,
+    });
+
+    expect(result.status).toBe("needs_review");
+    expect(result.rfc).toBeNull();
+    expect(result.evidence).toEqual([]);
+    expect(calls).toHaveLength(1);
+    expect(sourceFetches).toBe(0);
+    expect(result.diagnostics.source).toBeNull();
+    expect(result.diagnostics.candidates).toMatchObject({
+      documentCandidates: 1,
+      acceptedDocuments: 0,
+      sourceBlocks: 0,
+    });
+  });
+
+  test("fails with a document-stage error when a document probability is malformed", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const model = {
+      [DecisionModel.TypeId]: DecisionModel.TypeId,
+      decide: () =>
+        Effect.succeed({
+          answers: {
+            question_atomicity: {
+              label: "atomic",
+              probabilities: { atomic: 0.99, compound: 0.01 },
+              confidence: 0.99,
+            },
+            document_0: { probability: 2 },
+          },
+          usage: { inputTokens: 1, outputTokens: 1 },
+        }),
+    } as unknown as DecisionModel.DecisionModel;
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-topic-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [catalogDocument],
+      decisionModel: model,
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    await expect(
+      client.research({
+        schemaVersion: 1,
+        question: "What must an HTTP client send?",
+        rfc: null,
+      }),
+    ).rejects.toMatchObject({
+      _tag: "DecisionModelError",
+      stage: "document",
+    });
   });
 });
