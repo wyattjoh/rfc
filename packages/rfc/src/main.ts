@@ -3,6 +3,7 @@ import {
   ConfigurationError,
   InvalidInputError,
   createRfcClient,
+  decodeCitationVerificationRequest,
   decodeResearchRequest,
   defaultCacheDirectory,
   schemaVersion,
@@ -134,6 +135,21 @@ const typeSafeApiUrl = Flag.String("typesafe-api-url").pipe(
   Flag.optional,
 );
 
+const claim = Flag.String("claim").pipe(
+  Flag.withDescription("Factual claim to verify when standard input is not supplied"),
+  Flag.optional,
+);
+
+const quote = Flag.String("quote").pipe(
+  Flag.withDescription("Exact RFC quotation to verify when standard input is not supplied"),
+  Flag.optional,
+);
+
+const offset = Flag.String("offset").pipe(
+  Flag.withDescription("Absolute UTF-8 byte offset for a repeated quotation"),
+  Flag.optional,
+);
+
 const readStandardInput = async (): Promise<string> => {
   if (process.stdin.isTTY) {
     return "";
@@ -151,6 +167,135 @@ const decodeResearchInput = (input: string) => {
 
   return decodeResearchRequest(parsed);
 };
+
+const decodeCitationRequest = (input: unknown) => {
+  try {
+    return decodeCitationVerificationRequest(input);
+  } catch {
+    throw new InvalidInputError({ reason: "Citation input must use schema version 1" });
+  }
+};
+
+const decodeCitationInput = (input: string) => {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(input);
+  } catch {
+    throw new InvalidInputError({ reason: "Citation input must be valid JSON" });
+  }
+
+  return decodeCitationRequest(parsed);
+};
+
+const parseCitationOffset = (value: string): number => {
+  const offset = Number(value);
+  if (!Number.isSafeInteger(offset) || offset < 0) {
+    throw new InvalidInputError({ reason: "Citation offset must be a non-negative integer" });
+  }
+  return offset;
+};
+
+const verifyCitationCommand = Command.make(
+  "verify-citation",
+  {
+    cacheDirectory,
+    datatrackerApiUrl,
+    format,
+    rfc,
+    claim,
+    quote,
+    offset,
+    typeSafeApiUrl,
+  },
+  Effect.fn(function* (flags) {
+    const standardInput = yield* Effect.tryPromise({
+      try: readStandardInput,
+      catch: () => new InvalidInputError({ reason: "Unable to read citation input" }),
+    });
+
+    const request =
+      standardInput.trim().length > 0
+        ? decodeCitationInput(standardInput)
+        : (() => {
+            if (
+              Option.isNone(flags.rfc) ||
+              Option.isNone(flags.claim) ||
+              Option.isNone(flags.quote)
+            ) {
+              throw new InvalidInputError({
+                reason:
+                  "Citation verification requires JSON standard input or --rfc, --claim, and --quote",
+              });
+            }
+            return decodeCitationRequest({
+              schemaVersion,
+              rfc: flags.rfc.value,
+              claim: flags.claim.value,
+              quote: flags.quote.value,
+              offset: Option.isSome(flags.offset) ? parseCitationOffset(flags.offset.value) : null,
+            });
+          })();
+
+    const cliConfig = yield* Effect.tryPromise({
+      try: async () => readCliConfig(),
+      catch: (error) =>
+        new ConfigurationError({
+          reason: error instanceof Error ? error.message : "Unknown configuration error",
+        }),
+    });
+
+    const client = yield* Effect.tryPromise({
+      try: () =>
+        createRfcClient({
+          cacheDirectory: flags.cacheDirectory,
+          catalogPath: undefined,
+          datatrackerApiUrl: Option.getOrUndefined(flags.datatrackerApiUrl),
+          modelAlias: cliConfig.modelAlias,
+          policyPreset: cliConfig.policyPreset,
+          typeSafeApiKey: cliConfig.apiKey,
+          typeSafeApiUrl: Option.getOrUndefined(flags.typeSafeApiUrl),
+        }),
+      catch: (error) => error,
+    });
+
+    const result = yield* Effect.acquireUseRelease(
+      Effect.succeed(client),
+      (activeClient) =>
+        Effect.tryPromise({
+          try: () => activeClient.verifyCitation(request),
+          catch: (error) => error,
+        }),
+      (activeClient) =>
+        Effect.tryPromise({ try: () => activeClient.close(), catch: (error) => error }),
+    );
+
+    if (flags.format === "human") {
+      yield* writeStdout(`Verdict: ${result.verdict}`);
+      yield* writeStdout(`RFC: ${result.rfc.identifier}`);
+      yield* writeStdout(`Quote: ${result.quote}`);
+      yield* writeStdout(
+        `Offsets: ${result.provenance.startOffset ?? "unknown"}-${result.provenance.endOffset ?? "unknown"}`,
+      );
+      yield* writeStdout(`Section: ${result.provenance.section ?? "unknown"}`);
+      return;
+    }
+
+    yield* writeStdout(JSON.stringify(result));
+  }),
+).pipe(
+  Command.withDescription("Verify an RFC quotation against a factual claim"),
+  Command.withExamples([
+    {
+      command: "rfc verify-citation < citation.json",
+      description: "Verify canonical JSON from standard input",
+    },
+    {
+      command:
+        'rfc verify-citation --rfc RFC9110 --claim "The client sends a request" --quote "The client MUST send a request"',
+      description: "Verify a short interactive citation",
+    },
+  ]),
+);
 
 const researchCommand = Command.make(
   "research",
@@ -241,7 +386,7 @@ const researchCommand = Command.make(
 
 const application = Command.make("rfc").pipe(
   Command.withDescription("TypeSafe RFC evidence engine"),
-  Command.withSubcommands([catalogCommand, researchCommand]),
+  Command.withSubcommands([catalogCommand, researchCommand, verifyCitationCommand]),
 );
 
 /**

@@ -223,9 +223,13 @@ describe("known RFC research", () => {
     const evidence = result.evidence[0];
     expect(evidence).toBeDefined();
     if (evidence === undefined) throw new Error("Expected evidence");
-    expect(sourceText.slice(evidence.provenance.startOffset, evidence.provenance.endOffset)).toBe(
-      evidence.quote,
-    );
+    const sourceBytes = new TextEncoder().encode(sourceText);
+    expect(
+      new TextDecoder().decode(
+        sourceBytes.slice(evidence.provenance.startOffset, evidence.provenance.endOffset),
+      ),
+    ).toBe(evidence.quote);
+    expect(evidence.provenance.offsetUnit).toBe("utf8-byte");
     expect(evidence.provenance.sourceHash).toBe(hashRfcSource(sourceText));
     expect(evidence.provenance.section).toBe("1. Requirements");
     expect(result.diagnostics).toMatchObject({
@@ -248,6 +252,52 @@ describe("known RFC research", () => {
     });
     expect(sourceFetches).toBe(1);
     expect(calls).toHaveLength(4);
+  });
+
+  test("uses UTF-8 byte offsets in research evidence provenance", async () => {
+    const unicodeSourceText = [
+      "Preamble: café 😀.",
+      "",
+      "1. Requirements",
+      "",
+      "The 😀 résumé client MUST send a request.",
+      "",
+    ].join("\n");
+    const cacheDirectory = await makeCacheDirectory();
+    const client = await createRfcClient({
+      cacheDirectory,
+      catalogPath: undefined,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      catalogSource: async () => [catalogDocument],
+      rfcSourceFetcher: makeSourceFetcher(unicodeSourceText),
+      decisionModel: makeDecisionModel([]),
+      policyPreset: "precision-v1",
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 1,
+      question: "What must the résumé client send?",
+      rfc: "RFC9110",
+    });
+
+    expect(result.status).toBe("answered");
+    expect(result.evidence).toHaveLength(1);
+    const evidence = result.evidence[0];
+    expect(evidence).toBeDefined();
+    if (evidence === undefined) throw new Error("Expected evidence");
+    expect(evidence.provenance.offsetUnit).toBe("utf8-byte");
+    expect(evidence.provenance.sourceHash).toBe(hashRfcSource(unicodeSourceText));
+    const sourceBytes = new TextEncoder().encode(unicodeSourceText);
+    const startOffset = evidence.provenance.startOffset;
+    const endOffset = evidence.provenance.endOffset;
+    expect(new TextDecoder().decode(sourceBytes.slice(startOffset, endOffset))).toBe(
+      evidence.quote,
+    );
+    expect(startOffset).not.toBe(unicodeSourceText.indexOf(evidence.quote));
   });
 
   test("does not persist semantic inputs, judgments, or provider responses", async () => {
@@ -950,10 +1000,13 @@ describe("known RFC research", () => {
     });
     const evidence = result.evidence[0];
     expect(evidence?.provenance.section).toBeNull();
+    const sourceBytes = new TextEncoder().encode(text);
     expect(
       evidence === undefined
         ? ""
-        : text.slice(evidence.provenance.startOffset, evidence.provenance.endOffset),
+        : new TextDecoder().decode(
+            sourceBytes.slice(evidence.provenance.startOffset, evidence.provenance.endOffset),
+          ),
     ).toBe(evidence?.quote);
   });
 });

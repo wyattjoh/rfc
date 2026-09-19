@@ -14,6 +14,7 @@ import {
 import * as AiError from "effect/unstable/ai/AiError";
 import * as Decision from "effect/unstable/ai/Decision";
 import * as DecisionModel from "effect/unstable/ai/DecisionModel";
+import { makeUtf8OffsetMap, moveToUtf8Boundary, utf8OffsetUnit } from "./offsets";
 import {
   CatalogDocumentSchema,
   CatalogStatusSchema,
@@ -23,13 +24,10 @@ import {
 } from "./catalog";
 import {
   RfcSourceCacheError,
+  RfcSourceFetchError,
   RfcSourceServiceTag,
   RfcSourceStore,
-  RfcSourceFetchError,
-  defaultRfcEditorBaseUrl,
-  makeRfcSource,
-  makeRfcSourceUrl,
-  type RfcSource,
+  loadRfcSource,
 } from "./source";
 
 /**
@@ -114,6 +112,9 @@ export class ResearchPolicyError extends Schema.TaggedError<ResearchPolicyError>
 
 /**
  * A bounded section-aware range of RFC source text.
+ *
+ * These offsets are internal JavaScript string boundaries used while parsing;
+ * returned evidence provenance converts them to UTF-8 byte offsets.
  */
 export const SourceBlockSchema = Schema.Struct({
   id: Schema.NonEmptyString,
@@ -130,6 +131,9 @@ export type SourceBlock = Schema.Schema.Type<typeof SourceBlockSchema>;
 
 /**
  * Exact provenance for an evidence passage.
+ *
+ * The start and end offsets are UTF-8 byte offsets into the exact source text
+ * represented by sourceHash, so they compose with citation verification.
  */
 export const EvidenceProvenanceSchema = Schema.Struct({
   identifier: Schema.NonEmptyString,
@@ -137,6 +141,7 @@ export const EvidenceProvenanceSchema = Schema.Struct({
   sourceUrl: Schema.NonEmptyString,
   canonicalUrl: Schema.NonEmptyString,
   sourceHash: Schema.NonEmptyString,
+  offsetUnit: Schema.Literal(utf8OffsetUnit),
   startOffset: Schema.Natural,
   endOffset: Schema.Natural,
   section: Schema.NullOr(Schema.String),
@@ -268,7 +273,7 @@ export class RfcNotFoundError extends Schema.TaggedError<RfcNotFoundError>()("Rf
 export class DecisionModelError extends Schema.TaggedError<DecisionModelError>()(
   "DecisionModelError",
   {
-    stage: Schema.Literals(["selection", "relation"]),
+    stage: Schema.Literals(["selection", "relation", "citation"]),
     reason: Schema.String,
     attempts: Schema.optionalKey(Schema.Natural),
   },
@@ -682,7 +687,12 @@ export const parseSourceBlocks = (
     const overlap = Math.min(Math.max(0, overlapCharacters), Math.max(0, size - 1));
     let start = section.start;
     while (start < section.end) {
-      const end = Math.min(section.end, start + size);
+      const boundedEnd = Math.min(section.end, start + size);
+      const backedUpEnd = moveToUtf8Boundary(text, boundedEnd, "backward");
+      const end =
+        backedUpEnd > start
+          ? backedUpEnd
+          : Math.min(section.end, moveToUtf8Boundary(text, boundedEnd, "forward"));
       const blockText = text.slice(start, end);
       if (blockText.trim().length > 0) {
         const block = {
@@ -696,7 +706,7 @@ export const parseSourceBlocks = (
         blockIndex += 1;
       }
       if (end >= section.end) break;
-      start = Math.max(start + 1, end - overlap);
+      start = moveToUtf8Boundary(text, Math.max(start + 1, end - overlap), "forward");
     }
   }
 
@@ -976,70 +986,6 @@ export const resolveKnownRfc = (catalog: RfcCatalog, hint: string): CatalogDocum
   return document;
 };
 
-const loadSource = Effect.fnUntraced(function* (
-  document: CatalogDocument,
-  options: KnownRfcResearchOptions,
-): Effect.fn.Return<
-  RfcSource,
-  RfcSourceCacheError | RfcSourceFetchError,
-  FileSystem.FileSystem | RfcSourceStore | RfcSourceServiceTag
-> {
-  const store = yield* RfcSourceStore;
-  const expectedSourceUrl = makeRfcSourceUrl(defaultRfcEditorBaseUrl, document.rfcNumber);
-  const cached = yield* store.read(options.sourceDirectory, document.identifier);
-  if (cached !== undefined) {
-    if (cached.identifier !== document.identifier || cached.rfcNumber !== document.rfcNumber) {
-      return yield* new RfcSourceCacheError({
-        stage: "decode",
-        sourcePath: options.sourceDirectory,
-        reason: "The RFC source cache entry does not match the requested published RFC",
-      });
-    }
-    if (cached.sourceUrl !== expectedSourceUrl) {
-      return yield* new RfcSourceCacheError({
-        stage: "decode",
-        sourcePath: options.sourceDirectory,
-        reason: "The RFC source cache entry does not match the canonical RFC Editor URL",
-      });
-    }
-    return cached;
-  }
-
-  const sourceService = yield* RfcSourceServiceTag;
-  const payload = yield* sourceService.fetch(document);
-  const fetchedAt = yield* Clock.currentTimeMillis;
-  const source = yield* Effect.try({
-    try: () => makeRfcSource(document, payload, fetchedAt, expectedSourceUrl),
-    catch: (error) =>
-      new RfcSourceFetchError({
-        stage: "decode",
-        url: expectedSourceUrl,
-        reason: errorMessage(error),
-      }),
-  });
-  const sourceOrigin = yield* Effect.try({
-    try: () => new URL(source.sourceUrl).origin,
-    catch: () =>
-      new RfcSourceFetchError({
-        stage: "decode",
-        url: source.sourceUrl,
-        reason: "RFC source has an invalid source URL",
-      }),
-  });
-  if (
-    sourceOrigin !== new URL(defaultRfcEditorBaseUrl).origin ||
-    source.sourceUrl !== expectedSourceUrl
-  ) {
-    return yield* new RfcSourceFetchError({
-      stage: "decode",
-      url: source.sourceUrl,
-      reason: "RFC source retrieval must use the canonical RFC Editor URL",
-    });
-  }
-  yield* store.write(options.sourceDirectory, source);
-  return source;
-});
-
 const relationIsConfident = (confidence: number | undefined, policy: ResearchPolicy): boolean =>
   confidence !== undefined && confidence >= policy.relationConfidenceThreshold;
 
@@ -1140,9 +1086,13 @@ export const researchKnownRfc = Effect.fnUntraced(function* (
 > {
   const policy = yield* policyFor(options.policyPreset);
   const resolvedModelRef = yield* ResolvedModelName;
-  const document = resolveKnownRfc(options.catalog, hint);
+  const document = yield* Effect.try({
+    try: () => resolveKnownRfc(options.catalog, hint),
+    catch: (error) =>
+      error instanceof RfcNotFoundError ? error : new RfcNotFoundError({ rfc: hint }),
+  });
   const sourceStarted = yield* Clock.currentTimeMillis;
-  const source = yield* loadSource(document, options);
+  const source = yield* loadRfcSource(document, options.sourceDirectory);
   const sourceFinished = yield* Clock.currentTimeMillis;
   const lexicalStarted = sourceFinished;
   const blocks = parseSourceBlocks(
@@ -1160,32 +1110,41 @@ export const researchKnownRfc = Effect.fnUntraced(function* (
   const relationFinished = yield* Clock.currentTimeMillis;
   const resolvedModel = yield* Ref.get(resolvedModelRef);
   const usage = combineUsage(selection.usage, relation.usage);
-  const evidence = relation.answers
-    .filter((answer) =>
-      acceptedRelation(answer.relation, answer.probabilities, answer.confidence, policy),
-    )
-    .map((answer) => {
-      const quote = source.text.slice(answer.block.startOffset, answer.block.endOffset);
-      return {
-        id: answer.block.id,
-        quote,
-        relation: answer.relation,
-        selectionProbability: answer.selectionProbability,
-        relationProbabilities: answer.probabilities,
-        confidence: answer.confidence ?? null,
-        provenance: {
-          identifier: document.identifier,
-          rfcNumber: document.rfcNumber,
-          sourceUrl: source.sourceUrl,
-          canonicalUrl: document.canonicalUrl,
-          sourceHash: source.contentHash,
-          startOffset: answer.block.startOffset,
-          endOffset: answer.block.endOffset,
-          section: answer.block.section,
-          fetchedAt: source.fetchedAt,
-        },
-      } satisfies EvidencePassage;
+  const offsets = makeUtf8OffsetMap(source.text);
+  const evidence: Array<EvidencePassage> = [];
+  for (const answer of relation.answers.filter((candidate) =>
+    acceptedRelation(candidate.relation, candidate.probabilities, candidate.confidence, policy),
+  )) {
+    const startOffset = offsets.byteOffsetAtCodeUnit(answer.block.startOffset);
+    const endOffset = offsets.byteOffsetAtCodeUnit(answer.block.endOffset);
+    if (startOffset === undefined || endOffset === undefined) {
+      return yield* new DecisionModelError({
+        stage: "relation",
+        reason: "The accepted evidence range is not a UTF-8 source boundary",
+      });
+    }
+    const quote = source.text.slice(answer.block.startOffset, answer.block.endOffset);
+    evidence.push({
+      id: answer.block.id,
+      quote,
+      relation: answer.relation,
+      selectionProbability: answer.selectionProbability,
+      relationProbabilities: answer.probabilities,
+      confidence: answer.confidence ?? null,
+      provenance: {
+        identifier: document.identifier,
+        rfcNumber: document.rfcNumber,
+        sourceUrl: source.sourceUrl,
+        canonicalUrl: document.canonicalUrl,
+        sourceHash: source.contentHash,
+        offsetUnit: utf8OffsetUnit,
+        startOffset,
+        endOffset,
+        section: answer.block.section,
+        fetchedAt: source.fetchedAt,
+      },
     });
+  }
   const status = statusFromRelations(
     relation.answers,
     selection.atomicity,

@@ -32,6 +32,13 @@ import {
 } from "./catalog";
 import type { CatalogRefreshResult, CatalogSource, CatalogStatus } from "./catalog";
 import {
+  CitationOffsetMismatchError,
+  CitationQuoteAmbiguousError,
+  decodeCitationVerificationRequest,
+  verifyCitation,
+} from "./citation";
+import type { CitationVerificationRequest, CitationVerificationResult } from "./citation";
+import {
   DecisionModelError,
   ResearchPolicyError,
   ResolvedModelName,
@@ -51,6 +58,7 @@ import {
 import type { RfcSourceFetcher } from "./source";
 
 export * from "./catalog";
+export * from "./citation";
 export * from "./research";
 export * from "./source";
 
@@ -202,6 +210,8 @@ export type RfcCoreError =
   | CatalogWriteError
   | RfcSourceCacheError
   | RfcSourceFetchError
+  | CitationQuoteAmbiguousError
+  | CitationOffsetMismatchError
   | RfcClientClosedError
   | ResearchUnavailableError
   | RfcNotFoundError
@@ -220,6 +230,8 @@ export type ErrorCode =
   | "catalog_write_failed"
   | "source_cache_failed"
   | "source_fetch_failed"
+  | "citation_quote_ambiguous"
+  | "citation_offset_mismatch"
   | "client_closed"
   | "research_unavailable"
   | "rfc_not_found"
@@ -236,6 +248,8 @@ const ErrorCodeSchema = Schema.Literals([
   "catalog_write_failed",
   "source_cache_failed",
   "source_fetch_failed",
+  "citation_quote_ambiguous",
+  "citation_offset_mismatch",
   "client_closed",
   "research_unavailable",
   "rfc_not_found",
@@ -331,6 +345,12 @@ export interface RfcClient {
    * Research one known published RFC and return exact evidence.
    */
   readonly research: (request: ResearchRequest) => Promise<EvidenceBundle>;
+  /**
+   * Verify one factual claim against an exact quotation from a published RFC.
+   */
+  readonly verifyCitation: (
+    request: CitationVerificationRequest,
+  ) => Promise<CitationVerificationResult>;
   /**
    * Release the managed runtime and any resources it owns.
    */
@@ -485,23 +505,12 @@ const catalogRefreshProgram = (options: RfcClientOptions) =>
     return catalogRefreshResultFromValue(catalogPath, catalog, now);
   });
 
-const researchProgram = (options: RfcClientOptions, request: ResearchRequest) =>
+const knownCatalogProgram = (options: RfcClientOptions) =>
   Effect.gen(function* () {
     const store = yield* CatalogStore;
     const startedAt = yield* Clock.currentTimeMillis;
     const catalogPath = yield* resolveCatalogPath(options);
     const initialStatus = yield* store.status(catalogPath);
-    if (request.rfc === null) {
-      if (initialStatus.state === "stale") {
-        return yield* new CatalogStaleError({
-          catalogPath,
-          fetchedAt: initialStatus.refreshedAt ?? "",
-          ageMs: initialStatus.ageMs ?? Number.POSITIVE_INFINITY,
-        });
-      }
-      return yield* new ResearchUnavailableError({});
-    }
-
     if (initialStatus.state !== "fresh") {
       yield* catalogRefreshProgram(options);
     }
@@ -517,14 +526,45 @@ const researchProgram = (options: RfcClientOptions, request: ResearchRequest) =>
     const sourceDirectory = yield* resolveSourceDirectory(options);
     const finishedAt = yield* Clock.currentTimeMillis;
 
-    return yield* researchKnownRfc(request.question, request.rfc, {
+    return {
       catalog,
       catalogStatus,
       sourceDirectory,
-      policyPreset: options.policyPreset ?? "precision-v1",
-      modelAlias: options.modelAlias ?? "jev-latest",
       catalogMs: Math.max(0, finishedAt - startedAt),
       startedAt,
+    };
+  });
+
+const researchProgram = (options: RfcClientOptions, request: ResearchRequest) =>
+  Effect.gen(function* () {
+    if (request.rfc === null) {
+      const store = yield* CatalogStore;
+      const catalogPath = yield* resolveCatalogPath(options);
+      const initialStatus = yield* store.status(catalogPath);
+      if (initialStatus.state === "stale") {
+        return yield* new CatalogStaleError({
+          catalogPath,
+          fetchedAt: initialStatus.refreshedAt ?? "",
+          ageMs: initialStatus.ageMs ?? Number.POSITIVE_INFINITY,
+        });
+      }
+      return yield* new ResearchUnavailableError({});
+    }
+
+    const context = yield* knownCatalogProgram(options);
+    return yield* researchKnownRfc(request.question, request.rfc, {
+      ...context,
+      policyPreset: options.policyPreset ?? "precision-v1",
+      modelAlias: options.modelAlias ?? "jev-latest",
+    });
+  });
+
+const citationProgram = (options: RfcClientOptions, request: CitationVerificationRequest) =>
+  Effect.gen(function* () {
+    const context = yield* knownCatalogProgram(options);
+    return yield* verifyCitation(request, {
+      ...context,
+      modelAlias: options.modelAlias ?? "jev-latest",
     });
   });
 
@@ -597,6 +637,28 @@ export const toErrorEnvelope = (error: unknown): ErrorEnvelope => {
       error: {
         code: "source_fetch_failed",
         message: `Unable to fetch RFC source: ${error.reason}`,
+      },
+    };
+  }
+
+  if (error instanceof CitationQuoteAmbiguousError) {
+    return {
+      schemaVersion,
+      kind: "error",
+      error: {
+        code: "citation_quote_ambiguous",
+        message: `The quotation occurs ${error.occurrences} times in RFC ${error.rfc}; provide an exact offset`,
+      },
+    };
+  }
+
+  if (error instanceof CitationOffsetMismatchError) {
+    return {
+      schemaVersion,
+      kind: "error",
+      error: {
+        code: "citation_offset_mismatch",
+        message: `The supplied offset does not identify the exact quotation in RFC ${error.rfc}`,
       },
     };
   }
@@ -746,6 +808,18 @@ export const createRfcClient = async (
       assertOpen();
       const decodedRequest = decodeResearchRequest(request);
       return runtime.runPromise(researchProgram(options, decodedRequest));
+    },
+    verifyCitation: async (request) => {
+      assertOpen();
+      let decodedRequest: CitationVerificationRequest;
+      try {
+        decodedRequest = decodeCitationVerificationRequest(request);
+      } catch {
+        throw new InvalidInputError({
+          reason: "Citation input must use schema version 1",
+        });
+      }
+      return runtime.runPromise(citationProgram(options, decodedRequest));
     },
     close,
     [Symbol.asyncDispose]: close,

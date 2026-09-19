@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
-import { Context, Effect, FileSystem, Layer, Option, Schema } from "effect";
+import { Clock, Context, Effect, FileSystem, Layer, Option, Schema } from "effect";
 import * as PlatformError from "effect/PlatformError";
 import { Headers, HttpClient, HttpClientResponse } from "effect/unstable/http";
 import type { CatalogDocument } from "./catalog";
@@ -584,6 +584,79 @@ export const makeRfcSource = (
   };
   return Schema.decodeUnknownSync(RfcSourceSchema)(source);
 };
+
+/**
+ * Read an RFC source from the content-addressed cache or the authoritative
+ * RFC Editor service, validating its identity before returning it.
+ *
+ * @param document Published RFC metadata to resolve.
+ * @param sourceDirectory Directory containing content-addressed source entries.
+ * @returns The exact, validated RFC source.
+ * @throws RfcSourceCacheError or RfcSourceFetchError when the source is unavailable or invalid.
+ */
+export const loadRfcSource = Effect.fnUntraced(function* (
+  document: CatalogDocument,
+  sourceDirectory: string,
+): Effect.fn.Return<
+  RfcSource,
+  RfcSourceCacheError | RfcSourceFetchError,
+  FileSystem.FileSystem | RfcSourceStore | RfcSourceServiceTag
+> {
+  const store = yield* RfcSourceStore;
+  const expectedSourceUrl = makeRfcSourceUrl(defaultRfcEditorBaseUrl, document.rfcNumber);
+  const cached = yield* store.read(sourceDirectory, document.identifier);
+  if (cached !== undefined) {
+    if (cached.identifier !== document.identifier || cached.rfcNumber !== document.rfcNumber) {
+      return yield* new RfcSourceCacheError({
+        stage: "decode",
+        sourcePath: sourceDirectory,
+        reason: "The RFC source cache entry does not match the requested published RFC",
+      });
+    }
+    if (cached.sourceUrl !== expectedSourceUrl) {
+      return yield* new RfcSourceCacheError({
+        stage: "decode",
+        sourcePath: sourceDirectory,
+        reason: "The RFC source cache entry does not match the canonical RFC Editor URL",
+      });
+    }
+    return cached;
+  }
+
+  const sourceService = yield* RfcSourceServiceTag;
+  const payload = yield* sourceService.fetch(document);
+  const fetchedAt = yield* Clock.currentTimeMillis;
+  const source = yield* Effect.try({
+    try: () => makeRfcSource(document, payload, fetchedAt, expectedSourceUrl),
+    catch: (error) =>
+      new RfcSourceFetchError({
+        stage: "decode",
+        url: expectedSourceUrl,
+        reason: errorMessage(error),
+      }),
+  });
+  const sourceOrigin = yield* Effect.try({
+    try: () => new URL(source.sourceUrl).origin,
+    catch: () =>
+      new RfcSourceFetchError({
+        stage: "decode",
+        url: source.sourceUrl,
+        reason: "RFC source has an invalid source URL",
+      }),
+  });
+  if (
+    sourceOrigin !== new URL(defaultRfcEditorBaseUrl).origin ||
+    source.sourceUrl !== expectedSourceUrl
+  ) {
+    return yield* new RfcSourceFetchError({
+      stage: "decode",
+      url: source.sourceUrl,
+      reason: "RFC source retrieval must use the canonical RFC Editor URL",
+    });
+  }
+  yield* store.write(sourceDirectory, source);
+  return source;
+});
 
 /**
  * Return the source directory below a configured cache directory.

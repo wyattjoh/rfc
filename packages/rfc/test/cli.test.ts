@@ -441,6 +441,141 @@ describe("rfc process protocol", () => {
     expect(requestCount).toBe(6);
   });
 
+  test("verifies citations through canonical JSON and convenience flags", async () => {
+    const cacheDirectory = await mkdtemp(join(tmpdir(), "rfc-cli-citation-test-"));
+    const sourceText =
+      "1. Requirements\\n\\nThe client MUST send a request containing the target resource.\\n";
+    const fetchedAt = new Date().toISOString();
+    const sourceHash = hashRfcSource(sourceText);
+    await mkdir(join(cacheDirectory, "sources"), { recursive: true });
+    await writeFile(
+      join(cacheDirectory, "catalog.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        kind: "rfc_catalog",
+        cacheIdentity: "rfc-catalog-v1",
+        fetchedAt,
+        documents: [
+          {
+            identifier: "RFC9110",
+            rfcNumber: 9110,
+            title: "HTTP Semantics",
+            abstract: "HTTP semantics.",
+            status: "published",
+            stream: "ietf",
+            canonicalUrl: "https://datatracker.ietf.org/doc/rfc9110/",
+            updates: [],
+            updatedBy: [],
+            obsoletes: [],
+            obsoletedBy: [],
+          },
+        ],
+      }),
+    );
+    await writeFile(
+      join(cacheDirectory, "sources", `${sourceHash}.json`),
+      JSON.stringify({
+        schemaVersion: 1,
+        kind: "rfc_source_content",
+        contentHash: sourceHash,
+        text: sourceText,
+      }),
+    );
+    await writeFile(
+      join(cacheDirectory, "sources", "RFC9110.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        kind: "rfc_source_index",
+        identifier: "RFC9110",
+        rfcNumber: 9110,
+        sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+        contentHash: sourceHash,
+        fetchedAt,
+      }),
+    );
+
+    let modelCalls = 0;
+    const server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        if (new URL(request.url).pathname !== "/systemone") {
+          return new Response("not found", { status: 404 });
+        }
+        modelCalls += 1;
+        return Response.json({
+          model: "jev-1.13.0",
+          answers: {
+            citation_verdict: {
+              type: "choice",
+              choice: "verified",
+              probabilities: { verified: 0.99, unsupported: 0.005, contradicted: 0.005 },
+              confidence: 0.99,
+            },
+          },
+          usage: { input_tokens: 10, output_tokens: 6 },
+        });
+      },
+    });
+    servers.push(server);
+    const environment = {
+      ...process.env,
+      TYPESAFE_API_KEY: "fixture-key",
+      TYPESAFE_MODEL: "jev-latest",
+      RFC_POLICY_PRESET: "precision-v1",
+    };
+
+    const convenience = await runCli(
+      [
+        "verify-citation",
+        "--cache-directory",
+        cacheDirectory,
+        "--typesafe-api-url",
+        server.url.toString(),
+        "--rfc",
+        "RFC9110",
+        "--claim",
+        "The client sends a request.",
+        "--quote",
+        "The client MUST send a request containing the target resource.",
+      ],
+      undefined,
+      environment,
+    );
+
+    expect(convenience.exitCode).toBe(0);
+    expect(convenience.stderr).toBe("");
+    expect(JSON.parse(convenience.stdout)).toMatchObject({
+      kind: "citation_verification",
+      verdict: "verified",
+      provenance: {
+        sourceHash,
+        sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+      },
+      diagnostics: { resolvedModel: "jev-1.13.0" },
+    });
+
+    const fabricated = await runCli(
+      [
+        "verify-citation",
+        "--cache-directory",
+        cacheDirectory,
+        "--typesafe-api-url",
+        server.url.toString(),
+      ],
+      JSON.stringify({
+        schemaVersion: 1,
+        rfc: "RFC9110",
+        claim: "The server caches requests.",
+        quote: "The server MUST cache requests.",
+      }),
+      environment,
+    );
+
+    expect(fabricated.exitCode).toBe(0);
+    expect(JSON.parse(fabricated.stdout).verdict).toBe("fabricated");
+    expect(modelCalls).toBe(1);
+  });
+
   test("writes versioned input failures to stderr and exits nonzero", async () => {
     const result = await runCli(
       ["research", "--question", "ignored"],
