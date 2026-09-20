@@ -1330,6 +1330,75 @@ describe("createRfcClient", () => {
     await rm(cacheDirectory, { recursive: true, force: true });
   });
 
+  test("returns needs_review when a compound question has no accepted RFCs", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const datatracker = makeDatatrackerHttpClient(() =>
+      Response.json({
+        meta: { limit: 20, offset: 0, total_count: 1, next: null },
+        objects: [datatrackerDocument],
+      }),
+    );
+    let modelCalls = 0;
+    const decisionModel = {
+      [DecisionModel.TypeId]: DecisionModel.TypeId,
+      decide: (definition: { readonly decisions: Readonly<Record<string, Decision.Any>> }) => {
+        modelCalls += 1;
+        return Effect.succeed({
+          answers: Object.fromEntries(
+            Object.keys(definition.decisions).map((key) =>
+              key === "question_atomicity"
+                ? [
+                    key,
+                    {
+                      label: "compound",
+                      probabilities: { atomic: 0.01, compound: 0.99 },
+                      confidence: 0.99,
+                    },
+                  ]
+                : [key, { probability: 0.1 }],
+            ),
+          ),
+          usage: { inputTokens: 2, outputTokens: 1 },
+        });
+      },
+    } as unknown as DecisionModel.DecisionModel;
+    let sourceFetches = 0;
+    const client = await createRfcClient({
+      cacheDirectory,
+      datatrackerHttpClient: datatracker.client,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      rfcSourceFetcher: async () => {
+        sourceFetches += 1;
+        return {
+          sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+          text: sourceText,
+        };
+      },
+      decisionModel,
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 2,
+      question: "Which requirements apply and what should servers cache?",
+      rfc: null,
+      searchTerms: ["HTTP semantics"],
+    });
+
+    expect(result).toMatchObject({ status: "needs_review", rfc: null, evidence: [] });
+    expect(result.diagnostics).toMatchObject({
+      atomicity: { label: "compound" },
+      candidates: { acceptedDocuments: 0 },
+      retrieval: { selectedSources: 0 },
+    });
+    expect(modelCalls).toBe(1);
+    expect(sourceFetches).toBe(0);
+
+    await rm(cacheDirectory, { recursive: true, force: true });
+  });
+
   test("fails the whole topic request when one required Datatracker query exhausts retries", async () => {
     const cacheDirectory = await makeCacheDirectory();
     const datatracker = makeDatatrackerHttpClient((url) => {

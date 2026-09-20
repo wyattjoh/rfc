@@ -2686,7 +2686,6 @@ export const researchTopic = Effect.fnUntraced(function* (
 
   if (documentSelection.accepted.length === 0) {
     const finishedAt = yield* Clock.currentTimeMillis;
-    const status = statusFromRelations([], documentSelection.atomicity, [], policy);
     const fallbackResolvedModel = yield* Ref.get(resolvedModelRef);
     const observedResolvedModels = yield* Ref.get(resolvedModelsRef);
     const resolvedModel = summarizeResolvedModels(fallbackResolvedModel, observedResolvedModels);
@@ -2696,7 +2695,7 @@ export const researchTopic = Effect.fnUntraced(function* (
     return Schema.decodeUnknownSync(InternalEvidenceBundleSchema)({
       schemaVersion: 1,
       kind: "evidence_bundle",
-      status,
+      status: "needs_review",
       question,
       rfc: null,
       evidence: [],
