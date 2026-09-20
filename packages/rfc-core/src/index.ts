@@ -39,6 +39,7 @@ import {
   RfcDiscoveryError,
   defaultDatatrackerApiUrl,
   datatrackerCurrencyContextLimit,
+  datatrackerDocumentCandidateLimit,
   datatrackerSuccessorLimit,
   makeDefaultRfcDiscoveryLayer,
   makeRfcDiscoveryHttpLayer,
@@ -961,7 +962,10 @@ const liveTopicResearchProgram = Effect.fnUntraced(function* (
     sourceMs: result.diagnostics.timings.sourceMs,
     sourceCacheOutcome: cacheOutcomeFor(sourceLoads, result.rfc?.identifier),
     upstreamRows: discovered.upstreamRows,
-    uniqueCandidates: discovered.documents.length,
+    uniqueCandidates: discovered.uniqueCandidates,
+    mergeLimit: datatrackerDocumentCandidateLimit,
+    semanticCandidates: discovered.documents.length,
+    selectedSources: sourceLoads.length,
     topicTruncated: discovered.truncated,
     requests: [...discovered.requests, ...sourceRequestTraces(sourceLoads)],
   };
@@ -973,7 +977,8 @@ const liveTopicResearchProgram = Effect.fnUntraced(function* (
   return Schema.decodeUnknownSync(EvidenceBundleSchema)({
     ...result,
     schemaVersion: 2,
-    status: discovered.documents.length === 0 ? "needs_review" : result.status,
+    status:
+      discovered.documents.length === 0 || discovered.truncated ? "needs_review" : result.status,
     contexts: result.contexts,
     currency: result.currency,
     diagnostics: {

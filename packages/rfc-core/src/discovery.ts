@@ -121,7 +121,7 @@ export const RetrievalRequestTraceSchema = Schema.Struct({
 export type RetrievalRequestTrace = Schema.Schema.Type<typeof RetrievalRequestTraceSchema>;
 
 /**
- * Live retrieval diagnostics for a schema-version-two known-RFC request.
+ * Live retrieval diagnostics for a schema-version-two research request.
  */
 export const LiveRetrievalTraceSchema = Schema.Struct({
   schemaVersion: Schema.Literal(2),
@@ -140,6 +140,9 @@ export const LiveRetrievalTraceSchema = Schema.Struct({
   ]),
   upstreamRows: Schema.optionalKey(Schema.Natural),
   uniqueCandidates: Schema.optionalKey(Schema.Natural),
+  mergeLimit: Schema.optionalKey(Schema.Natural),
+  semanticCandidates: Schema.optionalKey(Schema.Natural),
+  selectedSources: Schema.optionalKey(Schema.Natural),
   topicTruncated: Schema.optionalKey(Schema.Boolean),
   traversalComplete: Schema.optionalKey(Schema.Boolean),
   traversalContexts: Schema.optionalKey(Schema.Natural),
@@ -153,7 +156,7 @@ export const LiveRetrievalTraceSchema = Schema.Struct({
 });
 
 /**
- * Live retrieval diagnostics for a schema-version-two known-RFC request.
+ * Live retrieval diagnostics for a schema-version-two research request.
  */
 export type LiveRetrievalTrace = Schema.Schema.Type<typeof LiveRetrievalTraceSchema>;
 
@@ -280,7 +283,11 @@ export interface LiveTopicDiscovery {
    */
   readonly upstreamRows: number;
   /**
-   * Whether any bounded query reported additional unfetched rows.
+   * Number of distinct RFCs observed before applying the semantic merge cap.
+   */
+  readonly uniqueCandidates: number;
+  /**
+   * Whether a bounded query or the deterministic merge reported omitted candidates.
    */
   readonly truncated: boolean;
   /**
@@ -1081,7 +1088,7 @@ const discoverTopic = Effect.fnUntraced(function* (
 
   const merged: Array<RfcMetadata> = [];
   const seen = new Set<string>();
-  for (let row = 0; merged.length < datatrackerDocumentCandidateLimit; row += 1) {
+  for (let row = 0; ; row += 1) {
     let found = false;
     for (const stream of streams) {
       const document = stream.documents[row];
@@ -1089,8 +1096,7 @@ const discoverTopic = Effect.fnUntraced(function* (
       found = true;
       if (seen.has(document.identifier)) continue;
       seen.add(document.identifier);
-      merged.push(document);
-      if (merged.length >= datatrackerDocumentCandidateLimit) break;
+      if (merged.length < datatrackerDocumentCandidateLimit) merged.push(document);
     }
     if (!found) break;
   }
@@ -1100,7 +1106,9 @@ const discoverTopic = Effect.fnUntraced(function* (
     documents: merged,
     requests: streams.map(({ trace }) => trace),
     upstreamRows: streams.reduce((count, stream) => count + stream.documents.length, 0),
-    truncated: streams.some(({ truncated }) => truncated),
+    uniqueCandidates: seen.size,
+    truncated:
+      streams.some(({ truncated }) => truncated) || seen.size > datatrackerDocumentCandidateLimit,
     metadataMs: Math.max(0, finishedAt - startedAt),
   };
 });

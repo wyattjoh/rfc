@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -955,7 +955,7 @@ describe("createRfcClient", () => {
       schemaVersion: 2,
       question: "Which requirements apply?",
       rfc: null,
-      searchTerms: ["HTTP semantics", "client request"],
+      searchTerms: ["HTTP/2 :method", "HTTP/2 :method"],
     });
 
     expect(result.rfc?.identifier).toBe("RFC9110");
@@ -966,13 +966,193 @@ describe("createRfcClient", () => {
           url.searchParams.get("title__icontains") ?? url.searchParams.get("abstract__icontains")
         );
       }),
-    ).toEqual(["HTTP semantics", "HTTP semantics", "client request", "client request"]);
+    ).toEqual(["HTTP/2 :method", "HTTP/2 :method", "HTTP/2 :method", "HTTP/2 :method"]);
     expect(datatracker.urls.every((value) => !value.includes("Which+requirements"))).toBe(true);
     expect(result.diagnostics.retrieval).toMatchObject({
       datatrackerRequestCount: 4,
       upstreamRows: 4,
       uniqueCandidates: 1,
     });
+  });
+
+  test("enforces topic traffic, merge, semantic, and source bounds", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const searchTerms = ["HTTP semantics", "client request", "cache control", "status code"];
+    const urls: Array<string> = [];
+    let activeRequests = 0;
+    let maximumActiveRequests = 0;
+    const datatracker = HttpClient.make((request, url) =>
+      Effect.gen(function* () {
+        urls.push(url.toString());
+        activeRequests += 1;
+        maximumActiveRequests = Math.max(maximumActiveRequests, activeRequests);
+        yield* Effect.sleep(Duration.millis(5));
+
+        const term =
+          url.searchParams.get("title__icontains") ??
+          url.searchParams.get("abstract__icontains") ??
+          "";
+        const termIndex = searchTerms.indexOf(term);
+        const fieldIndex = url.searchParams.has("title__icontains") ? 0 : 1;
+        const streamIndex = termIndex * 2 + fieldIndex;
+        const objects = Array.from({ length: 20 }, (_, row) => {
+          const generatedNumber = 9_900 - streamIndex * 20 - row;
+          const rfcNumber = streamIndex === 1 && row === 0 ? 9_900 : generatedNumber;
+          return {
+            ...datatrackerDocument,
+            name: `rfc${rfcNumber}`,
+            rfc_number: rfcNumber,
+            title: `Topic stream ${streamIndex} row ${row}`,
+            abstract: `Metadata for RFC ${rfcNumber}.`,
+            resource_uri: `/api/v1/doc/document/rfc${rfcNumber}/`,
+          };
+        });
+        activeRequests -= 1;
+        return HttpClientResponse.fromWeb(
+          request,
+          Response.json({
+            meta: { limit: 20, offset: 0, total_count: 20, next: null },
+            objects,
+          }),
+        );
+      }),
+    );
+    const documentBatches: Array<ReadonlyArray<string>> = [];
+    const documentDecisionKeys: Array<ReadonlyArray<string>> = [];
+    const decisionModel = {
+      [DecisionModel.TypeId]: DecisionModel.TypeId,
+      decide: (
+        definition: { readonly decisions: Readonly<Record<string, Decision.Any>> },
+        options: {
+          readonly input: {
+            readonly documents:
+              | Readonly<Record<string, { readonly identifier: string }>>
+              | undefined;
+          };
+        },
+      ) => {
+        if (options.input.documents !== undefined) {
+          documentBatches.push(
+            Object.values(options.input.documents).map(({ identifier }) => identifier),
+          );
+          documentDecisionKeys.push(Object.keys(definition.decisions));
+        }
+        return Effect.succeed({
+          answers: Object.fromEntries(
+            Object.entries(definition.decisions).map(([key, decision]) =>
+              key === "question_atomicity"
+                ? [
+                    key,
+                    {
+                      label: "atomic",
+                      probabilities: { atomic: 0.99, compound: 0.01 },
+                      confidence: 0.99,
+                    },
+                  ]
+                : decision._tag === "Probability"
+                  ? [key, { probability: 0.99 }]
+                  : [
+                      key,
+                      {
+                        label: "direct_answer",
+                        probabilities: {
+                          direct_answer: 0.99,
+                          partial_answer: 0.0025,
+                          background_only: 0.0025,
+                          contradictory: 0.0025,
+                          irrelevant: 0.0025,
+                        },
+                        confidence: 0.99,
+                      },
+                    ],
+            ),
+          ),
+          usage: { inputTokens: 4, outputTokens: 2 },
+        });
+      },
+    } as unknown as DecisionModel.DecisionModel;
+    const fetchedSources: Array<string> = [];
+    const client = await createRfcClient({
+      cacheDirectory,
+      datatrackerHttpClient: datatracker,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      rfcSourceFetcher: async (document) => {
+        fetchedSources.push(document.identifier);
+        return {
+          sourceUrl: `https://www.rfc-editor.org/rfc/rfc${document.rfcNumber}.txt`,
+          text: sourceText,
+        };
+      },
+      decisionModel,
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 2,
+      question: "Which requirements apply without disclosing this question?",
+      rfc: null,
+      searchTerms,
+    });
+
+    expect(urls).toHaveLength(8);
+    expect(maximumActiveRequests).toBeGreaterThan(1);
+    expect(maximumActiveRequests).toBeLessThanOrEqual(4);
+    expect(
+      urls.every((value) => {
+        const url = new URL(value);
+        return (
+          url.searchParams.get("limit") === "20" &&
+          url.searchParams.get("offset") === "0" &&
+          url.searchParams.get("order_by") === "-rfc_number" &&
+          url.searchParams.get("type__slug") === "rfc" &&
+          !value.includes("without+disclosing")
+        );
+      }),
+    ).toBe(true);
+    expect(documentBatches).toHaveLength(1);
+    expect(documentBatches[0]).toHaveLength(32);
+    expect(documentDecisionKeys).toHaveLength(1);
+    expect(documentDecisionKeys[0]).toEqual([
+      "question_atomicity",
+      ...Array.from({ length: 32 }, (_, index) => `document_${index}`),
+    ]);
+    expect(documentBatches[0]?.slice(0, 9)).toEqual([
+      "RFC9900",
+      "RFC9860",
+      "RFC9840",
+      "RFC9820",
+      "RFC9800",
+      "RFC9780",
+      "RFC9760",
+      "RFC9899",
+      "RFC9879",
+    ]);
+    expect(fetchedSources.length).toBeLessThanOrEqual(8);
+    expect(result.status).toBe("needs_review");
+    expect(result.diagnostics.retrieval).toMatchObject({
+      datatrackerRequestCount: 8,
+      upstreamRows: 160,
+      uniqueCandidates: 159,
+      mergeLimit: 32,
+      semanticCandidates: 32,
+      selectedSources: fetchedSources.length,
+      topicTruncated: true,
+    });
+    const metadataRequests = result.diagnostics.retrieval?.requests.filter(
+      ({ kind }) => kind === "metadata",
+    );
+    expect(metadataRequests).toHaveLength(8);
+    expect(
+      metadataRequests?.every(
+        ({ attempts, durationMs, url }) => attempts === 1 && durationMs >= 0 && urls.includes(url),
+      ),
+    ).toBe(true);
+    expect(await readdir(cacheDirectory)).toEqual(["sources"]);
+
+    await rm(cacheDirectory, { recursive: true, force: true });
   });
 
   test("accepts bounded topic pages and reports upstream truncation", async () => {
@@ -1016,6 +1196,294 @@ describe("createRfcClient", () => {
       uniqueCandidates: 1,
       topicTruncated: true,
     });
+  });
+
+  test("returns needs_review when live topic discovery finds no RFCs", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const datatracker = makeDatatrackerHttpClient(() =>
+      Response.json({
+        meta: { limit: 20, offset: 0, total_count: 0, next: null },
+        objects: [],
+      }),
+    );
+    let sourceFetches = 0;
+    const client = await createRfcClient({
+      cacheDirectory,
+      datatrackerHttpClient: datatracker.client,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      rfcSourceFetcher: async () => {
+        sourceFetches += 1;
+        return {
+          sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+          text: sourceText,
+        };
+      },
+      decisionModel: makeDecisionModel(),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 2,
+      question: "Which requirements apply?",
+      rfc: null,
+      searchTerms: ["no matching RFC"],
+    });
+
+    expect(result).toMatchObject({ status: "needs_review", rfc: null, evidence: [] });
+    expect(result.diagnostics.retrieval).toMatchObject({
+      datatrackerRequestCount: 2,
+      upstreamRows: 0,
+      uniqueCandidates: 0,
+      mergeLimit: 32,
+      semanticCandidates: 0,
+      selectedSources: 0,
+      topicTruncated: false,
+    });
+    expect(sourceFetches).toBe(0);
+    expect(await readdir(cacheDirectory)).toEqual([]);
+
+    await rm(cacheDirectory, { recursive: true, force: true });
+  });
+
+  test("returns needs_review when semantic document selection rejects every RFC", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const datatracker = makeDatatrackerHttpClient(() =>
+      Response.json({
+        meta: { limit: 20, offset: 0, total_count: 1, next: null },
+        objects: [datatrackerDocument],
+      }),
+    );
+    let modelCalls = 0;
+    const decisionModel = {
+      [DecisionModel.TypeId]: DecisionModel.TypeId,
+      decide: (definition: { readonly decisions: Readonly<Record<string, Decision.Any>> }) => {
+        modelCalls += 1;
+        return Effect.succeed({
+          answers: Object.fromEntries(
+            Object.keys(definition.decisions).map((key) =>
+              key === "question_atomicity"
+                ? [
+                    key,
+                    {
+                      label: "atomic",
+                      probabilities: { atomic: 0.99, compound: 0.01 },
+                      confidence: 0.99,
+                    },
+                  ]
+                : [key, { probability: 0.1 }],
+            ),
+          ),
+          usage: { inputTokens: 2, outputTokens: 1 },
+        });
+      },
+    } as unknown as DecisionModel.DecisionModel;
+    let sourceFetches = 0;
+    const client = await createRfcClient({
+      cacheDirectory,
+      datatrackerHttpClient: datatracker.client,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      rfcSourceFetcher: async () => {
+        sourceFetches += 1;
+        return {
+          sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+          text: sourceText,
+        };
+      },
+      decisionModel,
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 2,
+      question: "Which requirements apply?",
+      rfc: null,
+      searchTerms: ["HTTP semantics"],
+    });
+
+    expect(result).toMatchObject({ status: "needs_review", rfc: null, evidence: [] });
+    expect(result.diagnostics.retrieval).toMatchObject({
+      upstreamRows: 2,
+      uniqueCandidates: 1,
+      semanticCandidates: 1,
+      selectedSources: 0,
+    });
+    expect(modelCalls).toBe(1);
+    expect(sourceFetches).toBe(0);
+
+    await rm(cacheDirectory, { recursive: true, force: true });
+  });
+
+  test("fails the whole topic request when one required Datatracker query exhausts retries", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const datatracker = makeDatatrackerHttpClient((url) => {
+      if (url.searchParams.get("title__icontains") === "second term") {
+        return new Response("temporarily unavailable", { status: 503 });
+      }
+      return Response.json({
+        meta: { limit: 20, offset: 0, total_count: 1, next: null },
+        objects: [datatrackerDocument],
+      });
+    });
+    let modelCalls = 0;
+    const baseModel = makeDecisionModel();
+    const decisionModel = {
+      ...baseModel,
+      decide: (...args: Parameters<DecisionModel.DecisionModel["decide"]>) => {
+        modelCalls += 1;
+        return baseModel.decide(...args);
+      },
+    } as DecisionModel.DecisionModel;
+    let sourceFetches = 0;
+    const client = await createRfcClient({
+      cacheDirectory,
+      datatrackerHttpClient: datatracker.client,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      rfcSourceFetcher: async () => {
+        sourceFetches += 1;
+        return {
+          sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+          text: sourceText,
+        };
+      },
+      decisionModel,
+    });
+    clients.push(client);
+
+    await expect(
+      client.research({
+        schemaVersion: 2,
+        question: "Which requirements apply?",
+        rfc: null,
+        searchTerms: ["first term", "second term"],
+      }),
+    ).rejects.toMatchObject({
+      _tag: "RfcDiscoveryError",
+      stage: "request",
+      attempts: 3,
+    });
+    expect(datatracker.urls.some((url) => url.includes("first+term"))).toBe(true);
+    expect(
+      datatracker.urls.filter((url) => url.includes("title__icontains=second+term")),
+    ).toHaveLength(3);
+    expect(datatracker.urls.some((url) => url.includes("second+term"))).toBe(true);
+    expect(modelCalls).toBe(0);
+    expect(sourceFetches).toBe(0);
+
+    await rm(cacheDirectory, { recursive: true, force: true });
+  });
+
+  test("fails closed when TypeSafe omits a topic candidate answer", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const datatracker = makeDatatrackerHttpClient(() =>
+      Response.json({
+        meta: { limit: 20, offset: 0, total_count: 1, next: null },
+        objects: [datatrackerDocument],
+      }),
+    );
+    let sourceFetches = 0;
+    const client = await createRfcClient({
+      cacheDirectory,
+      datatrackerHttpClient: datatracker.client,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      rfcSourceFetcher: async () => {
+        sourceFetches += 1;
+        return {
+          sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+          text: sourceText,
+        };
+      },
+      decisionModel: {
+        [DecisionModel.TypeId]: DecisionModel.TypeId,
+        decide: () =>
+          Effect.succeed({
+            answers: {
+              question_atomicity: {
+                label: "atomic",
+                probabilities: { atomic: 0.99, compound: 0.01 },
+                confidence: 0.99,
+              },
+            },
+            usage: { inputTokens: 2, outputTokens: 1 },
+          }),
+      } as DecisionModel.DecisionModel,
+    });
+    clients.push(client);
+
+    await expect(
+      client.research({
+        schemaVersion: 2,
+        question: "Which requirements apply?",
+        rfc: null,
+        searchTerms: ["HTTP semantics"],
+      }),
+    ).rejects.toMatchObject({
+      _tag: "DecisionModelError",
+      stage: "document",
+      reason: expect.stringContaining("omitted"),
+    });
+    expect(sourceFetches).toBe(0);
+
+    await rm(cacheDirectory, { recursive: true, force: true });
+  });
+
+  test("rejects a topic stream that exceeds its twenty-row bound", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const datatracker = makeDatatrackerHttpClient(() =>
+      Response.json({
+        meta: { limit: 20, offset: 0, total_count: 21, next: null },
+        objects: Array.from({ length: 21 }, (_, index) => {
+          const rfcNumber = 9_000 - index;
+          return {
+            ...datatrackerDocument,
+            name: `rfc${rfcNumber}`,
+            rfc_number: rfcNumber,
+            resource_uri: `/api/v1/doc/document/rfc${rfcNumber}/`,
+          };
+        }),
+      }),
+    );
+    let sourceFetches = 0;
+    const client = await createRfcClient({
+      cacheDirectory,
+      datatrackerHttpClient: datatracker.client,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      rfcSourceFetcher: async () => {
+        sourceFetches += 1;
+        return {
+          sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+          text: sourceText,
+        };
+      },
+      decisionModel: makeDecisionModel(),
+    });
+    clients.push(client);
+
+    await expect(
+      client.research({
+        schemaVersion: 2,
+        question: "Which requirements apply?",
+        rfc: null,
+        searchTerms: ["HTTP semantics"],
+      }),
+    ).rejects.toMatchObject({
+      _tag: "RfcDiscoveryError",
+      stage: "decode",
+      reason: "Datatracker returned malformed or unbounded topic metadata",
+    });
+    expect(datatracker.urls.length).toBeLessThanOrEqual(2);
+    expect(sourceFetches).toBe(0);
+
+    await rm(cacheDirectory, { recursive: true, force: true });
   });
 
   test("rejects metadata bodies above the byte limit before decoding", async () => {
@@ -2369,6 +2837,22 @@ describe("createRfcClient", () => {
         searchTerms: ["   "],
       }),
     ).toMatchObject({ searchTerms: ["   "] });
+    expect(
+      decodeResearchRequest({
+        schemaVersion: 2,
+        question: "What is HTTP?",
+        rfc: null,
+        searchTerms: ["x".repeat(200)],
+      }),
+    ).toMatchObject({ searchTerms: ["x".repeat(200)] });
+    expect(() =>
+      decodeResearchRequest({
+        schemaVersion: 2,
+        question: "What is HTTP?",
+        rfc: null,
+        searchTerms: ["x".repeat(201)],
+      }),
+    ).toThrow(InvalidInputError);
     expect(() =>
       decodeResearchRequest({
         schemaVersion: 1,

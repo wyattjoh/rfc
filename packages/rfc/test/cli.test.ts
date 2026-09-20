@@ -341,110 +341,58 @@ describe("rfc process protocol", () => {
     expect(closed).toBe(3);
   });
 
-  test("routes repeatable topic terms through bounded live discovery", async () => {
-    const cacheDirectory = await mkdtemp(join(tmpdir(), "rfc-cli-live-topic-test-"));
-    const sourceText =
-      "1. Requirements\n\nThe client MUST send a request containing the target resource.\n";
-    const fetchedAt = new Date().toISOString();
-    await writeLiveSourceCache(cacheDirectory, sourceText, fetchedAt);
-    const topicUrls: Array<string> = [];
-    let modelCalls = 0;
-    const server = Bun.serve({
-      port: 0,
-      async fetch(request) {
-        const url = new URL(request.url);
-        if (url.pathname.endsWith("/document/")) {
-          topicUrls.push(url.toString());
-          return Response.json({
-            meta: { limit: 20, offset: 0, total_count: 1, next: null, previous: null },
-            objects: [
-              {
-                name: "rfc9110",
-                rfc_number: 9110,
-                title: "HTTP Semantics",
-                abstract: "HTTP semantics.",
-                resource_uri: "/api/v1/doc/document/rfc9110/",
-                stream: "/api/v1/name/streamname/ietf/",
-                states: [],
-              },
-            ],
-          });
-        }
-        if (url.pathname !== "/systemone") return new Response("not found", { status: 404 });
-        modelCalls += 1;
-        const payload = (await request.json()) as {
-          readonly questions: Readonly<Record<string, unknown>>;
-        };
-        return Response.json({
-          model: "jev-1.13.0",
-          answers: Object.fromEntries(
-            Object.keys(payload.questions).map((key) =>
-              key === "question_atomicity"
-                ? [
-                    key,
-                    {
-                      type: "choice",
-                      choice: "atomic",
-                      probabilities: { atomic: 0.99, compound: 0.01 },
-                      confidence: 0.99,
-                    },
-                  ]
-                : modelCalls < 3
-                  ? [key, { type: "noul", noul: 0.99 }]
-                  : [
-                      key,
-                      {
-                        type: "choice",
-                        choice: "direct_answer",
-                        probabilities: {
-                          direct_answer: 0.99,
-                          partial_answer: 0.0025,
-                          background_only: 0.0025,
-                          contradictory: 0.0025,
-                          irrelevant: 0.0025,
-                        },
-                        confidence: 0.99,
-                      },
-                    ],
-            ),
-          ),
-          usage: { input_tokens: 10, output_tokens: 6 },
-        });
-      },
+  test("decodes canonical and repeatable-flag topic requests", async () => {
+    const requests: Array<unknown> = [];
+    let closed = 0;
+    const createClient = makeStubClientFactory(requests, () => {
+      closed += 1;
     });
-    servers.push(server);
 
-    const result = await runCli([
-      "research",
-      "--cache-directory",
-      cacheDirectory,
-      "--datatracker-api-url",
-      `${server.url}api/v1/`,
-      "--typesafe-api-url",
-      server.url.toString(),
-      "--question",
-      "Which HTTP requirements apply?",
-      "--search-term",
-      "HTTP semantics",
-      "--search-term",
-      "client request",
-    ]);
-
-    expect(result.exitCode).toBe(0);
-    expect(result.stderr).toBe("");
-    expect(JSON.parse(result.stdout)).toMatchObject({
-      schemaVersion: 2,
-      kind: "evidence_bundle",
-      rfc: { identifier: "RFC9110" },
-    });
-    expect(
-      topicUrls.map((value) => {
-        const url = new URL(value);
-        return (
-          url.searchParams.get("title__icontains") ?? url.searchParams.get("abstract__icontains")
-        );
+    const convenience = await runCli(
+      [
+        "research",
+        "--question",
+        "Which HTTP requirements apply?",
+        "--search-term",
+        "HTTP semantics",
+        "--search-term",
+        "client request",
+      ],
+      undefined,
+      makeFixtureCredentialStore(),
+      createClient,
+    );
+    const canonical = await runCli(
+      ["research", "--question", "ignored", "--search-term", "ignored"],
+      JSON.stringify({
+        schemaVersion: 2,
+        question: "Which cache requirements apply?",
+        rfc: null,
+        searchTerms: ["cache control", "freshness lifetime"],
       }),
-    ).toEqual(["HTTP semantics", "HTTP semantics", "client request", "client request"]);
+      makeFixtureCredentialStore(),
+      createClient,
+    );
+
+    expect(convenience.exitCode).toBe(0);
+    expect(convenience.stderr).toBe("");
+    expect(canonical.exitCode).toBe(0);
+    expect(canonical.stderr).toBe("");
+    expect(requests).toEqual([
+      {
+        schemaVersion: 2,
+        question: "Which HTTP requirements apply?",
+        rfc: null,
+        searchTerms: ["HTTP semantics", "client request"],
+      },
+      {
+        schemaVersion: 2,
+        question: "Which cache requirements apply?",
+        rfc: null,
+        searchTerms: ["cache control", "freshness lifetime"],
+      },
+    ]);
+    expect(closed).toBe(2);
   });
 
   test("requires the exact release attestation even when automatic answers are enabled", async () => {
