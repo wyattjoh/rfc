@@ -157,6 +157,16 @@ const entryPath = (pathService: Path.Path, sourceDirectory: string, identifier: 
 
 const validEtag = (value: string): boolean => /^(?:W\/)?"[^"\r\n]*"$/.test(value);
 
+/**
+ * Whether a validator is a strong entity tag.
+ *
+ * `If-None-Match` uses weak comparison, so a weak validator can produce a `304`
+ * for a byte-different representation. Evidence carries exact hashes and UTF-8
+ * byte offsets, so only a strong validator may drive conditional revalidation;
+ * a weak one falls back to an unconditional fetch.
+ */
+const isStrongEtag = (value: string): boolean => /^"[^"\r\n]*"$/.test(value);
+
 const maximumFreshnessMilliseconds = 365 * 24 * 60 * 60 * 1_000;
 
 /**
@@ -603,9 +613,13 @@ export const loadLiveRfcSource = Effect.fnUntraced(function* (
 
   const service = yield* LiveRfcSource;
   const stale = entry !== undefined;
+  const conditionalEtag =
+    entry?.etag !== null && entry?.etag !== undefined && isStrongEtag(entry.etag)
+      ? entry.etag
+      : undefined;
   const sourceUrl = makeRfcSourceUrl(defaultRfcEditorBaseUrl, document.rfcNumber);
   const responseResult = yield* Effect.result(
-    service.fetch(document, stale ? (entry.etag ?? undefined) : undefined).pipe(
+    service.fetch(document, conditionalEtag).pipe(
       Effect.timeout(Duration.millis(rfcSourceDeadlineMilliseconds)),
       Effect.mapError((error) =>
         Cause.isTimeoutError(error)

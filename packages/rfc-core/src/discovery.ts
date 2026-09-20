@@ -269,6 +269,19 @@ const DatatrackerDocumentSchema = Schema.Struct({
 
 type DatatrackerDocument = Schema.Schema.Type<typeof DatatrackerDocumentSchema>;
 
+/**
+ * Whether one decoded document identifies a published RFC.
+ *
+ * `Schema.Natural` admits zero, and nothing in the payload ties `name` to
+ * `rfc_number`, so both are verified here: a published RFC has a positive safe
+ * number and a canonical `rfc<number>` name. A mismatch means the row does not
+ * describe the RFC it claims to, so it is rejected rather than researched.
+ */
+const isPublishedRfcDocument = (document: DatatrackerDocument): boolean =>
+  Number.isSafeInteger(document.rfc_number) &&
+  document.rfc_number > 0 &&
+  document.name.toLowerCase() === `rfc${document.rfc_number}`;
+
 const DatatrackerRelationshipSchema = Schema.Struct({
   source: DatatrackerReferenceSchema,
   target: DatatrackerReferenceSchema,
@@ -660,7 +673,9 @@ const decodeDocument = (
   Effect.try({
     try: () => {
       const document = Schema.decodeUnknownSync(DatatrackerDocumentSchema)(value);
-      if (document.rfc_number <= 0) throw new Error("RFC number must be positive");
+      if (!isPublishedRfcDocument(document)) {
+        throw new Error("Datatracker metadata does not identify a published RFC");
+      }
       return document;
     },
     catch: () =>
@@ -710,6 +725,9 @@ const decodeDocumentPage = (
         page.meta.total_count < page.objects.length
       ) {
         throw new Error("topic response exceeded its bound");
+      }
+      if (!page.objects.every(isPublishedRfcDocument)) {
+        throw new Error("Datatracker metadata does not identify a published RFC");
       }
       return page;
     },

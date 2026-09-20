@@ -36,7 +36,12 @@ const makeCacheDirectory = async () => mkdtemp(join(tmpdir(), "rfc-core-test-"))
 
 const seedLiveSourceCacheEntry = async (
   cacheDirectory: string,
-  entry: { readonly text: string; readonly fetchedAt: string; readonly freshUntil: string },
+  entry: {
+    readonly text: string;
+    readonly fetchedAt: string;
+    readonly freshUntil: string;
+    readonly etag?: string;
+  },
 ): Promise<void> => {
   await mkdir(join(cacheDirectory, "sources", "v2"), { recursive: true });
   await writeFile(
@@ -50,7 +55,7 @@ const seedLiveSourceCacheEntry = async (
       sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
       text: entry.text,
       contentHash: hashRfcSource(entry.text),
-      etag: '"fixture"',
+      etag: entry.etag ?? '"fixture"',
       fetchedAt: entry.fetchedAt,
       freshUntil: entry.freshUntil,
     }),
@@ -1189,6 +1194,141 @@ describe("createRfcClient", () => {
     const failed = sourceRequests.find((request) => request.url.endsWith("rfc9111.txt"));
     expect(failed?.attempts).toBeGreaterThan(0);
     expect(failed?.durationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  test("does not send a weak validator in a conditional request", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    // Stale, so revalidation is due, but the stored validator is weak.
+    await seedLiveSourceCacheEntry(cacheDirectory, {
+      text: sourceText,
+      fetchedAt: new Date(0).toISOString(),
+      freshUntil: new Date(1_000).toISOString(),
+      etag: 'W/"weak"',
+    });
+    const datatracker = makeDatatrackerHttpClient((url) =>
+      url.pathname.endsWith("/document/rfc9110/")
+        ? Response.json(datatrackerDocument)
+        : Response.json({
+            meta: { limit: 64, offset: 0, total_count: 0, next: null },
+            objects: [],
+          }),
+    );
+    const validators: Array<string | undefined> = [];
+    const replacement = sourceText.replace("target", "selected");
+    const sourceHttp = HttpClient.make((request) => {
+      validators.push(request.headers["if-none-match"]);
+      return Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          new Response(replacement, {
+            status: 200,
+            headers: {
+              etag: '"strong"',
+              "cache-control": "max-age=60",
+              "content-type": "text/plain; charset=utf-8",
+            },
+          }),
+        ),
+      );
+    });
+    const client = await createRfcClient({
+      cacheDirectory,
+      datatrackerHttpClient: datatracker.client,
+      rfcSourceHttpClient: sourceHttp,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      decisionModel: makeDecisionModel(),
+      now: () => 30_000,
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 2 as const,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+      searchTerms: undefined,
+    });
+
+    expect(validators).toEqual([undefined]);
+    expect(result.evidence[0]?.provenance.sourceHash).toBe(hashRfcSource(replacement));
+  });
+
+  test("rejects topic metadata whose name and RFC number disagree", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    // The exact-lookup path already matches name against the requested RFC; a
+    // topic row has no requested identifier to check against, so the published
+    // RFC boundary has to be enforced while decoding the page.
+    const datatracker = makeDatatrackerHttpClient(() =>
+      Response.json({
+        meta: { limit: 20, offset: 0, total_count: 1, next: null },
+        objects: [{ ...datatrackerDocument, rfc_number: 9111 }],
+      }),
+    );
+    const client = await createRfcClient({
+      cacheDirectory,
+      datatrackerHttpClient: datatracker.client,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      rfcSourceFetcher: async () => ({
+        sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+        text: sourceText,
+      }),
+      decisionModel: makeDecisionModel(),
+      now: () => 0,
+    });
+    clients.push(client);
+
+    await expect(
+      client.research({
+        schemaVersion: 2 as const,
+        question: "Which requirements apply?",
+        rfc: null,
+        searchTerms: ["HTTP semantics"],
+      }),
+    ).rejects.toMatchObject({
+      _tag: "RfcDiscoveryError",
+      stage: "decode",
+      reason: "Datatracker returned malformed or unbounded topic metadata",
+    });
+  });
+
+  test("rejects topic metadata reporting RFC number zero", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const datatracker = makeDatatrackerHttpClient(() =>
+      Response.json({
+        meta: { limit: 20, offset: 0, total_count: 1, next: null },
+        objects: [{ ...datatrackerDocument, name: "rfc0", rfc_number: 0 }],
+      }),
+    );
+    const client = await createRfcClient({
+      cacheDirectory,
+      datatrackerHttpClient: datatracker.client,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      rfcSourceFetcher: async () => ({
+        sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+        text: sourceText,
+      }),
+      decisionModel: makeDecisionModel(),
+      now: () => 0,
+    });
+    clients.push(client);
+
+    await expect(
+      client.research({
+        schemaVersion: 2 as const,
+        question: "Which requirements apply?",
+        rfc: null,
+        searchTerms: ["HTTP semantics"],
+      }),
+    ).rejects.toMatchObject({
+      _tag: "RfcDiscoveryError",
+      stage: "decode",
+      reason: "Datatracker returned malformed or unbounded topic metadata",
+    });
   });
 
   test("fails closed when stale RFC text cannot be revalidated", async () => {
