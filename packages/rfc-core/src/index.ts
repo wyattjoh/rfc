@@ -39,7 +39,6 @@ import {
   RfcDiscoveryError,
   defaultDatatrackerApiUrl,
   datatrackerCurrencyContextLimit,
-  datatrackerCurrencyDepthLimit,
   datatrackerSuccessorLimit,
   makeDefaultRfcDiscoveryLayer,
   makeRfcDiscoveryHttpLayer,
@@ -195,6 +194,11 @@ export interface RfcClientOptions {
    * Optional HTTP service used by deterministic live-discovery tests.
    */
   readonly datatrackerHttpClient?: HttpClient.HttpClient | undefined;
+  /**
+   * Optional lower currency depth limit used with an injected Datatracker HTTP client.
+   * Values above the production limit are clamped to its hard maximum.
+   */
+  readonly currencyTraversalDepthLimit?: number | undefined;
   /**
    * TypeSafe model alias used to construct the official DecisionModel provider.
    */
@@ -641,7 +645,11 @@ const clientLayer = (options: RfcClientOptions) => {
   const discoveryLayer =
     options.datatrackerHttpClient === undefined
       ? makeDefaultRfcDiscoveryLayer(datatrackerBaseUrl)
-      : makeRfcDiscoveryHttpLayer(options.datatrackerHttpClient, datatrackerBaseUrl);
+      : makeRfcDiscoveryHttpLayer(
+          options.datatrackerHttpClient,
+          datatrackerBaseUrl,
+          options.currencyTraversalDepthLimit,
+        );
   const liveRfcSourceLayer =
     options.rfcSourceFetcher !== undefined
       ? makeLiveRfcSourceLayer(options.rfcSourceFetcher)
@@ -877,7 +885,7 @@ const liveKnownResearchProgram = Effect.fnUntraced(function* (
     successorRows: lookup.successorRows,
     boundedExits: lookup.boundedExits,
     contextLimit: datatrackerCurrencyContextLimit,
-    depthLimit: datatrackerCurrencyDepthLimit,
+    depthLimit: lookup.depthLimit,
     relationshipLimit: datatrackerSuccessorLimit,
     requests: [...lookup.requests, ...sourceRequestTraces(sourceLoads)],
   };

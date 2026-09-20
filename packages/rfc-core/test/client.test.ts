@@ -150,6 +150,7 @@ const makeDatatrackerHttpClient = (
 const makeCurrencyFixture = async (
   relationships: ReadonlyMap<number, ReadonlyArray<CurrencyRelationship>>,
   missingDocuments: ReadonlySet<number> = new Set(),
+  currencyTraversalDepthLimit: number | undefined = undefined,
 ) => {
   const cacheDirectory = await makeCacheDirectory();
   const sourceIdentifiers: Array<string> = [];
@@ -179,6 +180,7 @@ const makeCurrencyFixture = async (
   const client = await createRfcClient({
     cacheDirectory,
     datatrackerHttpClient: datatracker.client,
+    currencyTraversalDepthLimit,
     modelAlias: "jev-test",
     typeSafeApiKey: undefined,
     typeSafeApiUrl: undefined,
@@ -736,6 +738,44 @@ describe("createRfcClient", () => {
       "https://datatracker.ietf.org/api/v1/doc/relateddocument/?format=json&limit=64&offset=0&relationship__slug__in=obs%2Cupdates&target__name=rfc9110",
       "https://datatracker.ietf.org/api/v1/doc/document/rfc9111/?format=json",
     ]);
+
+    await rm(fixture.cacheDirectory, { recursive: true, force: true });
+  });
+
+  test("forces review and reports the bounded successor depth exit", async () => {
+    const fixture = await makeCurrencyFixture(
+      new Map([
+        [9110, [{ source: 9111, relationship: "updates" }]],
+        [9111, [{ source: 9112, relationship: "updates" }]],
+        [9112, [{ source: 9113, relationship: "updates" }]],
+        [9113, []],
+      ]),
+      new Set(),
+      2,
+    );
+
+    const result = await fixture.client.research({
+      schemaVersion: 2,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+      searchTerms: undefined,
+    });
+
+    expect(result.status).toBe("needs_review");
+    expect(result.currency).toMatchObject({
+      complete: false,
+      issues: expect.arrayContaining(["missing_successor", "traversal_limit"]),
+      unresolved: ["RFC9113"],
+    });
+    expect(result.diagnostics.retrieval).toMatchObject({
+      traversalComplete: false,
+      traversalContexts: 3,
+      traversalDepth: 2,
+      successorRows: 3,
+      depthLimit: 2,
+      boundedExits: ["depth_limit"],
+    });
+    expect(fixture.datatracker.urls).toHaveLength(6);
 
     await rm(fixture.cacheDirectory, { recursive: true, force: true });
   });

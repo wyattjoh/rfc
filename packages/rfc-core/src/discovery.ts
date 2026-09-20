@@ -84,6 +84,11 @@ export const datatrackerCurrencyContextLimit = 8;
  */
 export const datatrackerCurrencyDepthLimit = 16;
 
+const boundedCurrencyDepthLimit = (limit: number | undefined): number =>
+  limit !== undefined && Number.isSafeInteger(limit) && limit >= 0
+    ? Math.min(limit, datatrackerCurrencyDepthLimit)
+    : datatrackerCurrencyDepthLimit;
+
 const TraversalBoundedExitSchema = Schema.Literals([
   "depth_limit",
   "context_limit",
@@ -236,6 +241,10 @@ export interface LiveRfcLookup {
    * Greatest successor depth visited from the requested RFC.
    */
   readonly traversalDepth: number;
+  /**
+   * Effective successor depth limit, never above the production hard maximum.
+   */
+  readonly depthLimit: number;
   /**
    * Number of successor relationship rows observed.
    */
@@ -952,8 +961,10 @@ const lookupKnownRfc = Effect.fnUntraced(function* (
   http: HttpClient.HttpClient,
   baseUrl: string,
   identifier: string,
+  configuredDepthLimit: number | undefined,
 ): Effect.fn.Return<LiveRfcLookup, RfcDiscoveryError> {
   const startedAt = yield* Clock.currentTimeMillis;
+  const depthLimit = boundedCurrencyDepthLimit(configuredDepthLimit);
   const requestedName = normalizeRfcName(identifier);
   if (requestedName === undefined) {
     return yield* new RfcDiscoveryError({
@@ -997,7 +1008,7 @@ const lookupKnownRfc = Effect.fnUntraced(function* (
 
     for (const successorName of lookup.successorNames) {
       if (visited.has(successorName) || queued.has(successorName)) continue;
-      if (current.depth >= datatrackerCurrencyDepthLimit) {
+      if (current.depth >= depthLimit) {
         traversalComplete = false;
         boundedExits.add("depth_limit");
         continue;
@@ -1030,6 +1041,7 @@ const lookupKnownRfc = Effect.fnUntraced(function* (
     traversalComplete,
     traversalContexts: documents.length,
     traversalDepth,
+    depthLimit,
     successorRows,
     boundedExits: traversalBoundedExitOrder.filter((exit) => boundedExits.has(exit)),
     requests,
@@ -1098,17 +1110,19 @@ const discoverTopic = Effect.fnUntraced(function* (
  *
  * @param http HTTP client used for anonymous Datatracker requests.
  * @param baseUrl Datatracker v1 API base URL.
+ * @param currencyDepthLimit Optional lower successor depth limit for deterministic tests.
  * @returns A request-local RFC discovery service layer.
  */
 export const makeRfcDiscoveryHttpLayer = (
   http: HttpClient.HttpClient,
   baseUrl: string,
+  currencyDepthLimit: number | undefined = undefined,
 ): Layer.Layer<RfcDiscovery> =>
   Layer.succeed(
     RfcDiscovery,
     RfcDiscovery.of({
       lookupExactRfc: (identifier) => lookupExactRfc(http, baseUrl, identifier),
-      lookupKnownRfc: (identifier) => lookupKnownRfc(http, baseUrl, identifier),
+      lookupKnownRfc: (identifier) => lookupKnownRfc(http, baseUrl, identifier, currencyDepthLimit),
       discoverTopic: (searchTerms) => discoverTopic(http, baseUrl, searchTerms),
     }),
   );
@@ -1128,7 +1142,7 @@ export const makeDefaultRfcDiscoveryLayer = (
       const http = yield* HttpClient.HttpClient;
       return RfcDiscovery.of({
         lookupExactRfc: (identifier) => lookupExactRfc(http, baseUrl, identifier),
-        lookupKnownRfc: (identifier) => lookupKnownRfc(http, baseUrl, identifier),
+        lookupKnownRfc: (identifier) => lookupKnownRfc(http, baseUrl, identifier, undefined),
         discoverTopic: (searchTerms) => discoverTopic(http, baseUrl, searchTerms),
       });
     }),
