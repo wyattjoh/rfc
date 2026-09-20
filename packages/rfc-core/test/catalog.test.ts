@@ -13,7 +13,13 @@ test("private calibration exposes only request-local client operations", async (
   });
 
   try {
-    expect(Object.keys(client).sort()).toEqual(["close", "research", "verifyCitation"]);
+    expect(Object.keys(client).sort()).toEqual([
+      "close",
+      "research",
+      "sourceCacheRemove",
+      "sourceCacheStatus",
+      "verifyCitation",
+    ]);
     expect("catalogRefresh" in client).toBe(false);
     expect("prefetchSources" in client).toBe(false);
   } finally {
