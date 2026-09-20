@@ -15,7 +15,7 @@ const main = async (): Promise<void> => {
 
   const cacheDirectory = process.env.RFC_CACHE_DIRECTORY;
   if (cacheDirectory === undefined || cacheDirectory.length === 0) {
-    throw new Error("RFC_CACHE_DIRECTORY must point to a warm catalog and source cache");
+    throw new Error("RFC_CACHE_DIRECTORY must point to a writable per-RFC source-cache directory");
   }
 
   const iterations = parsePositiveInteger(process.env.RFC_TOPIC_BENCHMARK_ITERATIONS, 20);
