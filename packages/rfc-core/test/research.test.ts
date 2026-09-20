@@ -1360,7 +1360,7 @@ describe("known RFC research", () => {
 
     expect(result.status).toBe("needs_split");
     expect(result.evidence).toEqual([]);
-    expect(result.diagnostics.atomicity.label).toBe("compound");
+    expect(result.diagnostics.atomicity).toMatchObject({ label: "compound" });
     expect(calls).toHaveLength(1);
   });
 

@@ -56,6 +56,7 @@ import {
   DecisionModelError,
   EvidenceBundleSchema,
   precisionPolicy,
+  researchPolicyPresets,
   ResearchPolicyError,
   ResolvedModelName,
   ResolvedModelNames,
@@ -924,6 +925,76 @@ const liveTopicResearchProgram = Effect.fnUntraced(function* (
   const startedAt = yield* Clock.currentTimeMillis;
   const discovery = yield* RfcDiscovery;
   const discovered = yield* discovery.discoverTopic(request.searchTerms);
+  if (discovered.documents.length === 0) {
+    const policyPreset = options.policyPreset ?? "precision-v1";
+    const policy = researchPolicyPresets[policyPreset];
+    if (policy === undefined) {
+      return yield* new ResearchPolicyError({ policyPreset });
+    }
+
+    const finishedAt = yield* Clock.currentTimeMillis;
+    const requestedModel = options.modelAlias ?? precisionPolicy.pinnedModel;
+    const datatrackerRequestCount = discovered.requests.reduce(
+      (count, trace) => count + trace.attempts,
+      0,
+    );
+    return Schema.decodeUnknownSync(EvidenceBundleSchema)({
+      schemaVersion: 2,
+      kind: "evidence_bundle",
+      status: "needs_review",
+      question: request.question,
+      rfc: null,
+      evidence: [],
+      diagnostics: {
+        schemaVersion: 2,
+        policyVersion: policy.policyVersion,
+        requestedModel,
+        resolvedModel: requestedModel,
+        resolvedModels: [],
+        usage: { inputTokens: null, outputTokens: null },
+        timings: {
+          metadataMs: discovered.metadataMs,
+          sourceMs: 0,
+          lexicalMs: 0,
+          selectionMs: 0,
+          relationMs: 0,
+          totalMs: Math.max(0, finishedAt - startedAt),
+          documentMs: 0,
+        },
+        source: null,
+        sources: [],
+        retrieval: {
+          schemaVersion: 2,
+          requestCount: datatrackerRequestCount,
+          datatrackerRequestCount,
+          sourceRequestCount: 0,
+          metadataMs: discovered.metadataMs,
+          sourceMs: 0,
+          sourceCacheOutcome: "not_requested",
+          upstreamRows: discovered.upstreamRows,
+          uniqueCandidates: discovered.uniqueCandidates,
+          mergeLimit: datatrackerDocumentCandidateLimit,
+          semanticCandidates: 0,
+          selectedSources: 0,
+          topicTruncated: discovered.truncated,
+          requests: discovered.requests,
+        },
+        candidates: {
+          sourceBlocks: 0,
+          passageCandidates: 0,
+          selectedPassages: 0,
+          discoveredDocuments: 0,
+          documentCandidates: 0,
+          acceptedDocuments: 0,
+        },
+        atomicity: null,
+        documentSelection: [],
+        selection: [],
+        classification: [],
+      },
+    });
+  }
+
   const sourceDirectory = yield* resolveSourceDirectory(options);
   const sourceLoads: Array<LoadedLiveSource> = [];
   const sourceLoader = makeLiveSourceLoader(sourceDirectory, sourceLoads);

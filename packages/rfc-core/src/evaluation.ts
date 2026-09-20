@@ -959,7 +959,9 @@ const sourceHashesFromBundle = (bundle: EvidenceBundle): ReadonlyArray<string> =
 
 const probabilitiesFromBundle = (bundle: EvidenceBundle): Readonly<Record<string, number>> =>
   Object.fromEntries([
-    ...probabilityEntries("atomicity", bundle.diagnostics.atomicity.probabilities),
+    ...(bundle.diagnostics.atomicity === null
+      ? []
+      : probabilityEntries("atomicity", bundle.diagnostics.atomicity.probabilities)),
     ...(bundle.diagnostics.documentSelection ?? []).flatMap((selection) =>
       probabilityEntries(`document.${selection.candidateId}`, {
         probability: selection.probability,
@@ -980,7 +982,7 @@ const probabilitiesFromBundle = (bundle: EvidenceBundle): Readonly<Record<string
 
 const confidenceFromBundle = (bundle: EvidenceBundle): number | null =>
   maximumConfidence([
-    bundle.diagnostics.atomicity.confidence,
+    bundle.diagnostics.atomicity?.confidence ?? null,
     ...bundle.diagnostics.classification.map((classification) => classification.confidence),
     ...bundle.evidence.map((passage) => passage.confidence),
   ]);

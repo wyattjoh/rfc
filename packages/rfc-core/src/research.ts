@@ -514,7 +514,7 @@ export const ResearchDiagnosticsSchema = Schema.Struct({
   retrieval: LiveRetrievalTraceSchema,
   currency: Schema.optionalKey(Schema.Union([RfcCurrencyReportSchema, Schema.Undefined])),
   candidates: DiscoveryCandidateCountsSchema,
-  atomicity: AtomicityDiagnosticSchema,
+  atomicity: Schema.NullOr(AtomicityDiagnosticSchema),
   documentSelection: Schema.optionalKey(
     Schema.Union([Schema.Array(SelectionDiagnosticSchema), Schema.Undefined]),
   ),

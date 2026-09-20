@@ -1207,6 +1207,7 @@ describe("createRfcClient", () => {
       }),
     );
     let sourceFetches = 0;
+    let modelCalls = 0;
     const client = await createRfcClient({
       cacheDirectory,
       datatrackerHttpClient: datatracker.client,
@@ -1220,7 +1221,13 @@ describe("createRfcClient", () => {
           text: sourceText,
         };
       },
-      decisionModel: makeDecisionModel(),
+      decisionModel: {
+        [DecisionModel.TypeId]: DecisionModel.TypeId,
+        decide: () => {
+          modelCalls += 1;
+          return Effect.die(new Error("TypeSafe must not run for empty discovery"));
+        },
+      } as DecisionModel.DecisionModel,
     });
     clients.push(client);
 
@@ -1232,6 +1239,11 @@ describe("createRfcClient", () => {
     });
 
     expect(result).toMatchObject({ status: "needs_review", rfc: null, evidence: [] });
+    expect(result.diagnostics).toMatchObject({
+      resolvedModels: [],
+      atomicity: null,
+      documentSelection: [],
+    });
     expect(result.diagnostics.retrieval).toMatchObject({
       datatrackerRequestCount: 2,
       upstreamRows: 0,
@@ -1241,6 +1253,7 @@ describe("createRfcClient", () => {
       selectedSources: 0,
       topicTruncated: false,
     });
+    expect(modelCalls).toBe(0);
     expect(sourceFetches).toBe(0);
     expect(await readdir(cacheDirectory)).toEqual([]);
 
