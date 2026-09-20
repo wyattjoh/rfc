@@ -620,6 +620,10 @@ type LoadedLiveSource = {
    * RFC Editor requests issued by this attempt, including rejected ones.
    */
   readonly attempts: number;
+  /**
+   * RFC Editor response status observed by a failed attempt, when one arrived.
+   */
+  readonly failureStatus: number | undefined;
 };
 
 const cacheOutcomeFor = (loads: ReadonlyArray<LoadedLiveSource>, identifier: string | undefined) =>
@@ -631,14 +635,17 @@ const cacheOutcomeFor = (loads: ReadonlyArray<LoadedLiveSource>, identifier: str
 const sourceRequestTraces = (loads: ReadonlyArray<LoadedLiveSource>) =>
   loads
     .filter(({ attempts }) => attempts > 0)
-    .map(({ document, durationMs, result, attempts }) => ({
-      kind: "source" as const,
-      url: makeRfcSourceUrl(defaultRfcEditorBaseUrl, document.rfcNumber),
-      attempts,
-      status: result?.status ?? null,
-      statuses: result?.status === undefined ? [] : [result.status],
-      durationMs,
-    }));
+    .map(({ document, durationMs, result, attempts, failureStatus }) => {
+      const status = result?.status ?? failureStatus;
+      return {
+        kind: "source" as const,
+        url: makeRfcSourceUrl(defaultRfcEditorBaseUrl, document.rfcNumber),
+        attempts,
+        status: status ?? null,
+        statuses: status === undefined ? [] : [status],
+        durationMs,
+      };
+    });
 
 /**
  * RFC Editor requests a failed source load is known to have issued.
@@ -651,6 +658,14 @@ const sourceRequestTraces = (loads: ReadonlyArray<LoadedLiveSource>) =>
  */
 const failedSourceAttempts = (error: unknown): number =>
   error instanceof RfcSourceCacheError && error.stage !== "write" ? 0 : 1;
+
+/**
+ * RFC Editor response status a failed source load observed, when one arrived.
+ */
+const failedSourceStatus = (error: unknown): number | undefined =>
+  error instanceof RfcSourceFetchError || error instanceof RfcSourceRevalidationError
+    ? error.status
+    : undefined;
 
 /**
  * Adapt request-local discovery metadata to the research input.
@@ -675,6 +690,7 @@ const makeLiveSourceLoader = (sourceDirectory: string, loads: Array<LoadedLiveSo
         result: undefined,
         durationMs,
         attempts: failedSourceAttempts(outcome.failure),
+        failureStatus: failedSourceStatus(outcome.failure),
       });
       return yield* outcome.failure;
     }
@@ -683,6 +699,7 @@ const makeLiveSourceLoader = (sourceDirectory: string, loads: Array<LoadedLiveSo
       result: outcome.success,
       durationMs,
       attempts: outcome.success.requestCount,
+      failureStatus: undefined,
     });
     return outcome.success.source;
   });

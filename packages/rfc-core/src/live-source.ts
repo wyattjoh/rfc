@@ -89,6 +89,10 @@ export class RfcSourceRevalidationError extends Schema.TaggedError<RfcSourceReva
   {
     url: Schema.String,
     reason: Schema.String,
+    /**
+     * RFC Editor response status, when one was received.
+     */
+    status: Schema.optionalKey(Schema.Number),
   },
 ) {}
 
@@ -166,6 +170,15 @@ const validEtag = (value: string): boolean => /^(?:W\/)?"[^"\r\n]*"$/.test(value
  * a weak one falls back to an unconditional fetch.
  */
 const isStrongEtag = (value: string): boolean => /^"[^"\r\n]*"$/.test(value);
+
+/**
+ * Whether a Content-Type names exactly the `text/plain` media type.
+ *
+ * Parameters such as `charset` are permitted after the media type; a different
+ * type that merely begins with the same characters is not.
+ */
+const isPlainTextMediaType = (value: string): boolean =>
+  value.split(";", 1)[0]?.trim().toLowerCase() === "text/plain";
 
 const maximumFreshnessMilliseconds = 365 * 24 * 60 * 60 * 1_000;
 
@@ -330,10 +343,13 @@ const fetchFromRfcEditor = (
         stage: "request",
         url,
         reason: `RFC Editor returned HTTP ${response.status}`,
+        status: response.status,
       });
     }
     const contentType = Option.getOrUndefined(Headers.get("content-type")(response.headers));
-    if (contentType === undefined || !contentType.toLowerCase().startsWith("text/plain")) {
+    // Only an exact text/plain media type qualifies; a prefix test would also
+    // admit unrelated types such as text/plain-html.
+    if (contentType === undefined || !isPlainTextMediaType(contentType)) {
       return yield* new RfcSourceFetchError({
         stage: "decode",
         url,
@@ -607,7 +623,10 @@ export const loadLiveRfcSource = Effect.fnUntraced(function* (
 > {
   const { corrupt, entry } = yield* readEntry(sourceDirectory, document);
   const now = yield* Clock.currentTimeMillis;
-  if (entry !== undefined && now < Date.parse(entry.freshUntil)) {
+  // A future fetchedAt cannot describe a response this client received, so the
+  // entry's freshness window is not trustworthy and must be revalidated.
+  const fetchedInThePast = entry !== undefined && Date.parse(entry.fetchedAt) <= now;
+  if (entry !== undefined && fetchedInThePast && now < Date.parse(entry.freshUntil)) {
     return { source: sourceFromEntry(entry), outcome: "hit", requestCount: 0, status: undefined };
   }
 
@@ -637,6 +656,7 @@ export const loadLiveRfcSource = Effect.fnUntraced(function* (
       return yield* new RfcSourceRevalidationError({
         url: makeRfcSourceUrl(defaultRfcEditorBaseUrl, document.rfcNumber),
         reason: responseResult.failure.reason,
+        status: responseResult.failure.status,
       });
     }
     return yield* responseResult.failure;
@@ -718,6 +738,7 @@ export const loadLiveRfcSource = Effect.fnUntraced(function* (
       ? new RfcSourceRevalidationError({
           url: response.sourceUrl,
           reason: nextResult.failure.reason,
+          status: response.status,
         })
       : nextResult.failure;
   }

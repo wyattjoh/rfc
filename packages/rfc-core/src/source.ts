@@ -67,6 +67,10 @@ export class RfcSourceFetchError extends Schema.TaggedError<RfcSourceFetchError>
     stage: Schema.Literals(["request", "decode"]),
     url: Schema.String,
     reason: Schema.String,
+    /**
+     * RFC Editor response status, when one was received.
+     */
+    status: Schema.optionalKey(Schema.Number),
   },
 ) {}
 

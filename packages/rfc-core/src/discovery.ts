@@ -518,14 +518,14 @@ const readBoundedJson = Effect.fnUntraced(function* (
     ),
   );
 
+  const bytes = Buffer.concat(
+    body.chunks.map((chunk) => Buffer.from(chunk)),
+    body.size,
+  );
   return yield* Effect.try({
-    try: () =>
-      JSON.parse(
-        Buffer.concat(
-          body.chunks.map((chunk) => Buffer.from(chunk)),
-          body.size,
-        ).toString("utf8"),
-      ),
+    // Titles and abstracts reach semantic selection verbatim, so malformed bytes
+    // must fail rather than be silently rewritten with U+FFFD.
+    try: () => JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)),
     catch: () =>
       new RfcDiscoveryError({
         stage: "decode",

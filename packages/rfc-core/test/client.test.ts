@@ -1517,6 +1517,238 @@ describe("createRfcClient", () => {
     await chmod(join(cacheDirectory, "sources", "v2"), 0o700);
   });
 
+  test("rejects Datatracker metadata that is not valid UTF-8", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    // Valid JSON framing carrying an undecodable byte inside the title.
+    const malformed = new Uint8Array([
+      ...new TextEncoder().encode('{"name":"rfc9110","rfc_number":9110,"title":"'),
+      0x80,
+      ...new TextEncoder().encode('","abstract":"a","stream":"/api/v1/name/streamname/ietf/"}'),
+    ]);
+    // Only the document response is malformed; relationships decode normally, so
+    // a lossy decode would let this request succeed.
+    const datatracker = HttpClient.make((request, url) =>
+      Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          url.pathname.endsWith("/document/rfc9110/")
+            ? new Response(malformed, {
+                status: 200,
+                headers: { "content-type": "application/json" },
+              })
+            : Response.json({
+                meta: { limit: 64, offset: 0, total_count: 0, next: null },
+                objects: [],
+              }),
+        ),
+      ),
+    );
+    const client = await createRfcClient({
+      cacheDirectory,
+      datatrackerHttpClient: datatracker,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      rfcSourceFetcher: async () => ({
+        sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+        text: sourceText,
+      }),
+      decisionModel: makeDecisionModel(),
+      now: () => 0,
+    });
+    clients.push(client);
+
+    await expect(
+      client.research({
+        schemaVersion: 2 as const,
+        question: "What must the client send?",
+        rfc: "RFC9110",
+        searchTerms: undefined,
+      }),
+    ).rejects.toMatchObject({ _tag: "RfcDiscoveryError", stage: "decode" });
+  });
+
+  test("revalidates a cache entry dated in the future", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    // Self-consistent and nominally fresh, but recorded ahead of the clock.
+    await seedLiveSourceCacheEntry(cacheDirectory, {
+      text: sourceText,
+      fetchedAt: new Date(600_000).toISOString(),
+      freshUntil: new Date(660_000).toISOString(),
+    });
+    const datatracker = makeDatatrackerHttpClient((url) =>
+      url.pathname.endsWith("/document/rfc9110/")
+        ? Response.json(datatrackerDocument)
+        : Response.json({
+            meta: { limit: 64, offset: 0, total_count: 0, next: null },
+            objects: [],
+          }),
+    );
+    let sourceRequests = 0;
+    const sourceHttp = HttpClient.make((request) => {
+      sourceRequests += 1;
+      return Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          new Response(sourceText, {
+            status: 200,
+            headers: {
+              etag: '"strong"',
+              "cache-control": "max-age=60",
+              "content-type": "text/plain; charset=utf-8",
+            },
+          }),
+        ),
+      );
+    });
+    const client = await createRfcClient({
+      cacheDirectory,
+      datatrackerHttpClient: datatracker.client,
+      rfcSourceHttpClient: sourceHttp,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      decisionModel: makeDecisionModel(),
+      now: () => 30_000,
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 2 as const,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+      searchTerms: undefined,
+    });
+
+    expect(result.diagnostics.retrieval?.sourceCacheOutcome).not.toBe("hit");
+    expect(sourceRequests).toBe(1);
+  });
+
+  test("rejects a source media type that merely begins with text/plain", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const datatracker = makeDatatrackerHttpClient((url) =>
+      url.pathname.endsWith("/document/rfc9110/")
+        ? Response.json(datatrackerDocument)
+        : Response.json({
+            meta: { limit: 64, offset: 0, total_count: 0, next: null },
+            objects: [],
+          }),
+    );
+    const sourceHttp = HttpClient.make((request) =>
+      Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          new Response(sourceText, {
+            status: 200,
+            headers: { "content-type": "text/plain-html" },
+          }),
+        ),
+      ),
+    );
+    const client = await createRfcClient({
+      cacheDirectory,
+      datatrackerHttpClient: datatracker.client,
+      rfcSourceHttpClient: sourceHttp,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      decisionModel: makeDecisionModel(),
+      now: () => 0,
+    });
+    clients.push(client);
+
+    await expect(
+      client.research({
+        schemaVersion: 2 as const,
+        question: "What must the client send?",
+        rfc: "RFC9110",
+        searchTerms: undefined,
+      }),
+    ).rejects.toMatchObject({
+      _tag: "RfcSourceFetchError",
+      stage: "decode",
+      reason: "RFC Editor returned a non-plain-text source",
+    });
+  });
+
+  test("preserves the HTTP status of a failed successor source request", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const documents = new Map([
+      ["rfc9110", datatrackerDocument],
+      [
+        "rfc9111",
+        {
+          ...datatrackerDocument,
+          name: "rfc9111",
+          rfc_number: 9111,
+          title: "HTTP Replacement",
+          resource_uri: "/api/v1/doc/document/rfc9111/",
+        },
+      ],
+    ]);
+    const datatracker = makeDatatrackerHttpClient((url) => {
+      const name = url.pathname.match(/\/document\/(rfc\d+)\/$/)?.[1];
+      if (name !== undefined) return Response.json(documents.get(name));
+      if (url.pathname.endsWith("/relateddocument/")) {
+        const target = url.searchParams.get("target__name");
+        return Response.json({
+          meta: { limit: 64, offset: 0, total_count: target === "rfc9110" ? 1 : 0, next: null },
+          objects:
+            target === "rfc9110"
+              ? [
+                  {
+                    source: "/api/v1/doc/document/rfc9111/",
+                    target: "/api/v1/doc/document/rfc9110/",
+                    relationship: "/api/v1/name/docrelationshipname/obs/",
+                  },
+                ]
+              : [],
+        });
+      }
+      return new Response("not found", { status: 404 });
+    });
+    const sourceHttp = HttpClient.make((request, url) =>
+      Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          url.pathname.endsWith("rfc9111.txt")
+            ? new Response("unavailable", { status: 503 })
+            : new Response(sourceText, {
+                status: 200,
+                headers: {
+                  "cache-control": "max-age=60",
+                  "content-type": "text/plain; charset=utf-8",
+                },
+              }),
+        ),
+      ),
+    );
+    const client = await createRfcClient({
+      cacheDirectory,
+      datatrackerHttpClient: datatracker.client,
+      rfcSourceHttpClient: sourceHttp,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      decisionModel: makeDecisionModel(),
+      now: () => 0,
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 2 as const,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+      searchTerms: undefined,
+    });
+
+    const failed = (result.diagnostics.retrieval?.requests ?? []).find(
+      (request) => request.kind === "source" && request.url.endsWith("rfc9111.txt"),
+    );
+    expect(failed?.status).toBe(503);
+    expect(failed?.statuses).toEqual([503]);
+  });
+
   test("fails closed when stale RFC text cannot be revalidated", async () => {
     const cacheDirectory = await makeCacheDirectory();
     let now = 0;
