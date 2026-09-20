@@ -9,6 +9,7 @@ import {
   createRfcClient,
   hashRfcSource,
   makeEvaluationReport,
+  RfcDiscoveryError,
 } from "@wyattjoh/rfc-core";
 import { automaticAnswerActivationFor, type RfcCliConfig } from "../src/config";
 import type { CredentialStore } from "../src/credentials";
@@ -926,6 +927,43 @@ describe("rfc process protocol", () => {
       error: {
         code: "invalid_input",
         message: "Citation input must use schema version 2",
+      },
+    });
+  });
+
+  test("returns a typed error envelope when live citation metadata fails", async () => {
+    const createClient = (async () => ({
+      verifyCitation: async () => {
+        throw new RfcDiscoveryError({
+          stage: "request",
+          url: "https://datatracker.example/api/v1/doc/document/rfc9110/",
+          reason: "upstream unavailable",
+          attempts: 3,
+        });
+      },
+      close: async () => undefined,
+    })) as unknown as RfcCliDependencies["createClient"];
+    const result = await runCli(
+      ["verify-citation"],
+      JSON.stringify({
+        schemaVersion: 2,
+        rfc: "RFC9110",
+        claim: "The client sends a request.",
+        quote: "The client MUST send a request.",
+      }),
+      makeFixtureCredentialStore(),
+      createClient,
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(JSON.parse(result.stderr)).toEqual({
+      schemaVersion: 2,
+      kind: "error",
+      error: {
+        code: "discovery_failed",
+        message:
+          "Unable to retrieve live RFC metadata from https://datatracker.example/api/v1/doc/document/rfc9110/: upstream unavailable",
       },
     });
   });

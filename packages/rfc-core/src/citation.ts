@@ -2,18 +2,20 @@ import { Cause, Clock, Duration, Effect, FileSystem, Path, Ref, Result, Schema }
 import * as AiError from "effect/unstable/ai/AiError";
 import * as Decision from "effect/unstable/ai/Decision";
 import * as DecisionModel from "effect/unstable/ai/DecisionModel";
-import type { CatalogDocument, RfcCatalog } from "./catalog";
-import { LiveRetrievalTraceSchema, RfcDocumentSchema, type LiveRetrievalTrace } from "./discovery";
+import {
+  LiveRetrievalTraceSchema,
+  RfcDocumentSchema,
+  type LiveRetrievalTrace,
+  type RfcMetadata,
+} from "./discovery";
 import { LiveRfcSource, RfcSourceRevalidationError } from "./live-source";
 import { makeUtf8OffsetMap, utf8OffsetUnit } from "./offsets";
 import {
   DecisionModelError,
   ResolvedModelName,
   ResolvedModelNames,
-  RfcNotFoundError,
   parseSourceBlocks,
   summarizeResolvedModels,
-  resolveKnownRfc,
 } from "./research";
 import {
   RfcSourceCacheError,
@@ -229,9 +231,9 @@ export class CitationOffsetMismatchError extends Schema.TaggedError<CitationOffs
  */
 export interface CitationVerificationOptions {
   /**
-   * Fresh published RFC metadata.
+   * Exact published RFC metadata retrieved for this request.
    */
-  readonly catalog: RfcCatalog;
+  readonly document: RfcMetadata;
   /**
    * Source cache directory.
    */
@@ -241,7 +243,7 @@ export interface CitationVerificationOptions {
    */
   readonly sourceLoader?:
     | ((
-        document: CatalogDocument,
+        document: RfcMetadata,
       ) => Effect.Effect<
         RfcSource | { readonly source: RfcSource; readonly retrieval: LiveRetrievalTrace },
         RfcSourceCacheError | RfcSourceFetchError | RfcSourceRevalidationError,
@@ -505,7 +507,7 @@ const usageValue = (value: number | undefined): number | null => value ?? null;
 
 interface CitationResultInput {
   readonly request: CitationVerificationRequest;
-  readonly document: CatalogDocument;
+  readonly document: RfcMetadata;
   readonly source: RfcSource;
   readonly retrieval: LiveRetrievalTrace | undefined;
   readonly modelAlias: string;
@@ -590,7 +592,7 @@ const resultFrom = ({
  * to a model.
  *
  * @param request Decoded claim, RFC identifier, quotation, and optional UTF-8 byte offset.
- * @param options Catalog, source cache, provider, and timing configuration.
+ * @param options Live RFC metadata, source cache, provider, and timing configuration.
  * @returns A versioned citation verdict with exact source provenance.
  */
 export const verifyCitation = Effect.fnUntraced(function* (
@@ -603,8 +605,7 @@ export const verifyCitation = Effect.fnUntraced(function* (
   | RfcSourceCacheError
   | RfcSourceFetchError
   | RfcSourceRevalidationError
-  | DecisionModelError
-  | RfcNotFoundError,
+  | DecisionModelError,
   | FileSystem.FileSystem
   | RfcSourceStore
   | RfcSourceServiceTag
@@ -616,11 +617,7 @@ export const verifyCitation = Effect.fnUntraced(function* (
 > {
   const resolvedModelRef = yield* ResolvedModelName;
   const resolvedModelsRef = yield* ResolvedModelNames;
-  const document = yield* Effect.try({
-    try: () => resolveKnownRfc(options.catalog, request.rfc),
-    catch: (error) =>
-      error instanceof RfcNotFoundError ? error : new RfcNotFoundError({ rfc: request.rfc }),
-  });
+  const document = options.document;
   const sourceStarted = yield* Clock.currentTimeMillis;
   const loadedSource = yield* options.sourceLoader === undefined
     ? loadRfcSource(document, options.sourceDirectory)

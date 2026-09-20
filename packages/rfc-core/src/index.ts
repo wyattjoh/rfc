@@ -998,10 +998,8 @@ const citationProgram = (options: RfcClientOptions, request: CitationVerificatio
     const sourceDirectory = yield* resolveSourceDirectory(options);
     const sourceLoads: Array<LoadedLiveSource> = [];
     const loadSource = makeLiveSourceLoader(sourceDirectory, sourceLoads);
-    const now = yield* Clock.currentTimeMillis;
-    const requestLocalDocuments = requestLocalMetadata([lookup.document], now);
     return yield* verifyCitation(request, {
-      catalog: requestLocalDocuments,
+      document: lookup.document,
       sourceDirectory,
       sourceLoader: (document) =>
         Effect.gen(function* () {

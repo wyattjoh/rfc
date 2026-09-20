@@ -12,7 +12,6 @@ import {
   CitationQuoteAmbiguousError,
   CitationVerificationResultSchema,
   citationPolicy,
-  RfcDiscoveryError,
   createRfcClient as createCoreRfcClient,
   hashRfcSource,
   type RfcClient,
@@ -268,6 +267,12 @@ describe("citation verification", () => {
     ]);
     expect(calls).toHaveLength(1);
     expect(CitationVerificationResultSchema.make(result)).toEqual(result);
+    expect(await Bun.file(join(cacheDirectory, "catalog.json")).exists()).toBe(false);
+    const persistedSource = await Bun.file(
+      join(cacheDirectory, "sources", "v2", "RFC9110.json"),
+    ).text();
+    expect(persistedSource).not.toContain(result.claim);
+    expect(persistedSource).not.toContain(catalogDocument.title);
   });
 
   test("keeps resolved model diagnostics local to each citation operation", async () => {
@@ -398,16 +403,59 @@ describe("citation verification", () => {
     expect(result.provenance.endOffset).toBeNull();
     expect(result.diagnostics.usage).toEqual({ inputTokens: null, outputTokens: null });
     expect(calls).toHaveLength(0);
+  });
 
-    await expect(
-      client.verifyCitation({
-        schemaVersion: 2,
-        rfc: "RFC9999",
-        claim: "The server caches requests.",
-        quote: "The server MUST cache requests.",
-        offset: null,
-      }),
-    ).rejects.toBeInstanceOf(RfcDiscoveryError);
+  test("fails closed on missing, malformed, and unavailable live RFC metadata", async () => {
+    const metadataResponses = [
+      new Response("not found", { status: 404 }),
+      Response.json({ name: "rfc9110" }),
+      new Response("unavailable", { status: 503 }),
+    ];
+    const expectedFailures = [
+      { stage: "request", attempts: 1 },
+      { stage: "decode", attempts: 1 },
+      { stage: "request", attempts: 3 },
+    ];
+    let sourceCalls = 0;
+
+    for (const [index, response] of metadataResponses.entries()) {
+      const cacheDirectory = await makeCacheDirectory();
+      const legacyCatalog = JSON.stringify({ documents: [catalogDocument] });
+      await Bun.write(join(cacheDirectory, "catalog.json"), legacyCatalog);
+      const client = await createRfcClient({
+        cacheDirectory,
+        modelAlias: "jev-test",
+        typeSafeApiKey: undefined,
+        typeSafeApiUrl: undefined,
+        metadataSource: async () => [catalogDocument],
+        datatrackerHttpClient: HttpClient.make((request) =>
+          Effect.succeed(HttpClientResponse.fromWeb(request, response.clone())),
+        ),
+        rfcSourceFetcher: async () => {
+          sourceCalls += 1;
+          return makeSourceFetcher(sourceText)(catalogDocument);
+        },
+        decisionModel: makeDecisionModel([]),
+        now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+      });
+      clients.push(client);
+
+      await expect(
+        client.verifyCitation({
+          schemaVersion: 2,
+          rfc: "RFC9110",
+          claim: "The server caches requests.",
+          quote: "The server MUST cache requests.",
+          offset: null,
+        }),
+      ).rejects.toMatchObject({
+        _tag: "RfcDiscoveryError",
+        ...expectedFailures[index],
+      });
+      expect(await Bun.file(join(cacheDirectory, "catalog.json")).text()).toBe(legacyCatalog);
+    }
+
+    expect(sourceCalls).toBe(0);
   });
 
   test("requires an offset for duplicate quotations and rejects mismatches", async () => {
