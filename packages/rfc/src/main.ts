@@ -51,6 +51,13 @@ export interface RfcCliDependencies {
    * Write one already-rendered value to standard error.
    */
   readonly writeStderr: (value: string) => void;
+  /**
+   * Construct the RFC client for one command invocation.
+   *
+   * Process-protocol tests substitute a stub here so they can assert decoding,
+   * rendering, and exit status without reproducing retrieval internals.
+   */
+  readonly createClient: typeof createRfcClient;
 }
 
 const format = Flag.Literals("format", ["json", "human"] as const).pipe(
@@ -183,6 +190,7 @@ export const makeDefaultCliDependencies = (): RfcCliDependencies => ({
   promptCredential: readMaskedCredential,
   writeStdout: (value) => process.stdout.write(value),
   writeStderr: (value) => process.stderr.write(value),
+  createClient: createRfcClient,
 });
 
 const credentialErrorEnvelope = (error: unknown): object | undefined => {
@@ -342,7 +350,7 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
 
       const client = yield* Effect.tryPromise({
         try: () =>
-          createRfcClient({
+          dependencies.createClient({
             cacheDirectory: flags.cacheDirectory,
             datatrackerApiUrl: Option.getOrUndefined(flags.datatrackerApiUrl),
             modelAlias: cliConfig.modelAlias,
@@ -447,7 +455,7 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
 
       const client = yield* Effect.tryPromise({
         try: () =>
-          createRfcClient({
+          dependencies.createClient({
             cacheDirectory: flags.cacheDirectory,
             datatrackerApiUrl: Option.getOrUndefined(flags.datatrackerApiUrl),
             modelAlias: cliConfig.modelAlias,

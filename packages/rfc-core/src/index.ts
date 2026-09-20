@@ -12,6 +12,7 @@ import {
   Path,
   Redacted,
   Ref,
+  Result,
   Schema,
 } from "effect";
 import * as DecisionModel from "effect/unstable/ai/DecisionModel";
@@ -608,35 +609,67 @@ const resolveSourceDirectory = Effect.fnUntraced(function* (options: RfcClientOp
 
 type LoadedLiveSource = {
   readonly document: import("./catalog").CatalogDocument;
-  readonly result: LiveRfcSourceResult;
+  /**
+   * Successful load, or undefined when the attempt failed.
+   */
+  readonly result: LiveRfcSourceResult | undefined;
   readonly durationMs: number;
+  /**
+   * RFC Editor requests issued by this attempt, including rejected ones.
+   */
+  readonly attempts: number;
 };
 
 const cacheOutcomeFor = (loads: ReadonlyArray<LoadedLiveSource>, identifier: string | undefined) =>
   (identifier === undefined
-    ? loads[0]?.result.outcome
-    : loads.find(({ document }) => document.identifier === identifier)?.result.outcome) ??
+    ? loads[0]?.result?.outcome
+    : loads.find(({ document }) => document.identifier === identifier)?.result?.outcome) ??
   "not_requested";
 
 const sourceRequestTraces = (loads: ReadonlyArray<LoadedLiveSource>) =>
   loads
-    .filter(({ result }) => result.requestCount > 0)
-    .map(({ document, durationMs, result }) => ({
+    .filter(({ attempts }) => attempts > 0)
+    .map(({ document, durationMs, result, attempts }) => ({
       kind: "source" as const,
       url: makeRfcSourceUrl(defaultRfcEditorBaseUrl, document.rfcNumber),
-      attempts: result.requestCount,
-      status: result.status ?? null,
-      statuses: result.status === undefined ? [] : [result.status],
+      attempts,
+      status: result?.status ?? null,
+      statuses: result?.status === undefined ? [] : [result.status],
       durationMs,
     }));
+
+/**
+ * RFC Editor requests a failed source load is known to have issued.
+ *
+ * A cache failure never reaches the network, while fetch and revalidation
+ * failures each represent at least one upstream attempt.
+ */
+const failedSourceAttempts = (error: unknown): number =>
+  error instanceof RfcSourceCacheError ? 0 : 1;
 
 const makeLiveSourceLoader = (sourceDirectory: string, loads: Array<LoadedLiveSource>) =>
   Effect.fnUntraced(function* (document: import("./catalog").CatalogDocument) {
     const startedAt = yield* Clock.currentTimeMillis;
-    const result = yield* loadLiveRfcSource(document, sourceDirectory);
+    const outcome = yield* Effect.result(loadLiveRfcSource(document, sourceDirectory));
     const finishedAt = yield* Clock.currentTimeMillis;
-    loads.push({ document, result, durationMs: Math.max(0, finishedAt - startedAt) });
-    return result.source;
+    const durationMs = Math.max(0, finishedAt - startedAt);
+    if (Result.isFailure(outcome)) {
+      // A partial result must still account for the attempt it made.
+      loads.push({
+        document,
+        result: undefined,
+        durationMs,
+        attempts: failedSourceAttempts(outcome.failure),
+      });
+      return yield* outcome.failure;
+    }
+    loads.push({
+      document,
+      result: outcome.success,
+      durationMs,
+      attempts: outcome.success.requestCount,
+    });
+    return outcome.success.source;
   });
 
 const mapInternalResearchDiagnostics = (
@@ -702,10 +735,7 @@ const liveKnownResearchProgram = Effect.fnUntraced(function* (
     catalogMs: lookup.metadataMs,
     startedAt,
   });
-  const sourceRequestCount = sourceLoads.reduce(
-    (count, load) => count + load.result.requestCount,
-    0,
-  );
+  const sourceRequestCount = sourceLoads.reduce((count, load) => count + load.attempts, 0);
   const datatrackerRequestCount = lookup.requests.reduce(
     (count, trace) => count + trace.attempts,
     0,
@@ -785,10 +815,7 @@ const liveTopicResearchProgram = Effect.fnUntraced(function* (
     catalogMs: discovered.metadataMs,
     startedAt,
   });
-  const sourceRequestCount = sourceLoads.reduce(
-    (count, load) => count + load.result.requestCount,
-    0,
-  );
+  const sourceRequestCount = sourceLoads.reduce((count, load) => count + load.attempts, 0);
   const datatrackerRequestCount = discovered.requests.reduce(
     (count, trace) => count + trace.attempts,
     0,
@@ -858,12 +885,9 @@ const citationProgram = (options: RfcClientOptions, request: CitationVerificatio
               schemaVersion: 2,
               requestCount:
                 datatrackerRequestCount +
-                sourceLoads.reduce((total, load) => total + load.result.requestCount, 0),
+                sourceLoads.reduce((total, load) => total + load.attempts, 0),
               datatrackerRequestCount,
-              sourceRequestCount: sourceLoads.reduce(
-                (total, load) => total + load.result.requestCount,
-                0,
-              ),
+              sourceRequestCount: sourceLoads.reduce((total, load) => total + load.attempts, 0),
               metadataMs: lookup.metadataMs,
               sourceMs,
               sourceCacheOutcome: cacheOutcomeFor(sourceLoads, document.identifier),

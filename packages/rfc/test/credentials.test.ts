@@ -50,6 +50,10 @@ const runAuth = async (
   let stderr = "";
   const exitCode = await run(args, {
     credentialStore,
+    // Auth commands never construct a client; fail loudly if that changes.
+    createClient: () => {
+      throw new Error("auth commands must not construct an RFC client");
+    },
     readStandardInput: async () => input ?? "",
     promptCredential,
     writeStdout: (value) => {

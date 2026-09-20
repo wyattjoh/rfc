@@ -1052,6 +1052,145 @@ describe("createRfcClient", () => {
     expect(sourceRequests).toBe(2);
   });
 
+  test("rejects RFC source text that is not valid UTF-8", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const datatracker = makeDatatrackerHttpClient((url) =>
+      url.pathname.endsWith("/document/rfc9110/")
+        ? Response.json(datatrackerDocument)
+        : Response.json({
+            meta: { limit: 64, offset: 0, total_count: 0, next: null },
+            objects: [],
+          }),
+    );
+    // A lone continuation byte is not decodable UTF-8.
+    const invalid = new Uint8Array([0x31, 0x2e, 0x20, 0x80, 0x0a]);
+    const sourceHttp = HttpClient.make((request) =>
+      Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          new Response(invalid, {
+            status: 200,
+            headers: {
+              "cache-control": "max-age=60",
+              "content-type": "text/plain; charset=utf-8",
+            },
+          }),
+        ),
+      ),
+    );
+    const client = await createRfcClient({
+      cacheDirectory,
+      datatrackerHttpClient: datatracker.client,
+      rfcSourceHttpClient: sourceHttp,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      decisionModel: makeDecisionModel(),
+      now: () => 0,
+    });
+    clients.push(client);
+
+    await expect(
+      client.research({
+        schemaVersion: 2 as const,
+        question: "What must the client send?",
+        rfc: "RFC9110",
+        searchTerms: undefined,
+      }),
+    ).rejects.toMatchObject({
+      _tag: "RfcSourceFetchError",
+      stage: "decode",
+      reason: "RFC Editor source is not valid UTF-8",
+    });
+    // Nothing decodable was produced, so nothing may be stored.
+    expect(await Bun.file(join(cacheDirectory, "sources", "v2", "RFC9110.json")).exists()).toBe(
+      false,
+    );
+  });
+
+  test("reports a failed current-context source attempt in the retrieval trace", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const documents = new Map([
+      ["rfc9110", datatrackerDocument],
+      [
+        "rfc9111",
+        {
+          ...datatrackerDocument,
+          name: "rfc9111",
+          rfc_number: 9111,
+          title: "HTTP Replacement",
+          resource_uri: "/api/v1/doc/document/rfc9111/",
+        },
+      ],
+    ]);
+    const datatracker = makeDatatrackerHttpClient((url) => {
+      const name = url.pathname.match(/\/document\/(rfc\d+)\/$/)?.[1];
+      if (name !== undefined) return Response.json(documents.get(name));
+      if (url.pathname.endsWith("/relateddocument/")) {
+        const target = url.searchParams.get("target__name");
+        return Response.json({
+          meta: { limit: 64, offset: 0, total_count: target === "rfc9110" ? 1 : 0, next: null },
+          objects:
+            target === "rfc9110"
+              ? [
+                  {
+                    source: "/api/v1/doc/document/rfc9111/",
+                    target: "/api/v1/doc/document/rfc9110/",
+                    relationship: "/api/v1/name/docrelationshipname/obs/",
+                  },
+                ]
+              : [],
+        });
+      }
+      return new Response("not found", { status: 404 });
+    });
+    // The requested RFC resolves; only its successor's source is unavailable.
+    const sourceHttp = HttpClient.make((request, url) =>
+      Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          url.pathname.endsWith("rfc9111.txt")
+            ? new Response("unavailable", { status: 503 })
+            : new Response(sourceText, {
+                status: 200,
+                headers: {
+                  "cache-control": "max-age=60",
+                  "content-type": "text/plain; charset=utf-8",
+                },
+              }),
+        ),
+      ),
+    );
+    const client = await createRfcClient({
+      cacheDirectory,
+      datatrackerHttpClient: datatracker.client,
+      rfcSourceHttpClient: sourceHttp,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      decisionModel: makeDecisionModel(),
+      now: () => 0,
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 2 as const,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+      searchTerms: undefined,
+    });
+
+    const sourceRequests = (result.diagnostics.retrieval?.requests ?? []).filter(
+      (request) => request.kind === "source",
+    );
+    expect(sourceRequests.map((request) => request.url)).toContain(
+      "https://www.rfc-editor.org/rfc/rfc9111.txt",
+    );
+    const failed = sourceRequests.find((request) => request.url.endsWith("rfc9111.txt"));
+    expect(failed?.attempts).toBeGreaterThan(0);
+    expect(failed?.durationMs).toBeGreaterThanOrEqual(0);
+  });
+
   test("fails closed when stale RFC text cannot be revalidated", async () => {
     const cacheDirectory = await makeCacheDirectory();
     let now = 0;

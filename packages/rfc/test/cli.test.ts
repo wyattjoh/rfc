@@ -6,12 +6,13 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
   evaluationCorpus,
   evaluationSchemaVersion,
+  createRfcClient,
   hashRfcSource,
   makeEvaluationReport,
 } from "@wyattjoh/rfc-core";
 import { automaticAnswerActivationFor, type RfcCliConfig } from "../src/config";
 import type { CredentialStore } from "../src/credentials";
-import { run } from "../src/main";
+import { run, type RfcCliDependencies } from "../src/main";
 
 const servers: Array<ReturnType<typeof Bun.serve>> = [];
 
@@ -37,11 +38,13 @@ const runCli = async (
   args: Array<string>,
   input: string | undefined = undefined,
   credentialStore: CredentialStore = makeFixtureCredentialStore(),
+  createClient: RfcCliDependencies["createClient"] = createRfcClient,
 ): Promise<{ readonly exitCode: number; readonly stdout: string; readonly stderr: string }> => {
   let stdout = "";
   let stderr = "";
   const exitCode = await run(args, {
     credentialStore,
+    createClient,
     readStandardInput: async () => input ?? "",
     promptCredential: async () => "fixture-key",
     writeStdout: (value) => {
@@ -168,6 +171,35 @@ const writeUnattestedCalibrationReport = async (path: string): Promise<void> => 
   );
 };
 
+const stubEvidenceBundle = {
+  schemaVersion: 2,
+  kind: "evidence_bundle",
+  status: "answered",
+  question: "What must the client send?",
+  rfc: { identifier: "RFC9110", rfcNumber: 9110, title: "HTTP Semantics" },
+  evidence: [],
+  contexts: [],
+  issues: [],
+  diagnostics: { schemaVersion: 2 },
+};
+
+const makeStubClientFactory = (
+  requests: Array<unknown>,
+  onClose: () => void,
+): RfcCliDependencies["createClient"] =>
+  (async () => ({
+    research: async (request: unknown) => {
+      requests.push(request);
+      return stubEvidenceBundle;
+    },
+    verifyCitation: async () => {
+      throw new Error("citation verification is not exercised by this test");
+    },
+    close: async () => {
+      onClose();
+    },
+  })) as unknown as RfcCliDependencies["createClient"];
+
 afterEach(() => {
   for (const server of servers.splice(0)) {
     server.stop(true);
@@ -183,135 +215,48 @@ describe("rfc process protocol", () => {
   });
 
   test("accepts version 2 known-RFC JSON and convenience input", async () => {
-    const cacheDirectory = await mkdtemp(join(tmpdir(), "rfc-cli-live-research-test-"));
-    const sourceText =
-      "1. Requirements\n\nThe client MUST send a request containing the target resource.\n";
-    const fetchedAt = new Date().toISOString();
-    const sourceHash = hashRfcSource(sourceText);
-    await mkdir(join(cacheDirectory, "sources"), { recursive: true });
-    await writeFile(
-      join(cacheDirectory, "sources", `${sourceHash}.json`),
-      JSON.stringify({
-        schemaVersion: 1,
-        kind: "rfc_source_content",
-        contentHash: sourceHash,
-        text: sourceText,
-      }),
-    );
-    await writeFile(
-      join(cacheDirectory, "sources", "RFC9110.json"),
-      JSON.stringify({
-        schemaVersion: 1,
-        kind: "rfc_source_index",
-        identifier: "RFC9110",
-        rfcNumber: 9110,
-        sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
-        contentHash: sourceHash,
-        fetchedAt,
-      }),
-    );
-    await writeLiveSourceCache(cacheDirectory, sourceText, fetchedAt);
-
-    const datatrackerUrls: Array<string> = [];
-    let modelCalls = 0;
-    const server = Bun.serve({
-      port: 0,
-      fetch(request) {
-        const url = new URL(request.url);
-        if (url.pathname.endsWith("/document/rfc9110/")) {
-          datatrackerUrls.push(url.toString());
-          return Response.json({
-            name: "rfc9110",
-            rfc_number: 9110,
-            title: "HTTP Semantics",
-            abstract: "HTTP semantics.",
-            resource_uri: "/api/v1/doc/document/rfc9110/",
-            stream: "/api/v1/name/streamname/ietf/",
-            states: [],
-          });
-        }
-        if (url.pathname.endsWith("/relateddocument/")) {
-          datatrackerUrls.push(url.toString());
-          return Response.json({
-            meta: { limit: 64, offset: 0, total_count: 0, next: null, previous: null },
-            objects: [],
-          });
-        }
-        if (url.pathname === "/systemone") {
-          modelCalls += 1;
-          const answers = Object.fromEntries([
-            [
-              "question_atomicity",
-              {
-                type: "choice",
-                choice: "atomic",
-                probabilities: { atomic: 0.99, compound: 0.01 },
-                confidence: 0.99,
-              },
-            ],
-            ...Array.from({ length: 8 }, (_, index) => [
-              `passage_${index}`,
-              modelCalls % 2 === 1
-                ? { type: "noul", noul: 0.99 }
-                : {
-                    type: "choice",
-                    choice: "direct_answer",
-                    probabilities: {
-                      direct_answer: 0.99,
-                      partial_answer: 0.005,
-                      background_only: 0.001,
-                      contradictory: 0.001,
-                      irrelevant: 0.003,
-                    },
-                    confidence: 0.99,
-                  },
-            ]),
-          ]);
-          return Response.json({
-            model: "jev-1.13.0",
-            answers,
-            usage: { input_tokens: 10, output_tokens: 6 },
-          });
-        }
-        return new Response("not found", { status: 404 });
-      },
+    const requests: Array<unknown> = [];
+    let closed = 0;
+    const createClient = makeStubClientFactory(requests, () => {
+      closed += 1;
     });
-    servers.push(server);
-    const commonArgs = [
-      "research",
-      "--cache-directory",
-      cacheDirectory,
-      "--datatracker-api-url",
-      `${server.url}api/v1/`,
-      "--typesafe-api-url",
-      server.url.toString(),
-    ];
 
     const canonical = await runCli(
-      [...commonArgs, "--question", "ignored", "--rfc", "RFC9999"],
+      ["research", "--question", "ignored", "--rfc", "RFC9999"],
       JSON.stringify({
         schemaVersion: 2,
         question: "What must the client send?",
         rfc: "RFC9110",
       }),
+      makeFixtureCredentialStore(),
+      createClient,
     );
-    const convenience = await runCli([
-      ...commonArgs,
-      "--question",
-      "What must the client send?",
-      "--rfc",
-      "RFC9110",
-    ]);
+    const convenience = await runCli(
+      ["research", "--question", "What must the client send?", "--rfc", "RFC9110"],
+      undefined,
+      makeFixtureCredentialStore(),
+      createClient,
+    );
+    const human = await runCli(
+      [
+        "research",
+        "--question",
+        "What must the client send?",
+        "--rfc",
+        "RFC9110",
+        "--format",
+        "human",
+      ],
+      undefined,
+      makeFixtureCredentialStore(),
+      createClient,
+    );
 
     expect(canonical.exitCode).toBe(0);
     expect(canonical.stderr).toBe("");
     expect(JSON.parse(canonical.stdout)).toMatchObject({
       schemaVersion: 2,
       rfc: { identifier: "RFC9110" },
-      diagnostics: {
-        schemaVersion: 2,
-        retrieval: { sourceCacheOutcome: "hit", sourceRequestCount: 0 },
-      },
     });
     expect(convenience.exitCode).toBe(0);
     expect(convenience.stderr).toBe("");
@@ -319,9 +264,21 @@ describe("rfc process protocol", () => {
       schemaVersion: 2,
       rfc: { identifier: "RFC9110" },
     });
-    expect(datatrackerUrls).toHaveLength(4);
-    expect(datatrackerUrls.every((url) => url.includes("rfc9110"))).toBe(true);
-    expect(await Bun.file(join(cacheDirectory, "catalog.json")).exists()).toBe(false);
+    expect(human.exitCode).toBe(0);
+    expect(human.stdout).toContain("RFC9110");
+    expect(human.stdout.trimStart().startsWith("{")).toBe(false);
+
+    // Standard input outranks the convenience flags.
+    expect(requests.map((request) => (request as { readonly rfc: string }).rfc)).toEqual([
+      "RFC9110",
+      "RFC9110",
+      "RFC9110",
+    ]);
+    expect(
+      (requests[0] as { readonly question: string; readonly schemaVersion: number }).question,
+    ).toBe("What must the client send?");
+    expect((requests[0] as { readonly schemaVersion: number }).schemaVersion).toBe(2);
+    expect(closed).toBe(3);
   });
 
   test("routes repeatable topic terms through bounded live discovery", async () => {

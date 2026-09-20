@@ -262,10 +262,21 @@ const readBoundedSourceText = Effect.fnUntraced(function* (
       reason: "RFC Editor returned an empty source",
     });
   }
-  return Buffer.concat(
+  const bytes = Buffer.concat(
     body.chunks.map((chunk) => Buffer.from(chunk)),
     body.size,
-  ).toString("utf8");
+  );
+  // Exact evidence depends on the decoded text matching the transmitted bytes,
+  // so malformed input must fail rather than be silently replaced with U+FFFD.
+  return yield* Effect.try({
+    try: () => new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+    catch: () =>
+      new RfcSourceFetchError({
+        stage: "decode",
+        url,
+        reason: "RFC Editor source is not valid UTF-8",
+      }),
+  });
 });
 
 const fetchFromRfcEditor = (
