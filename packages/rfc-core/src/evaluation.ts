@@ -986,7 +986,7 @@ const confidenceFromBundle = (bundle: EvidenceBundle): number | null =>
   ]);
 
 const timingsFromBundle = (bundle: EvidenceBundle): EvaluationTimings => ({
-  catalogMs: bundle.diagnostics.timings.catalogMs,
+  catalogMs: bundle.diagnostics.timings.metadataMs,
   documentMs: bundle.diagnostics.timings.documentMs ?? null,
   sourceMs: bundle.diagnostics.timings.sourceMs,
   lexicalMs: bundle.diagnostics.timings.lexicalMs,

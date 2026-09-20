@@ -258,7 +258,7 @@ const decodeCitationRequest = (input: unknown) => {
   try {
     return decodeCitationVerificationRequest(input);
   } catch {
-    throw new InvalidInputError({ reason: "Citation input must use schema version 1" });
+    throw new InvalidInputError({ reason: "Citation input must use schema version 2" });
   }
 };
 
@@ -318,7 +318,7 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
                 });
               }
               return decodeCitationRequest({
-                schemaVersion: 1,
+                schemaVersion: 2,
                 rfc: flags.rfc.value,
                 claim: flags.claim.value,
                 quote: flags.quote.value,

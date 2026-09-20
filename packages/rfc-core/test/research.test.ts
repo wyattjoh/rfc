@@ -1811,7 +1811,7 @@ describe("known RFC research", () => {
 
     expect(result.status).toBe("answered");
     expect(refreshes).toBe(1);
-    expect(result.diagnostics.catalog).toBeUndefined();
+    expect("catalog" in result.diagnostics).toBe(false);
   });
 
   test("fetches RFC Editor plain text through the dedicated source HTTP client", async () => {
@@ -1882,6 +1882,37 @@ describe("known RFC research", () => {
     ).rejects.toMatchObject({
       _tag: "RfcSourceFetchError",
       reason: "RFC Editor returned HTTP 201",
+    });
+  });
+
+  test("rejects an RFC Editor source without a plain-text Content-Type", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const sourceHttpClient = HttpClient.make((request) =>
+      Effect.succeed(
+        HttpClientResponse.fromWeb(request, new Response(new TextEncoder().encode(sourceText))),
+      ),
+    );
+    const client = await createRfcClient({
+      cacheDirectory,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      metadataSource: async () => [catalogDocument],
+      decisionModel: makeDecisionModel([]),
+      rfcSourceHttpClient: sourceHttpClient,
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    await expect(
+      client.research({
+        schemaVersion: 2,
+        question: "What must the client send?",
+        rfc: "9110",
+      }),
+    ).rejects.toMatchObject({
+      _tag: "RfcSourceFetchError",
+      reason: "RFC Editor returned a non-plain-text source",
     });
   });
 
@@ -2337,7 +2368,7 @@ describe("known RFC research", () => {
     expect(result.status).toBe("answered");
     expect(documentBatchSizes).toEqual([20]);
     expect(result.diagnostics.candidates).toMatchObject({
-      catalogDocuments: 20,
+      discoveredDocuments: 20,
       documentCandidates: 20,
       acceptedDocuments: 1,
     });

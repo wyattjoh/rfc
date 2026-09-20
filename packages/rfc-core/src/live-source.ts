@@ -285,7 +285,7 @@ const fetchFromRfcEditor = (
       });
     }
     const contentType = Option.getOrUndefined(Headers.get("content-type")(response.headers));
-    if (contentType !== undefined && !contentType.toLowerCase().startsWith("text/plain")) {
+    if (contentType === undefined || !contentType.toLowerCase().startsWith("text/plain")) {
       return yield* new RfcSourceFetchError({
         stage: "decode",
         url,

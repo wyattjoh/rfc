@@ -14,7 +14,7 @@ import {
 import * as AiError from "effect/unstable/ai/AiError";
 import * as Decision from "effect/unstable/ai/Decision";
 import * as DecisionModel from "effect/unstable/ai/DecisionModel";
-import { LiveRetrievalTraceSchema } from "./discovery";
+import { LiveRetrievalTraceSchema, RfcDocumentSchema } from "./discovery";
 import { LiveRfcSource, RfcSourceRevalidationError } from "./live-source";
 import { makeUtf8OffsetMap, moveToUtf8Boundary, utf8OffsetUnit } from "./offsets";
 import { isAutomaticAnswerActivation, type AutomaticAnswerActivation } from "./activation";
@@ -123,9 +123,22 @@ export type RfcRelationshipStep = Schema.Schema.Type<typeof RfcRelationshipStepS
 /**
  * A known RFC context returned with an evidence bundle.
  */
-export const RfcResearchContextSchema = Schema.Struct({
+const InternalRfcResearchContextSchema = Schema.Struct({
   role: RfcContextRoleSchema,
   document: CatalogDocumentSchema,
+  relationshipPath: Schema.Array(RfcRelationshipStepSchema),
+  isCurrent: Schema.Boolean,
+  state: Schema.Literals(["researched", "unavailable"]),
+});
+
+type InternalRfcResearchContext = Schema.Schema.Type<typeof InternalRfcResearchContextSchema>;
+
+/**
+ * Schema for one relationship-aware RFC context returned by version two.
+ */
+export const RfcResearchContextSchema = Schema.Struct({
+  role: RfcContextRoleSchema,
+  document: RfcDocumentSchema,
   relationshipPath: Schema.Array(RfcRelationshipStepSchema),
   isCurrent: Schema.Boolean,
   state: Schema.Literals(["researched", "unavailable"]),
@@ -398,8 +411,8 @@ const ContextDiagnosticsSchema = Schema.Struct({
 /**
  * Bounded diagnostics for one semantic research operation.
  */
-export const ResearchDiagnosticsSchema = Schema.Struct({
-  schemaVersion: Schema.Literals([1, 2]),
+const InternalResearchDiagnosticsSchema = Schema.Struct({
+  schemaVersion: Schema.Literal(1),
   policyVersion: Schema.NonEmptyString,
   requestedModel: Schema.NonEmptyString,
   resolvedModel: Schema.NonEmptyString,
@@ -426,25 +439,115 @@ export const ResearchDiagnosticsSchema = Schema.Struct({
 /**
  * Diagnostics returned with an evidence bundle.
  */
-export type ResearchDiagnostics = Schema.Schema.Type<typeof ResearchDiagnosticsSchema>;
+export type InternalResearchDiagnostics = Schema.Schema.Type<
+  typeof InternalResearchDiagnosticsSchema
+>;
 
-/**
- * The versioned public result of known-RFC research.
- */
-export const EvidenceBundleSchema = Schema.Struct({
-  schemaVersion: Schema.Literals([1, 2]),
+const InternalEvidenceBundleSchema = Schema.Struct({
+  schemaVersion: Schema.Literal(1),
   kind: Schema.Literal("evidence_bundle"),
   status: ResearchStatusSchema,
   question: Schema.NonEmptyString,
   rfc: Schema.NullOr(CatalogDocumentSchema),
-  contexts: Schema.optionalKey(Schema.Array(RfcResearchContextSchema)),
+  contexts: Schema.optionalKey(Schema.Array(InternalRfcResearchContextSchema)),
   currency: Schema.optionalKey(RfcCurrencyReportSchema),
+  evidence: Schema.Array(EvidencePassageSchema),
+  diagnostics: InternalResearchDiagnosticsSchema,
+});
+
+type InternalEvidenceBundle = Schema.Schema.Type<typeof InternalEvidenceBundleSchema>;
+
+const DiscoveryTimingSchema = Schema.Struct({
+  metadataMs: Schema.Number,
+  sourceMs: Schema.Number,
+  lexicalMs: Schema.Number,
+  selectionMs: Schema.Number,
+  relationMs: Schema.Number,
+  totalMs: Schema.Number,
+  documentMs: Schema.optionalKey(Schema.Union([Schema.Number, Schema.Undefined])),
+});
+
+const DiscoveryCandidateCountsSchema = Schema.Struct({
+  sourceBlocks: Schema.Natural,
+  passageCandidates: Schema.Natural,
+  selectedPassages: Schema.Natural,
+  discoveredDocuments: Schema.Natural,
+  documentCandidates: Schema.optionalKey(Schema.Union([Schema.Natural, Schema.Undefined])),
+  acceptedDocuments: Schema.optionalKey(Schema.Union([Schema.Natural, Schema.Undefined])),
+});
+
+const DiscoveryContextDiagnosticsSchema = Schema.Struct({
+  context: RfcContextRoleSchema,
+  identifier: Schema.NonEmptyString,
+  relationshipPath: Schema.Array(RfcRelationshipStepSchema),
+  state: Schema.Literals(["researched", "unavailable"]),
+  status: Schema.NullOr(ResearchStatusSchema),
+  source: Schema.NullOr(SourceDiagnosticSchema),
+  usage: TokenUsageSchema,
+  timings: DiscoveryTimingSchema,
+  candidates: DiscoveryCandidateCountsSchema,
+  atomicity: Schema.NullOr(AtomicityDiagnosticSchema),
+  selection: Schema.Array(SelectionDiagnosticSchema),
+  classification: Schema.Array(ClassificationDiagnosticSchema),
+});
+
+/**
+ * Schema for catalog-free version-two research diagnostics.
+ */
+export const ResearchDiagnosticsSchema = Schema.Struct({
+  schemaVersion: Schema.Literal(2),
+  policyVersion: Schema.NonEmptyString,
+  requestedModel: Schema.NonEmptyString,
+  resolvedModel: Schema.NonEmptyString,
+  resolvedModels: Schema.Array(Schema.NonEmptyString),
+  usage: TokenUsageSchema,
+  timings: DiscoveryTimingSchema,
+  source: Schema.NullOr(SourceDiagnosticSchema),
+  sources: Schema.optionalKey(
+    Schema.Union([
+      Schema.Array(SourceDiagnosticSchema),
+      Schema.Array(ContextSourceDiagnosticSchema),
+      Schema.Undefined,
+    ]),
+  ),
+  retrieval: LiveRetrievalTraceSchema,
+  currency: Schema.optionalKey(Schema.Union([RfcCurrencyReportSchema, Schema.Undefined])),
+  candidates: DiscoveryCandidateCountsSchema,
+  atomicity: AtomicityDiagnosticSchema,
+  documentSelection: Schema.optionalKey(
+    Schema.Union([Schema.Array(SelectionDiagnosticSchema), Schema.Undefined]),
+  ),
+  selection: Schema.Array(SelectionDiagnosticSchema),
+  classification: Schema.Array(ClassificationDiagnosticSchema),
+  contexts: Schema.optionalKey(
+    Schema.Union([Schema.Array(DiscoveryContextDiagnosticsSchema), Schema.Undefined]),
+  ),
+});
+
+/**
+ * Diagnostics returned with a version-two evidence bundle.
+ */
+export type ResearchDiagnostics = Schema.Schema.Type<typeof ResearchDiagnosticsSchema>;
+
+/**
+ * Strict version-two public result of RFC research.
+ */
+export const EvidenceBundleSchema = Schema.Struct({
+  schemaVersion: Schema.Literal(2),
+  kind: Schema.Literal("evidence_bundle"),
+  status: ResearchStatusSchema,
+  question: Schema.NonEmptyString,
+  rfc: Schema.NullOr(RfcDocumentSchema),
+  contexts: Schema.optionalKey(
+    Schema.Union([Schema.Array(RfcResearchContextSchema), Schema.Undefined]),
+  ),
+  currency: Schema.optionalKey(Schema.Union([RfcCurrencyReportSchema, Schema.Undefined])),
   evidence: Schema.Array(EvidencePassageSchema),
   diagnostics: ResearchDiagnosticsSchema,
 });
 
 /**
- * A versioned evidence bundle returned by the Promise facade.
+ * A strict version-two evidence bundle returned by the Promise facade.
  */
 export type EvidenceBundle = Schema.Schema.Type<typeof EvidenceBundleSchema>;
 
@@ -1479,7 +1582,7 @@ export interface RfcCurrencyResolution {
   /**
    * The requested RFC and the applicable current RFC contexts.
    */
-  readonly contexts: ReadonlyArray<RfcResearchContext>;
+  readonly contexts: ReadonlyArray<InternalRfcResearchContext>;
   /**
    * The deterministic relationship report for those contexts.
    */
@@ -1812,7 +1915,7 @@ const statusFromRelations = (
 };
 
 type ContextResearchResult = {
-  readonly context: RfcResearchContext;
+  readonly context: InternalRfcResearchContext;
   readonly source: RfcSource;
   readonly status: ResearchStatus;
   readonly evidence: ReadonlyArray<EvidencePassage>;
@@ -1825,7 +1928,7 @@ type ContextResearchResult = {
 };
 
 type UnavailableContextResult = {
-  readonly context: RfcResearchContext;
+  readonly context: InternalRfcResearchContext;
   readonly diagnostics: Schema.Schema.Type<typeof ContextDiagnosticsSchema>;
 };
 
@@ -1969,7 +2072,7 @@ const researchContext = Effect.fnUntraced(function* (
     totalMs: elapsed(sourceStarted, relationFinished),
     documentMs: undefined,
   } satisfies Schema.Schema.Type<typeof TimingSchema>;
-  const context: RfcResearchContext = {
+  const context: InternalRfcResearchContext = {
     ...plannedContext,
     state: "researched",
   };
@@ -2043,7 +2146,7 @@ const researchContext = Effect.fnUntraced(function* (
 });
 
 const unavailableContext = (plannedContext: PlannedRfcContext): UnavailableContextResult => {
-  const context: RfcResearchContext = {
+  const context: InternalRfcResearchContext = {
     ...plannedContext,
     state: "unavailable",
   };
@@ -2313,7 +2416,7 @@ export const researchKnownRfc = Effect.fnUntraced(function* (
   hint: string,
   options: KnownRfcResearchOptions,
 ): Effect.fn.Return<
-  EvidenceBundle,
+  InternalEvidenceBundle,
   | RfcNotFoundError
   | RfcSourceCacheError
   | RfcSourceFetchError
@@ -2471,9 +2574,9 @@ export const researchKnownRfc = Effect.fnUntraced(function* (
     selection,
     classification,
     contexts: contextDiagnostics,
-  } satisfies ResearchDiagnostics;
+  } satisfies InternalResearchDiagnostics;
 
-  return Schema.decodeUnknownSync(EvidenceBundleSchema)({
+  return Schema.decodeUnknownSync(InternalEvidenceBundleSchema)({
     schemaVersion: 1,
     kind: "evidence_bundle",
     status,
@@ -2497,7 +2600,7 @@ export const researchTopic = Effect.fnUntraced(function* (
   question: string,
   options: KnownRfcResearchOptions,
 ): Effect.fn.Return<
-  EvidenceBundle,
+  InternalEvidenceBundle,
   | RfcSourceCacheError
   | RfcSourceFetchError
   | RfcSourceRevalidationError
@@ -2537,7 +2640,7 @@ export const researchTopic = Effect.fnUntraced(function* (
     finishedAt: number,
     resolvedModel: string,
     resolvedModels: ReadonlyArray<string>,
-  ): ResearchDiagnostics => ({
+  ): InternalResearchDiagnostics => ({
     schemaVersion: 1,
     policyVersion: policy.policyVersion,
     requestedModel: options.modelAlias,
@@ -2586,7 +2689,7 @@ export const researchTopic = Effect.fnUntraced(function* (
     const resolvedModels =
       observedResolvedModels.length === 0 ? [fallbackResolvedModel] : observedResolvedModels;
     const diagnostics = makeEmptyDiagnostics(finishedAt, resolvedModel, resolvedModels);
-    return Schema.decodeUnknownSync(EvidenceBundleSchema)({
+    return Schema.decodeUnknownSync(InternalEvidenceBundleSchema)({
       schemaVersion: 1,
       kind: "evidence_bundle",
       status,
@@ -2703,9 +2806,9 @@ export const researchTopic = Effect.fnUntraced(function* (
     documentSelection: documentSelection.diagnostics,
     selection: selection.diagnostics,
     classification: relation.diagnostics,
-  } satisfies ResearchDiagnostics;
+  } satisfies InternalResearchDiagnostics;
 
-  return Schema.decodeUnknownSync(EvidenceBundleSchema)({
+  return Schema.decodeUnknownSync(InternalEvidenceBundleSchema)({
     schemaVersion: 1,
     kind: "evidence_bundle",
     status,

@@ -223,7 +223,7 @@ describe("citation verification", () => {
 
     const quote = "The client MUST send a request containing the target resource.";
     const result = await client.verifyCitation({
-      schemaVersion: 1,
+      schemaVersion: 2,
       rfc: "RFC9110",
       claim: "The client must send a request containing the target resource.",
       quote,
@@ -251,13 +251,21 @@ describe("citation verification", () => {
       usage: { inputTokens: 12, outputTokens: 8 },
       confidence: 0.95,
       retrieval: {
-        requestCount: 3,
-        datatrackerRequestCount: 2,
+        requestCount: 2,
+        datatrackerRequestCount: 1,
         sourceRequestCount: 1,
         sourceCacheOutcome: "miss",
       },
     });
-    expect(result.diagnostics.retrieval?.requests).toHaveLength(3);
+    expect(result.schemaVersion).toBe(2);
+    expect(result.rfc).not.toHaveProperty("updates");
+    expect(result.rfc).not.toHaveProperty("obsoletes");
+    expect(result.diagnostics.schemaVersion).toBe(2);
+    expect(result.diagnostics.retrieval?.requests).toHaveLength(2);
+    expect(result.diagnostics.retrieval?.requests.map(({ kind }) => kind)).toEqual([
+      "metadata",
+      "source",
+    ]);
     expect(calls).toHaveLength(1);
     expect(CitationVerificationResultSchema.make(result)).toEqual(result);
   });
@@ -278,7 +286,7 @@ describe("citation verification", () => {
     clients.push(client);
 
     const request = {
-      schemaVersion: 1 as const,
+      schemaVersion: 2 as const,
       rfc: "RFC9110",
       claim: "The client must send a request containing the target resource.",
       quote: "The client MUST send a request containing the target resource.",
@@ -292,11 +300,12 @@ describe("citation verification", () => {
     expect(first.diagnostics.resolvedModel).toBe("jev-first");
     expect(second.diagnostics.resolvedModel).toBe("jev-second");
     expect(second.diagnostics.retrieval).toMatchObject({
-      requestCount: 2,
+      requestCount: 1,
+      datatrackerRequestCount: 1,
       sourceRequestCount: 0,
       sourceCacheOutcome: "hit",
     });
-    expect(second.diagnostics.retrieval?.requests).toHaveLength(2);
+    expect(second.diagnostics.retrieval?.requests).toHaveLength(1);
     expect(typeSafe.calls()).toBe(2);
   });
 
@@ -334,7 +343,7 @@ describe("citation verification", () => {
     clients.push(client);
 
     const result = await client.verifyCitation({
-      schemaVersion: 1,
+      schemaVersion: 2,
       rfc: "RFC9110",
       claim: "The client must send a request.",
       quote,
@@ -351,7 +360,7 @@ describe("citation verification", () => {
 
     await expect(
       client.verifyCitation({
-        schemaVersion: 1,
+        schemaVersion: 2,
         rfc: "RFC9110",
         claim: "The client must send a request.",
         quote,
@@ -376,7 +385,7 @@ describe("citation verification", () => {
     clients.push(client);
 
     const result = await client.verifyCitation({
-      schemaVersion: 1,
+      schemaVersion: 2,
       rfc: "9110",
       claim: "The server must cache requests.",
       quote: "The server MUST cache requests.",
@@ -392,7 +401,7 @@ describe("citation verification", () => {
 
     await expect(
       client.verifyCitation({
-        schemaVersion: 1,
+        schemaVersion: 2,
         rfc: "RFC9999",
         claim: "The server caches requests.",
         quote: "The server MUST cache requests.",
@@ -420,7 +429,7 @@ describe("citation verification", () => {
 
     await expect(
       client.verifyCitation({
-        schemaVersion: 1,
+        schemaVersion: 2,
         rfc: "RFC9110",
         claim: "The client sends a request.",
         quote,
@@ -430,7 +439,7 @@ describe("citation verification", () => {
 
     await expect(
       client.verifyCitation({
-        schemaVersion: 1,
+        schemaVersion: 2,
         rfc: "RFC9110",
         claim: "The client sends a request.",
         quote,
@@ -439,7 +448,7 @@ describe("citation verification", () => {
     ).rejects.toBeInstanceOf(CitationOffsetMismatchError);
 
     const result = await client.verifyCitation({
-      schemaVersion: 1,
+      schemaVersion: 2,
       rfc: "RFC9110",
       claim: "The client sends a request.",
       quote,
@@ -496,7 +505,7 @@ describe("citation verification", () => {
       clients.push(client);
 
       const result = await client.verifyCitation({
-        schemaVersion: 1,
+        schemaVersion: 2,
         rfc: "RFC9110",
         claim: testCase.claim,
         quote: testCase.quote,
@@ -538,7 +547,7 @@ describe("citation verification", () => {
     clients.push(client);
 
     const verification = client.verifyCitation({
-      schemaVersion: 1,
+      schemaVersion: 2,
       rfc: "RFC9110",
       claim: "The client sends a request.",
       quote: "The client MUST send a request containing the target resource.",
@@ -581,7 +590,7 @@ describe("citation verification", () => {
 
     await expect(
       nonRetryableClient.verifyCitation({
-        schemaVersion: 1,
+        schemaVersion: 2,
         rfc: "RFC9110",
         claim: "The client sends a request.",
         quote: "The client MUST send a request containing the target resource.",
@@ -617,7 +626,7 @@ describe("citation verification", () => {
 
     await expect(
       delayedClient.verifyCitation({
-        schemaVersion: 1,
+        schemaVersion: 2,
         rfc: "RFC9110",
         claim: "The client sends a request.",
         quote: "The client MUST send a request containing the target resource.",
@@ -664,7 +673,7 @@ describe("citation verification", () => {
     clients.push(exhaustedClient);
 
     const exhaustedVerification = exhaustedClient.verifyCitation({
-      schemaVersion: 1,
+      schemaVersion: 2,
       rfc: "RFC9110",
       claim: "The client sends a request.",
       quote: "The client MUST send a request containing the target resource.",
@@ -723,7 +732,7 @@ describe("citation verification", () => {
     clients.push(client);
 
     const verification = client.verifyCitation({
-      schemaVersion: 1,
+      schemaVersion: 2,
       rfc: "RFC9110",
       claim: "The client sends a request.",
       quote: "The client MUST send a request containing the target resource.",
@@ -788,7 +797,7 @@ describe("citation verification", () => {
 
     await expect(
       client.verifyCitation({
-        schemaVersion: 1,
+        schemaVersion: 2,
         rfc: "RFC9110",
         claim: "The client sends a request.",
         quote: "The client MUST send a request containing the target resource.",
@@ -812,7 +821,7 @@ describe("citation verification", () => {
     clients.push(client);
 
     await client.verifyCitation({
-      schemaVersion: 1,
+      schemaVersion: 2,
       rfc: "RFC9110",
       claim: "The client sends a request.",
       quote: "The client MUST send a request containing the target resource.",
@@ -822,7 +831,7 @@ describe("citation verification", () => {
     await Bun.write(contentPath, JSON.stringify({ text: "tampered" }));
 
     const repaired = await client.verifyCitation({
-      schemaVersion: 1,
+      schemaVersion: 2,
       rfc: "RFC9110",
       claim: "The client sends a request.",
       quote: "The client MUST send a request containing the target resource.",

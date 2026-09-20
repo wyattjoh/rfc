@@ -302,7 +302,7 @@ const citationRequestForCase = (evaluationCase: EvaluationCase, source: string) 
       ? new TextEncoder().encode(source.slice(0, characterOffset)).byteLength
       : null;
   return {
-    schemaVersion: 1 as const,
+    schemaVersion: 2 as const,
     rfc: evaluationCase.rfc,
     claim: evaluationCase.claim,
     quote: evaluationCase.quote,

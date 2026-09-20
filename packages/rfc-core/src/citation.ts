@@ -2,8 +2,8 @@ import { Cause, Clock, Duration, Effect, FileSystem, Ref, Result, Schema } from 
 import * as AiError from "effect/unstable/ai/AiError";
 import * as Decision from "effect/unstable/ai/Decision";
 import * as DecisionModel from "effect/unstable/ai/DecisionModel";
-import { CatalogDocumentSchema, type CatalogDocument, type RfcCatalog } from "./catalog";
-import { LiveRetrievalTraceSchema, type LiveRetrievalTrace } from "./discovery";
+import type { CatalogDocument, RfcCatalog } from "./catalog";
+import { LiveRetrievalTraceSchema, RfcDocumentSchema, type LiveRetrievalTrace } from "./discovery";
 import { LiveRfcSource, RfcSourceRevalidationError } from "./live-source";
 import { makeUtf8OffsetMap, utf8OffsetUnit } from "./offsets";
 import {
@@ -63,7 +63,7 @@ export type CitationOffsetUnit = Schema.Schema.Type<typeof CitationOffsetUnitSch
  * while still accepting the omitted convenience form.
  */
 export const CitationVerificationRequestSchema = Schema.Struct({
-  schemaVersion: Schema.Literal(1),
+  schemaVersion: Schema.Literal(2),
   rfc: Schema.NonEmptyString,
   claim: Schema.NonEmptyString,
   quote: Schema.NonEmptyString,
@@ -78,7 +78,7 @@ type DecodedCitationVerificationRequest = Schema.Schema.Type<
  * A decoded request to verify one factual claim against one exact RFC quote.
  */
 export interface CitationVerificationRequest {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
   readonly rfc: string;
   readonly claim: string;
   readonly quote: string;
@@ -93,7 +93,7 @@ export interface CitationVerificationRequest {
  * Decode unknown citation input at the public JSON boundary.
  *
  * @param input The unknown value received from JSON or convenience flags.
- * @returns A normalized version-one citation verification request.
+ * @returns A normalized version-two citation verification request.
  * @throws Error when the value does not satisfy the request schema.
  */
 export const decodeCitationVerificationRequest = (input: unknown): CitationVerificationRequest => {
@@ -146,7 +146,7 @@ const CitationTimingsSchema = Schema.Struct({
  * Bounded diagnostics for one citation verification operation.
  */
 export const CitationVerificationDiagnosticsSchema = Schema.Struct({
-  schemaVersion: Schema.Literal(1),
+  schemaVersion: Schema.Literal(2),
   policyVersion: Schema.NonEmptyString,
   requestedModel: Schema.NonEmptyString,
   resolvedModel: Schema.NonEmptyString,
@@ -169,10 +169,10 @@ export type CitationVerificationDiagnostics = Schema.Schema.Type<
  * The versioned result of checking a factual claim against an RFC quotation.
  */
 export const CitationVerificationResultSchema = Schema.Struct({
-  schemaVersion: Schema.Literal(1),
+  schemaVersion: Schema.Literal(2),
   kind: Schema.Literal("citation_verification"),
   verdict: CitationVerdictSchema,
-  rfc: CatalogDocumentSchema,
+  rfc: RfcDocumentSchema,
   claim: Schema.NonEmptyString,
   quote: Schema.NonEmptyString,
   provenance: CitationProvenanceSchema,
@@ -192,7 +192,7 @@ export type CitationVerificationResult = Schema.Schema.Type<
  * Citation verification policy values used for bounded context and retries.
  */
 export const citationPolicy = {
-  policyVersion: "citation-v1",
+  policyVersion: "citation-v2",
   contextBeforeCharacters: 2_000,
   contextAfterCharacters: 2_000,
   confidenceThreshold: 0.65,
@@ -556,7 +556,7 @@ const resultFrom = ({
     fetchedAt: source.fetchedAt,
   } satisfies CitationProvenance;
   const diagnostics = {
-    schemaVersion: 1 as const,
+    schemaVersion: 2 as const,
     policyVersion: citationPolicy.policyVersion,
     requestedModel: modelAlias,
     resolvedModel,
@@ -569,7 +569,7 @@ const resultFrom = ({
   } satisfies CitationVerificationDiagnostics;
 
   return Schema.decodeUnknownSync(CitationVerificationResultSchema)({
-    schemaVersion: 1,
+    schemaVersion: 2,
     kind: "citation_verification",
     verdict,
     rfc: document,

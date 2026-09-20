@@ -855,6 +855,7 @@ describe("rfc process protocol", () => {
     expect(convenience.exitCode).toBe(0);
     expect(convenience.stderr).toBe("");
     expect(JSON.parse(convenience.stdout)).toMatchObject({
+      schemaVersion: 2,
       kind: "citation_verification",
       verdict: "verified",
       provenance: {
@@ -875,7 +876,7 @@ describe("rfc process protocol", () => {
         `${server.url}api/v1/`,
       ],
       JSON.stringify({
-        schemaVersion: 1,
+        schemaVersion: 2,
         rfc: "RFC9110",
         claim: "The server caches requests.",
         quote: "The server MUST cache requests.",
@@ -885,6 +886,29 @@ describe("rfc process protocol", () => {
     expect(fabricated.exitCode).toBe(0);
     expect(JSON.parse(fabricated.stdout).verdict).toBe("fabricated");
     expect(modelCalls).toBe(1);
+  });
+
+  test("rejects version-one citation input at the process boundary", async () => {
+    const result = await runCli(
+      ["verify-citation"],
+      JSON.stringify({
+        schemaVersion: 1,
+        rfc: "RFC9110",
+        claim: "The client sends a request.",
+        quote: "The client MUST send a request.",
+      }),
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(JSON.parse(result.stderr)).toEqual({
+      schemaVersion: 2,
+      kind: "error",
+      error: {
+        code: "invalid_input",
+        message: "Citation input must use schema version 2",
+      },
+    });
   });
 
   test("writes versioned input failures to stderr and exits nonzero", async () => {

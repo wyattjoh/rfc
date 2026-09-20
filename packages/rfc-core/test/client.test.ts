@@ -2,13 +2,14 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
-import { Cause, Duration, Effect } from "effect";
+import { Cause, Duration, Effect, Schema } from "effect";
 import { TestClock } from "effect/testing";
 import type * as Decision from "effect/unstable/ai/Decision";
 import * as DecisionModel from "effect/unstable/ai/DecisionModel";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 import * as PublicApi from "../src/index";
 import {
+  EvidenceBundleSchema,
   InvalidInputError,
   RfcClientClosedError,
   RfcDiscoveryError,
@@ -188,7 +189,27 @@ describe("createRfcClient", () => {
         },
       },
     });
-    expect(first.diagnostics.catalog).toBeUndefined();
+    const serialized = JSON.parse(JSON.stringify(first));
+    expect(Schema.decodeUnknownSync(EvidenceBundleSchema)(serialized)).toEqual(serialized);
+    expect(() =>
+      Schema.decodeUnknownSync(EvidenceBundleSchema)({ ...first, schemaVersion: 1 }),
+    ).toThrow();
+    expect("catalog" in first.diagnostics).toBe(false);
+    expect("catalogMs" in first.diagnostics.timings).toBe(false);
+    expect("catalogDocuments" in first.diagnostics.candidates).toBe(false);
+    expect(JSON.stringify(first)).not.toContain('"catalog');
+    expect("discoveredDocuments" in first.diagnostics.candidates).toBe(true);
+    expect(first.diagnostics.candidates.discoveredDocuments).toBe(1);
+    expect(first.diagnostics.timings.metadataMs).toBeGreaterThanOrEqual(0);
+    expect(first.rfc).not.toBeNull();
+    if (first.rfc === null) throw new Error("Expected discovered RFC metadata");
+    expect("updates" in first.rfc).toBe(false);
+    expect("obsoletes" in first.rfc).toBe(false);
+    expect(
+      first.contexts?.every(
+        ({ document }) => !("updates" in document) && !("obsoletes" in document),
+      ),
+    ).toBe(true);
     expect(first.diagnostics.retrieval?.sourceMs).toBe(7);
     expect(first.diagnostics.retrieval?.requests[2]?.durationMs).toBe(7);
     expect(first.diagnostics.retrieval?.requests.map(({ url }) => url)).toEqual([
@@ -491,6 +512,95 @@ describe("createRfcClient", () => {
       uniqueCandidates: 1,
       topicTruncated: true,
     });
+  });
+
+  test("rejects metadata bodies above the byte limit before decoding", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const datatracker = makeDatatrackerHttpClient(
+      () =>
+        new Response("{}", {
+          status: 200,
+          headers: { "content-length": String(2 * 1024 * 1024) },
+        }),
+    );
+    const client = await createRfcClient({
+      cacheDirectory,
+      datatrackerHttpClient: datatracker.client,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      decisionModel: makeDecisionModel(),
+    });
+    clients.push(client);
+
+    await expect(
+      client.research({
+        schemaVersion: 2,
+        question: "What must the client send?",
+        rfc: "RFC9110",
+      }),
+    ).rejects.toMatchObject({
+      _tag: "RfcDiscoveryError",
+      stage: "decode",
+      reason: expect.stringContaining("metadata exceeds"),
+    });
+  });
+
+  test("stops streamed metadata that exceeds the byte limit without Content-Length", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const datatracker = makeDatatrackerHttpClient(
+      () =>
+        new Response("x".repeat(1024 * 1024 + 1), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    const client = await createRfcClient({
+      cacheDirectory,
+      datatrackerHttpClient: datatracker.client,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      decisionModel: makeDecisionModel(),
+    });
+    clients.push(client);
+
+    await expect(
+      client.research({
+        schemaVersion: 2,
+        question: "What must the client send?",
+        rfc: "RFC9110",
+      }),
+    ).rejects.toMatchObject({
+      _tag: "RfcDiscoveryError",
+      stage: "decode",
+      reason: expect.stringContaining("metadata exceeds"),
+    });
+  });
+
+  test("rejects overlong metadata fields before semantic evaluation", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const datatracker = makeDatatrackerHttpClient(() =>
+      Response.json({ ...datatrackerDocument, title: "x".repeat(2_001) }),
+    );
+    const client = await createRfcClient({
+      cacheDirectory,
+      datatrackerHttpClient: datatracker.client,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      decisionModel: makeDecisionModel(),
+    });
+    clients.push(client);
+
+    await expect(
+      client.research({
+        schemaVersion: 2,
+        question: "What must the client send?",
+        rfc: "RFC9110",
+      }),
+    ).rejects.toMatchObject({ _tag: "RfcDiscoveryError", stage: "decode" });
+    expect(datatracker.urls).toHaveLength(1);
   });
 
   test("retries transient Datatracker responses within three attempts", async () => {

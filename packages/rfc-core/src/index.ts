@@ -58,7 +58,7 @@ import {
   researchKnownRfc,
   researchTopic,
 } from "./research";
-import type { EvidenceBundle } from "./research";
+import type { EvidenceBundle, InternalResearchDiagnostics } from "./research";
 import {
   RfcSourceCacheError,
   RfcSourceFetchError,
@@ -85,8 +85,8 @@ export {
   type CitationVerificationResult,
   type CitationVerdict,
 } from "./citation";
-export { RfcDiscoveryError } from "./discovery";
-export type { LiveRetrievalTrace, RetrievalRequestTrace } from "./discovery";
+export { RfcDiscoveryError, RfcDocumentSchema } from "./discovery";
+export type { LiveRetrievalTrace, RetrievalRequestTrace, RfcDocument } from "./discovery";
 export * from "./evaluation";
 export { RfcSourceRevalidationError } from "./live-source";
 export type { LiveSourceCacheOutcome, LiveRfcSourceResult } from "./live-source";
@@ -639,6 +639,37 @@ const makeLiveSourceLoader = (sourceDirectory: string, loads: Array<LoadedLiveSo
     return result.source;
   });
 
+const mapInternalResearchDiagnostics = (
+  diagnostics: InternalResearchDiagnostics,
+  discoveredDocuments: number,
+) => {
+  const {
+    catalog: _catalog,
+    timings,
+    candidates,
+    contexts: contextDiagnostics,
+    ...rest
+  } = diagnostics;
+  const { catalogMs, ...otherTimings } = timings;
+  const { catalogDocuments: _catalogDocuments, ...otherCandidates } = candidates;
+  const contexts = contextDiagnostics?.map((context) => {
+    const { catalogMs: contextCatalogMs, ...contextTimings } = context.timings;
+    const { catalogDocuments: _contextCatalogDocuments, ...contextCandidates } = context.candidates;
+    return {
+      ...context,
+      timings: { ...contextTimings, metadataMs: contextCatalogMs },
+      candidates: { ...contextCandidates, discoveredDocuments: 1 },
+    };
+  });
+
+  return {
+    ...rest,
+    timings: { ...otherTimings, metadataMs: catalogMs },
+    candidates: { ...otherCandidates, discoveredDocuments },
+    contexts,
+  };
+};
+
 const liveKnownResearchProgram = Effect.fnUntraced(function* (
   options: RfcClientOptions,
   request: LiveKnownRfcResearchRequest,
@@ -696,7 +727,10 @@ const liveKnownResearchProgram = Effect.fnUntraced(function* (
     relationshipLimit: datatrackerSuccessorLimit,
     requests: [...lookup.requests, ...sourceRequestTraces(sourceLoads)],
   };
-  const { catalog: _catalog, ...legacyDiagnostics } = result.diagnostics;
+  const publicDiagnostics = mapInternalResearchDiagnostics(
+    result.diagnostics,
+    lookup.documents.length,
+  );
   const currency =
     lookup.traversalComplete || result.currency === undefined
       ? result.currency
@@ -712,7 +746,7 @@ const liveKnownResearchProgram = Effect.fnUntraced(function* (
     status: lookup.traversalComplete ? result.status : "needs_review",
     currency,
     diagnostics: {
-      ...legacyDiagnostics,
+      ...publicDiagnostics,
       schemaVersion: 2,
       currency,
       retrieval,
@@ -772,15 +806,21 @@ const liveTopicResearchProgram = Effect.fnUntraced(function* (
     topicTruncated: discovered.truncated,
     requests: [...discovered.requests, ...sourceRequestTraces(sourceLoads)],
   };
-  const { catalog: _catalog, ...legacyDiagnostics } = result.diagnostics;
+  const publicDiagnostics = mapInternalResearchDiagnostics(
+    result.diagnostics,
+    discovered.documents.length,
+  );
 
   return Schema.decodeUnknownSync(EvidenceBundleSchema)({
     ...result,
     schemaVersion: 2,
     status: discovered.documents.length === 0 ? "needs_review" : result.status,
+    contexts: result.contexts,
+    currency: result.currency,
     diagnostics: {
-      ...legacyDiagnostics,
+      ...publicDiagnostics,
       schemaVersion: 2,
+      currency: result.currency,
       retrieval,
     },
   });
@@ -795,12 +835,12 @@ const citationProgram = (options: RfcClientOptions, request: CitationVerificatio
   Effect.gen(function* () {
     const startedAt = yield* Clock.currentTimeMillis;
     const discovery = yield* RfcDiscovery;
-    const lookup = yield* discovery.lookupKnownRfc(request.rfc);
+    const lookup = yield* discovery.lookupExactRfc(request.rfc);
     const sourceDirectory = yield* resolveSourceDirectory(options);
     const sourceLoads: Array<LoadedLiveSource> = [];
     const loadSource = makeLiveSourceLoader(sourceDirectory, sourceLoads);
     const now = yield* Clock.currentTimeMillis;
-    const requestLocalMetadata = makeCatalog(lookup.documents, now);
+    const requestLocalMetadata = makeCatalog([lookup.document], now);
     return yield* verifyCitation(request, {
       catalog: requestLocalMetadata,
       sourceDirectory,
@@ -827,13 +867,6 @@ const citationProgram = (options: RfcClientOptions, request: CitationVerificatio
               metadataMs: lookup.metadataMs,
               sourceMs,
               sourceCacheOutcome: cacheOutcomeFor(sourceLoads, document.identifier),
-              traversalComplete: lookup.traversalComplete,
-              traversalContexts: lookup.traversalContexts,
-              traversalDepth: lookup.traversalDepth,
-              successorRows: lookup.successorRows,
-              contextLimit: datatrackerCurrencyContextLimit,
-              depthLimit: datatrackerCurrencyDepthLimit,
-              relationshipLimit: datatrackerSuccessorLimit,
               requests: [...lookup.requests, ...sourceRequestTraces(sourceLoads)],
             },
           };
@@ -1088,7 +1121,7 @@ export const createRfcClient = async (
         decodedRequest = decodeCitationVerificationRequest(request);
       } catch {
         throw new InvalidInputError({
-          reason: "Citation input must use schema version 1",
+          reason: "Citation input must use schema version 2",
         });
       }
       return runModelOperation(citationProgram(options, decodedRequest));

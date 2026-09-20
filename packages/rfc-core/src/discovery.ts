@@ -9,6 +9,7 @@ import {
   Random,
   Result,
   Schema,
+  Stream,
 } from "effect";
 import { Headers, HttpClient, HttpClientError, HttpClientResponse } from "effect/unstable/http";
 import { defaultDatatrackerApiUrl, type CatalogDocument } from "./catalog";
@@ -22,6 +23,11 @@ export const datatrackerMaxAttempts = 3;
  * Maximum elapsed time for one complete Datatracker fetch/decode/retry operation.
  */
 export const datatrackerRequestDeadlineMilliseconds = 10_000;
+
+/**
+ * Maximum bytes accepted from one Datatracker JSON response.
+ */
+export const datatrackerMaximumResponseBytes = 1024 * 1024;
 
 /**
  * Maximum successor relationship rows requested for one RFC.
@@ -102,6 +108,24 @@ export const LiveRetrievalTraceSchema = Schema.Struct({
 export type LiveRetrievalTrace = Schema.Schema.Type<typeof LiveRetrievalTraceSchema>;
 
 /**
+ * Schema for relationship-free RFC metadata exposed by version two.
+ */
+export const RfcDocumentSchema = Schema.Struct({
+  identifier: Schema.NonEmptyString.check(Schema.isMaxLength(64)),
+  rfcNumber: Schema.Natural,
+  title: Schema.String.check(Schema.isMaxLength(2_000)),
+  abstract: Schema.String.check(Schema.isMaxLength(100_000)),
+  status: Schema.NonEmptyString.check(Schema.isMaxLength(256)),
+  stream: Schema.NonEmptyString.check(Schema.isMaxLength(256)),
+  canonicalUrl: Schema.NonEmptyString.check(Schema.isMaxLength(2_048)),
+});
+
+/**
+ * Request-local RFC metadata exposed through the version-two public facade.
+ */
+export type RfcDocument = Schema.Schema.Type<typeof RfcDocumentSchema>;
+
+/**
  * Typed failure from a required request-local Datatracker operation.
  */
 export class RfcDiscoveryError extends Schema.TaggedError<RfcDiscoveryError>()(
@@ -113,6 +137,24 @@ export class RfcDiscoveryError extends Schema.TaggedError<RfcDiscoveryError>()(
     attempts: Schema.Natural,
   },
 ) {}
+
+/**
+ * Request-local exact RFC metadata without relationship traversal.
+ */
+export interface LiveExactRfcLookup {
+  /**
+   * Exact normalized metadata for the requested published RFC.
+   */
+  readonly document: CatalogDocument;
+  /**
+   * Datatracker request traces produced by this lookup.
+   */
+  readonly requests: ReadonlyArray<RetrievalRequestTrace>;
+  /**
+   * Total time spent retrieving and decoding metadata.
+   */
+  readonly metadataMs: number;
+}
 
 /**
  * Request-local exact RFC metadata and bounded successor information.
@@ -183,6 +225,12 @@ export interface LiveTopicDiscovery {
  */
 export interface RfcDiscoveryService {
   /**
+   * Retrieve exact metadata without relationship traversal.
+   */
+  readonly lookupExactRfc: (
+    identifier: string,
+  ) => Effect.Effect<LiveExactRfcLookup, RfcDiscoveryError>;
+  /**
    * Retrieve exact metadata and recursively traverse successor relationships.
    */
   readonly lookupKnownRfc: (identifier: string) => Effect.Effect<LiveRfcLookup, RfcDiscoveryError>;
@@ -201,31 +249,37 @@ export class RfcDiscovery extends Context.Service<RfcDiscovery, RfcDiscoveryServ
   "rfc-core/RfcDiscovery",
 ) {}
 
+const DatatrackerNameSchema = Schema.NonEmptyString.check(Schema.isMaxLength(64));
+const DatatrackerReferenceSchema = Schema.NonEmptyString.check(Schema.isMaxLength(2_048));
+const DatatrackerOptionalNameSchema = Schema.NonEmptyString.check(Schema.isMaxLength(256));
+
 const DatatrackerDocumentSchema = Schema.Struct({
-  name: Schema.NonEmptyString,
+  name: DatatrackerNameSchema,
   rfc_number: Schema.Natural,
-  title: Schema.String,
-  abstract: Schema.String,
-  stream: Schema.NonEmptyString,
-  status: Schema.optionalKey(Schema.NullOr(Schema.NonEmptyString)),
-  state: Schema.optionalKey(Schema.NullOr(Schema.NonEmptyString)),
-  resource_uri: Schema.optionalKey(Schema.NonEmptyString),
-  states: Schema.optionalKey(Schema.Array(Schema.String)),
+  title: Schema.String.check(Schema.isMaxLength(2_000)),
+  abstract: Schema.String.check(Schema.isMaxLength(100_000)),
+  stream: DatatrackerReferenceSchema,
+  status: Schema.optionalKey(Schema.NullOr(DatatrackerOptionalNameSchema)),
+  state: Schema.optionalKey(Schema.NullOr(DatatrackerOptionalNameSchema)),
+  resource_uri: Schema.optionalKey(DatatrackerReferenceSchema),
+  states: Schema.optionalKey(
+    Schema.Array(DatatrackerReferenceSchema).check(Schema.isMaxLength(64)),
+  ),
 });
 
 type DatatrackerDocument = Schema.Schema.Type<typeof DatatrackerDocumentSchema>;
 
 const DatatrackerRelationshipSchema = Schema.Struct({
-  source: Schema.NonEmptyString,
-  target: Schema.NonEmptyString,
-  relationship: Schema.NonEmptyString,
+  source: DatatrackerReferenceSchema,
+  target: DatatrackerReferenceSchema,
+  relationship: DatatrackerReferenceSchema,
 });
 
 type DatatrackerRelationship = Schema.Schema.Type<typeof DatatrackerRelationshipSchema>;
 
 const DatatrackerRelationshipPageSchema = Schema.Struct({
   meta: Schema.Struct({
-    next: Schema.NullOr(Schema.String),
+    next: Schema.NullOr(Schema.String.check(Schema.isMaxLength(4_096))),
     total_count: Schema.Natural,
   }),
   objects: Schema.Array(DatatrackerRelationshipSchema),
@@ -235,7 +289,7 @@ type DatatrackerRelationshipPage = Schema.Schema.Type<typeof DatatrackerRelation
 
 const DatatrackerDocumentPageSchema = Schema.Struct({
   meta: Schema.Struct({
-    next: Schema.NullOr(Schema.String),
+    next: Schema.NullOr(Schema.String.check(Schema.isMaxLength(4_096))),
     total_count: Schema.Natural,
   }),
   objects: Schema.Array(DatatrackerDocumentSchema),
@@ -353,6 +407,81 @@ type FetchState = {
   readonly deadline: RequestDeadline;
 };
 
+const readBoundedJson = Effect.fnUntraced(function* (
+  response: HttpClientResponse.HttpClientResponse,
+  url: string,
+  attempts: number,
+): Effect.fn.Return<unknown, RfcDiscoveryError> {
+  const contentLengthValue = Option.getOrUndefined(Headers.get("content-length")(response.headers));
+  if (contentLengthValue !== undefined) {
+    const contentLength = Number(contentLengthValue);
+    if (!Number.isSafeInteger(contentLength) || contentLength < 0) {
+      return yield* new RfcDiscoveryError({
+        stage: "decode",
+        url,
+        reason: "Datatracker returned an invalid Content-Length",
+        attempts,
+      });
+    }
+    if (contentLength > datatrackerMaximumResponseBytes) {
+      return yield* new RfcDiscoveryError({
+        stage: "decode",
+        url,
+        reason: `Datatracker metadata exceeds ${datatrackerMaximumResponseBytes} bytes`,
+        attempts,
+      });
+    }
+  }
+
+  const body = yield* response.stream.pipe(
+    Stream.runFoldEffect(
+      () => ({ size: 0, chunks: [] as Array<Uint8Array> }),
+      (state, chunk) => {
+        const size = state.size + chunk.byteLength;
+        if (size > datatrackerMaximumResponseBytes) {
+          return Effect.fail(
+            new RfcDiscoveryError({
+              stage: "decode",
+              url,
+              reason: `Datatracker metadata exceeds ${datatrackerMaximumResponseBytes} bytes`,
+              attempts,
+            }),
+          );
+        }
+        state.chunks.push(chunk);
+        return Effect.succeed({ size, chunks: state.chunks });
+      },
+    ),
+    Effect.mapError((error) =>
+      error instanceof RfcDiscoveryError
+        ? error
+        : new RfcDiscoveryError({
+            stage: "decode",
+            url,
+            reason: errorMessage(error),
+            attempts,
+          }),
+    ),
+  );
+
+  return yield* Effect.try({
+    try: () =>
+      JSON.parse(
+        Buffer.concat(
+          body.chunks.map((chunk) => Buffer.from(chunk)),
+          body.size,
+        ).toString("utf8"),
+      ),
+    catch: () =>
+      new RfcDiscoveryError({
+        stage: "decode",
+        url,
+        reason: "Datatracker returned malformed JSON metadata",
+        attempts,
+      }),
+  });
+});
+
 const fetchJsonWithinDeadline = Effect.fnUntraced(function* (
   http: HttpClient.HttpClient,
   url: string,
@@ -408,7 +537,7 @@ const fetchJsonWithinDeadline = Effect.fnUntraced(function* (
           return { response, value: undefined } as const;
         }
 
-        const value = yield* response.json;
+        const value = yield* readBoundedJson(response, url, attempt);
         return { response, value } as const;
       }).pipe(Effect.timeout(Duration.millis(remaining))),
     );
@@ -641,6 +770,40 @@ const normalizeDocument = (
       }),
   });
 
+type FetchedExactDocument = {
+  readonly document: DatatrackerDocument;
+  readonly url: string;
+  readonly trace: RetrievalRequestTrace;
+};
+
+const fetchExactDocument = Effect.fnUntraced(function* (
+  http: HttpClient.HttpClient,
+  baseUrl: string,
+  name: string,
+): Effect.fn.Return<FetchedExactDocument, RfcDiscoveryError> {
+  const url = yield* Effect.try({
+    try: () => makeExactDocumentUrl(baseUrl, name),
+    catch: (error) =>
+      new RfcDiscoveryError({
+        stage: "request",
+        url: baseUrl,
+        reason: errorMessage(error),
+        attempts: 0,
+      }),
+  });
+  const response = yield* fetchJson(http, url, "metadata");
+  const document = yield* decodeDocument(response.value, url, response.trace.attempts);
+  if (document.name.toLowerCase() !== name || document.rfc_number !== Number(name.slice(3))) {
+    return yield* new RfcDiscoveryError({
+      stage: "decode",
+      url,
+      reason: "Datatracker exact RFC metadata did not match the requested identifier",
+      attempts: response.trace.attempts,
+    });
+  }
+  return { document, url, trace: response.trace };
+});
+
 type ExactLookup = {
   readonly document: CatalogDocument;
   readonly successorNames: ReadonlyArray<string>;
@@ -654,31 +817,7 @@ const lookupOneRfc = Effect.fnUntraced(function* (
   baseUrl: string,
   name: string,
 ): Effect.fn.Return<ExactLookup, RfcDiscoveryError> {
-  const documentUrl = yield* Effect.try({
-    try: () => makeExactDocumentUrl(baseUrl, name),
-    catch: (error) =>
-      new RfcDiscoveryError({
-        stage: "request",
-        url: baseUrl,
-        reason: errorMessage(error),
-        attempts: 0,
-      }),
-  });
-  const documentResponse = yield* fetchJson(http, documentUrl, "metadata");
-  const document = yield* decodeDocument(
-    documentResponse.value,
-    documentUrl,
-    documentResponse.trace.attempts,
-  );
-  if (document.name.toLowerCase() !== name || document.rfc_number !== Number(name.slice(3))) {
-    return yield* new RfcDiscoveryError({
-      stage: "decode",
-      url: documentUrl,
-      reason: "Datatracker exact RFC metadata did not match the requested identifier",
-      attempts: documentResponse.trace.attempts,
-    });
-  }
-
+  const exact = yield* fetchExactDocument(http, baseUrl, name);
   const relationshipUrl = makeSuccessorUrl(baseUrl, name);
   const relationshipResponse = yield* fetchJson(http, relationshipUrl, "relationships");
   const relationshipPage = yield* decodeRelationships(
@@ -687,7 +826,7 @@ const lookupOneRfc = Effect.fnUntraced(function* (
     relationshipResponse.trace.attempts,
   );
   const normalized = yield* normalizeDocument(
-    document,
+    exact.document,
     relationshipPage.objects,
     relationshipUrl,
     relationshipResponse.trace.attempts,
@@ -702,7 +841,32 @@ const lookupOneRfc = Effect.fnUntraced(function* (
       relationshipPage.meta.next !== null ||
       relationshipPage.meta.total_count > relationshipPage.objects.length ||
       relationshipPage.objects.length >= datatrackerSuccessorLimit,
-    requests: [documentResponse.trace, relationshipResponse.trace],
+    requests: [exact.trace, relationshipResponse.trace],
+  };
+});
+
+const lookupExactRfc = Effect.fnUntraced(function* (
+  http: HttpClient.HttpClient,
+  baseUrl: string,
+  identifier: string,
+): Effect.fn.Return<LiveExactRfcLookup, RfcDiscoveryError> {
+  const startedAt = yield* Clock.currentTimeMillis;
+  const name = normalizeRfcName(identifier);
+  if (name === undefined) {
+    return yield* new RfcDiscoveryError({
+      stage: "request",
+      url: baseUrl,
+      reason: "RFC identifier must contain a positive published RFC number",
+      attempts: 0,
+    });
+  }
+  const exact = yield* fetchExactDocument(http, baseUrl, name);
+  const document = yield* normalizeDocument(exact.document, [], exact.url, exact.trace.attempts);
+  const finishedAt = yield* Clock.currentTimeMillis;
+  return {
+    document,
+    requests: [exact.trace],
+    metadataMs: Math.max(0, finishedAt - startedAt),
   };
 });
 
@@ -857,6 +1021,7 @@ export const makeRfcDiscoveryHttpLayer = (
   Layer.succeed(
     RfcDiscovery,
     RfcDiscovery.of({
+      lookupExactRfc: (identifier) => lookupExactRfc(http, baseUrl, identifier),
       lookupKnownRfc: (identifier) => lookupKnownRfc(http, baseUrl, identifier),
       discoverTopic: (searchTerms) => discoverTopic(http, baseUrl, searchTerms),
     }),
@@ -876,6 +1041,7 @@ export const makeDefaultRfcDiscoveryLayer = (
     Effect.gen(function* () {
       const http = yield* HttpClient.HttpClient;
       return RfcDiscovery.of({
+        lookupExactRfc: (identifier) => lookupExactRfc(http, baseUrl, identifier),
         lookupKnownRfc: (identifier) => lookupKnownRfc(http, baseUrl, identifier),
         discoverTopic: (searchTerms) => discoverTopic(http, baseUrl, searchTerms),
       });

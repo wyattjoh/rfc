@@ -182,7 +182,7 @@ const citationRequestFor = (
     throw new Error("The duplicate evaluation quote is not repeated in the RFC Editor source");
   }
   return {
-    schemaVersion: 1 as const,
+    schemaVersion: 2 as const,
     rfc: evaluationCase.rfc,
     claim: evaluationCase.claim,
     quote,
