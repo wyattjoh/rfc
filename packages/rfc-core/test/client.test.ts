@@ -13,6 +13,7 @@ import {
   InvalidInputError,
   RfcClientClosedError,
   RfcDiscoveryError,
+  RfcSourceFetchError,
   createRfcClient as createCoreRfcClient,
   decodeResearchRequest,
   hashRfcSource,
@@ -989,6 +990,68 @@ describe("createRfcClient", () => {
     expect(result.evidence[0]?.provenance.sourceHash).toBe(hashRfcSource(sourceText));
   });
 
+  test("does not persist a source response marked no-store", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    // A previously stored entry must also be removed once upstream forbids storage.
+    await seedLiveSourceCacheEntry(cacheDirectory, {
+      text: sourceText,
+      fetchedAt: new Date(0).toISOString(),
+      freshUntil: new Date(0).toISOString(),
+    });
+    const datatracker = makeDatatrackerHttpClient((url) =>
+      url.pathname.endsWith("/document/rfc9110/")
+        ? Response.json(datatrackerDocument)
+        : Response.json({
+            meta: { limit: 64, offset: 0, total_count: 0, next: null },
+            objects: [],
+          }),
+    );
+    let sourceRequests = 0;
+    const sourceHttp = HttpClient.make((request) => {
+      sourceRequests += 1;
+      return Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          new Response(sourceText, {
+            status: 200,
+            headers: {
+              "cache-control": "no-store",
+              "content-type": "text/plain; charset=utf-8",
+            },
+          }),
+        ),
+      );
+    });
+    const client = await createRfcClient({
+      cacheDirectory,
+      datatrackerHttpClient: datatracker.client,
+      rfcSourceHttpClient: sourceHttp,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      decisionModel: makeDecisionModel(),
+      now: () => 30_000,
+    });
+    clients.push(client);
+    const request = {
+      schemaVersion: 2 as const,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+      searchTerms: undefined,
+    };
+
+    const first = await client.research(request);
+    const second = await client.research(request);
+
+    expect(first.evidence[0]?.provenance.sourceHash).toBe(hashRfcSource(sourceText));
+    expect(await Bun.file(join(cacheDirectory, "sources", "v2", "RFC9110.json")).exists()).toBe(
+      false,
+    );
+    // Nothing was stored, so the second read cannot be served from cache.
+    expect(second.diagnostics.retrieval?.sourceCacheOutcome).not.toBe("hit");
+    expect(sourceRequests).toBe(2);
+  });
+
   test("fails closed when stale RFC text cannot be revalidated", async () => {
     const cacheDirectory = await makeCacheDirectory();
     let now = 0;
@@ -1266,6 +1329,24 @@ describe("createRfcClient", () => {
         code: "discovery_failed",
         message:
           "Unable to retrieve live RFC metadata from https://datatracker.example/api/v1/doc/document/rfc9110/?format=json: Datatracker returned HTTP 503",
+      },
+    });
+
+    expect(
+      toErrorEnvelope(
+        new RfcSourceFetchError({
+          stage: "request",
+          url: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+          reason: "RFC Editor returned HTTP 503",
+        }),
+      ),
+    ).toEqual({
+      schemaVersion: 2,
+      kind: "error",
+      error: {
+        code: "source_fetch_failed",
+        message:
+          "Unable to fetch RFC source from https://www.rfc-editor.org/rfc/rfc9110.txt: RFC Editor returned HTTP 503",
       },
     });
   });

@@ -920,7 +920,7 @@ export const toErrorEnvelope = (error: unknown): ErrorEnvelope => {
       kind: "error",
       error: {
         code: "source_fetch_failed",
-        message: `Unable to fetch RFC source: ${error.reason}`,
+        message: `Unable to fetch RFC source from ${error.url}: ${error.reason}`,
       },
     };
   }

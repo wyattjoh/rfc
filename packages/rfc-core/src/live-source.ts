@@ -98,6 +98,10 @@ type LiveSourceResponse = {
   readonly text: string | undefined;
   readonly etag: string | undefined;
   readonly maxAgeMilliseconds: number;
+  /**
+   * Whether the response carries `Cache-Control: no-store`.
+   */
+  readonly noStore: boolean;
 };
 
 /**
@@ -154,6 +158,18 @@ const entryPath = (pathService: Path.Path, sourceDirectory: string, identifier: 
 const validEtag = (value: string): boolean => /^(?:W\/)?"[^"\r\n]*"$/.test(value);
 
 const maximumFreshnessMilliseconds = 365 * 24 * 60 * 60 * 1_000;
+
+/**
+ * Whether a response forbids persistent storage.
+ *
+ * `no-store` is distinct from `no-cache`: the latter permits storing a response
+ * so long as it is revalidated before reuse, while the former forbids writing it
+ * to the cache at all.
+ */
+const noStoreDirective = (headers: Headers.Headers): boolean => {
+  const cacheControl = Option.getOrUndefined(Headers.get("cache-control")(headers));
+  return cacheControl !== undefined && /(?:^|,)\s*no-store\s*(?:,|$)/i.test(cacheControl);
+};
 
 const maxAgeMilliseconds = (headers: Headers.Headers): number => {
   const cacheControl = Option.getOrUndefined(Headers.get("cache-control")(headers));
@@ -285,6 +301,7 @@ const fetchFromRfcEditor = (
         text: undefined,
         etag: (yield* responseEtag(response.headers, url)) ?? etag,
         maxAgeMilliseconds: maxAgeMilliseconds(response.headers),
+        noStore: noStoreDirective(response.headers),
       };
     }
     if (response.status !== 200) {
@@ -308,6 +325,7 @@ const fetchFromRfcEditor = (
       text: yield* readBoundedSourceText(response, url),
       etag: yield* responseEtag(response.headers, url),
       maxAgeMilliseconds: maxAgeMilliseconds(response.headers),
+      noStore: noStoreDirective(response.headers),
     };
   }).pipe(
     Effect.timeout(Duration.millis(rfcSourceDeadlineMilliseconds)),
@@ -384,6 +402,7 @@ export const makeLiveRfcSourceLayer = (fetcher: RfcSourceFetcher): Layer.Layer<L
               text: normalized.text,
               etag: undefined,
               maxAgeMilliseconds: 60 * 60 * 1_000,
+              noStore: false,
             };
           },
           catch: (error) =>
@@ -498,6 +517,28 @@ const writeEntry = Effect.fnUntraced(function* (
   );
 });
 
+const removeEntry = Effect.fnUntraced(function* (
+  sourceDirectory: string,
+  identifier: string,
+): Effect.fn.Return<void, RfcSourceCacheError, FileSystem.FileSystem | Path.Path> {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const pathService = yield* Path.Path;
+  const path = entryPath(pathService, sourceDirectory, identifier);
+  yield* fileSystem.remove(path, { force: true }).pipe(
+    Effect.catchTag("PlatformError", (error) =>
+      isNotFound(error)
+        ? Effect.void
+        : Effect.fail(
+            new RfcSourceCacheError({
+              stage: "write",
+              sourcePath: path,
+              reason: error.message,
+            }),
+          ),
+    ),
+  );
+});
+
 const sourceFromEntry = (entry: LiveSourceCacheEntry): RfcSource => ({
   identifier: entry.identifier,
   rfcNumber: entry.rfcNumber,
@@ -601,7 +642,11 @@ export const loadLiveRfcSource = Effect.fnUntraced(function* (
       fetchedAt: new Date(now).toISOString(),
       freshUntil: new Date(now + response.maxAgeMilliseconds).toISOString(),
     };
-    yield* writeEntry(sourceDirectory, refreshed);
+    if (response.noStore) {
+      yield* removeEntry(sourceDirectory, document.identifier);
+    } else {
+      yield* writeEntry(sourceDirectory, refreshed);
+    }
     return {
       source: sourceFromEntry(refreshed),
       outcome: "revalidated",
@@ -639,7 +684,11 @@ export const loadLiveRfcSource = Effect.fnUntraced(function* (
       : nextResult.failure;
   }
   const next = nextResult.success;
-  yield* writeEntry(sourceDirectory, next);
+  if (response.noStore) {
+    yield* removeEntry(sourceDirectory, document.identifier);
+  } else {
+    yield* writeEntry(sourceDirectory, next);
+  }
   return {
     source: sourceFromEntry(next),
     outcome: corrupt ? "repaired" : stale ? "replaced" : "miss",
