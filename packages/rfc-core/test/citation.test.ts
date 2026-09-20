@@ -12,8 +12,7 @@ import {
   CitationQuoteAmbiguousError,
   CitationVerificationResultSchema,
   citationPolicy,
-  RfcNotFoundError,
-  RfcSourceCacheError,
+  RfcDiscoveryError,
   createRfcClient as createCoreRfcClient,
   hashRfcSource,
   type RfcClient,
@@ -21,17 +20,70 @@ import {
   type RfcSourceFetcher,
 } from "../src/index";
 import type * as Decision from "effect/unstable/ai/Decision";
-import type { RfcCalibrationClientOptions } from "../src/internal-calibration";
+import type { CatalogDocument, CatalogSource } from "../src/catalog";
 
 const clients: Array<RfcClient> = [];
-type TestClientOptions = RfcCalibrationClientOptions & {
+type TestClientOptions = Omit<RfcClientOptions, "automaticAnswerActivation"> & {
   readonly automaticAnswerActivation?: RfcClientOptions["automaticAnswerActivation"];
+  readonly metadataSource: CatalogSource;
 };
-const createRfcClient = (options: TestClientOptions) =>
-  createCoreRfcClient({
-    ...options,
-    automaticAnswerActivation: options.automaticAnswerActivation,
+
+const makeDatatrackerClient = (documents: ReadonlyArray<CatalogDocument>) =>
+  HttpClient.make((request, url) => {
+    const name = url.pathname.match(/\/document\/(rfc\d+)\/$/)?.[1];
+    if (name !== undefined) {
+      const document = documents.find((candidate) => candidate.identifier.toLowerCase() === name);
+      return Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          document === undefined
+            ? new Response("not found", { status: 404 })
+            : Response.json({
+                name,
+                rfc_number: document.rfcNumber,
+                title: document.title,
+                abstract: document.abstract,
+                resource_uri: `/api/v1/doc/document/${name}/`,
+                stream: `/api/v1/name/streamname/${document.stream}/`,
+                states: [],
+              }),
+        ),
+      );
+    }
+    const target = url.searchParams.get("target__name")?.toUpperCase();
+    const targetDocument = documents.find((candidate) => candidate.identifier === target);
+    const objects = [
+      ...(targetDocument?.updatedBy ?? []).map((identifier) => ({
+        source: `/api/v1/doc/document/${identifier.toLowerCase()}/`,
+        target: `/api/v1/doc/document/${target?.toLowerCase()}/`,
+        relationship: "/api/v1/name/docrelationshipname/updates/",
+      })),
+      ...(targetDocument?.obsoletedBy ?? []).map((identifier) => ({
+        source: `/api/v1/doc/document/${identifier.toLowerCase()}/`,
+        target: `/api/v1/doc/document/${target?.toLowerCase()}/`,
+        relationship: "/api/v1/name/docrelationshipname/obs/",
+      })),
+    ];
+    return Effect.succeed(
+      HttpClientResponse.fromWeb(
+        request,
+        Response.json({
+          meta: { limit: 64, offset: 0, total_count: objects.length, next: null },
+          objects,
+        }),
+      ),
+    );
   });
+
+const createRfcClient = async (options: TestClientOptions) => {
+  const { metadataSource, ...clientOptions } = options;
+  const documents = await metadataSource();
+  return createCoreRfcClient({
+    ...clientOptions,
+    datatrackerHttpClient: clientOptions.datatrackerHttpClient ?? makeDatatrackerClient(documents),
+    automaticAnswerActivation: clientOptions.automaticAnswerActivation,
+  });
+};
 
 const makeCacheDirectory = async () => mkdtemp(join(tmpdir(), "rfc-core-citation-test-"));
 
@@ -159,11 +211,10 @@ describe("citation verification", () => {
     const calls: Array<unknown> = [];
     const client = await createRfcClient({
       cacheDirectory,
-      catalogPath: undefined,
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      catalogSource: async () => [catalogDocument],
+      metadataSource: async () => [catalogDocument],
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       decisionModel: makeDecisionModel(calls),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
@@ -199,7 +250,14 @@ describe("citation verification", () => {
       resolvedModels: ["jev-test"],
       usage: { inputTokens: 12, outputTokens: 8 },
       confidence: 0.95,
+      retrieval: {
+        requestCount: 3,
+        datatrackerRequestCount: 2,
+        sourceRequestCount: 1,
+        sourceCacheOutcome: "miss",
+      },
     });
+    expect(result.diagnostics.retrieval?.requests).toHaveLength(3);
     expect(calls).toHaveLength(1);
     expect(CitationVerificationResultSchema.make(result)).toEqual(result);
   });
@@ -209,12 +267,11 @@ describe("citation verification", () => {
     const typeSafe = makeTypeSafeCitationHttpClient(["jev-first", "jev-second"]);
     const client = await createRfcClient({
       cacheDirectory,
-      catalogPath: undefined,
       modelAlias: "jev-latest",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
       typeSafeHttpClient: typeSafe.client,
-      catalogSource: async () => [catalogDocument],
+      metadataSource: async () => [catalogDocument],
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
     });
@@ -234,6 +291,12 @@ describe("citation verification", () => {
     expect(second.diagnostics.resolvedModels).toEqual(["jev-second"]);
     expect(first.diagnostics.resolvedModel).toBe("jev-first");
     expect(second.diagnostics.resolvedModel).toBe("jev-second");
+    expect(second.diagnostics.retrieval).toMatchObject({
+      requestCount: 2,
+      sourceRequestCount: 0,
+      sourceCacheOutcome: "hit",
+    });
+    expect(second.diagnostics.retrieval?.requests).toHaveLength(2);
     expect(typeSafe.calls()).toBe(2);
   });
 
@@ -260,11 +323,10 @@ describe("citation verification", () => {
     const cacheDirectory = await makeCacheDirectory();
     const client = await createRfcClient({
       cacheDirectory,
-      catalogPath: undefined,
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      catalogSource: async () => [catalogDocument],
+      metadataSource: async () => [catalogDocument],
       rfcSourceFetcher: makeSourceFetcher(unicodeSourceText),
       decisionModel: makeDecisionModel([]),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
@@ -303,11 +365,10 @@ describe("citation verification", () => {
     const calls: Array<unknown> = [];
     const client = await createRfcClient({
       cacheDirectory,
-      catalogPath: undefined,
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      catalogSource: async () => [catalogDocument],
+      metadataSource: async () => [catalogDocument],
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       decisionModel: makeDecisionModel(calls),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
@@ -337,7 +398,7 @@ describe("citation verification", () => {
         quote: "The server MUST cache requests.",
         offset: null,
       }),
-    ).rejects.toBeInstanceOf(RfcNotFoundError);
+    ).rejects.toBeInstanceOf(RfcDiscoveryError);
   });
 
   test("requires an offset for duplicate quotations and rejects mismatches", async () => {
@@ -345,11 +406,10 @@ describe("citation verification", () => {
     const cacheDirectory = await makeCacheDirectory();
     const client = await createRfcClient({
       cacheDirectory,
-      catalogPath: undefined,
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      catalogSource: async () => [catalogDocument],
+      metadataSource: async () => [catalogDocument],
       rfcSourceFetcher: makeSourceFetcher(duplicate),
       decisionModel: makeDecisionModel([]),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
@@ -425,11 +485,10 @@ describe("citation verification", () => {
       const calls: Array<unknown> = [];
       const client = await createRfcClient({
         cacheDirectory,
-        catalogPath: undefined,
         modelAlias: "jev-test",
         typeSafeApiKey: undefined,
         typeSafeApiUrl: undefined,
-        catalogSource: async () => [catalogDocument],
+        metadataSource: async () => [catalogDocument],
         rfcSourceFetcher: makeSourceFetcher(sourceText),
         decisionModel: makeDecisionModel(calls, testCase.verdict, testCase.confidence),
         now: () => Date.parse("2026-01-01T00:00:00.000Z"),
@@ -466,11 +525,10 @@ describe("citation verification", () => {
     });
     const client = await createRfcClient({
       cacheDirectory,
-      catalogPath: undefined,
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      catalogSource: async () => [catalogDocument],
+      metadataSource: async () => [catalogDocument],
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       decisionModel: makeDecisionModel(calls, "verified", 0.95, true, () => {
         resolveFirstAttempt?.();
@@ -499,11 +557,10 @@ describe("citation verification", () => {
     let nonRetryableCalls = 0;
     const nonRetryableClient = await createRfcClient({
       cacheDirectory: await makeCacheDirectory(),
-      catalogPath: undefined,
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      catalogSource: async () => [catalogDocument],
+      metadataSource: async () => [catalogDocument],
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       decisionModel: {
         [DecisionModel.TypeId]: DecisionModel.TypeId,
@@ -536,11 +593,10 @@ describe("citation verification", () => {
     let delayedCalls = 0;
     const delayedClient = await createRfcClient({
       cacheDirectory: await makeCacheDirectory(),
-      catalogPath: undefined,
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      catalogSource: async () => [catalogDocument],
+      metadataSource: async () => [catalogDocument],
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       decisionModel: {
         [DecisionModel.TypeId]: DecisionModel.TypeId,
@@ -584,11 +640,10 @@ describe("citation verification", () => {
     let exhaustedCalls = 0;
     const exhaustedClient = await createRfcClient({
       cacheDirectory: await makeCacheDirectory(),
-      catalogPath: undefined,
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      catalogSource: async () => [catalogDocument],
+      metadataSource: async () => [catalogDocument],
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       decisionModel: {
         [DecisionModel.TypeId]: DecisionModel.TypeId,
@@ -651,11 +706,10 @@ describe("citation verification", () => {
     const successful = makeDecisionModel([]);
     const client = await createRfcClient({
       cacheDirectory,
-      catalogPath: undefined,
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      catalogSource: async () => [catalogDocument],
+      metadataSource: async () => [catalogDocument],
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       decisionModel: {
         [DecisionModel.TypeId]: DecisionModel.TypeId,
@@ -709,11 +763,10 @@ describe("citation verification", () => {
     const cacheDirectory = await makeCacheDirectory();
     const client = await createRfcClient({
       cacheDirectory,
-      catalogPath: undefined,
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      catalogSource: async () => [catalogDocument],
+      metadataSource: async () => [catalogDocument],
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       decisionModel: {
         [DecisionModel.TypeId]: DecisionModel.TypeId,
@@ -744,15 +797,14 @@ describe("citation verification", () => {
     ).rejects.toMatchObject({ _tag: "DecisionModelError", stage: "citation" });
   });
 
-  test("reports malformed cached source data as a typed failure", async () => {
+  test("repairs malformed cached source data from the live source", async () => {
     const cacheDirectory = await makeCacheDirectory();
     const client = await createRfcClient({
       cacheDirectory,
-      catalogPath: undefined,
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      catalogSource: async () => [catalogDocument],
+      metadataSource: async () => [catalogDocument],
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       decisionModel: makeDecisionModel([]),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
@@ -766,17 +818,16 @@ describe("citation verification", () => {
       quote: "The client MUST send a request containing the target resource.",
       offset: null,
     });
-    const contentPath = join(cacheDirectory, "sources", `${hashRfcSource(sourceText)}.json`);
+    const contentPath = join(cacheDirectory, "sources", "v2", "RFC9110.json");
     await Bun.write(contentPath, JSON.stringify({ text: "tampered" }));
 
-    await expect(
-      client.verifyCitation({
-        schemaVersion: 1,
-        rfc: "RFC9110",
-        claim: "The client sends a request.",
-        quote: "The client MUST send a request containing the target resource.",
-        offset: null,
-      }),
-    ).rejects.toBeInstanceOf(RfcSourceCacheError);
+    const repaired = await client.verifyCitation({
+      schemaVersion: 1,
+      rfc: "RFC9110",
+      claim: "The client sends a request.",
+      quote: "The client MUST send a request containing the target resource.",
+      offset: null,
+    });
+    expect(repaired.verdict).toBe("verified");
   });
 });

@@ -144,11 +144,19 @@ const researchRequestFor = (evaluationCase: EvaluationCase) => {
   if (evaluationCase.question === null) {
     throw new Error(`Research case ${evaluationCase.id} is missing a question`);
   }
-  return {
-    schemaVersion: 1 as const,
-    question: evaluationCase.question,
-    rfc: evaluationCase.rfc,
-  };
+  return evaluationCase.rfc === null
+    ? {
+        schemaVersion: 2 as const,
+        question: evaluationCase.question,
+        rfc: null,
+        searchTerms: evaluationCase.searchTerms ?? ["HTTP client request message"],
+      }
+    : {
+        schemaVersion: 2 as const,
+        question: evaluationCase.question,
+        rfc: evaluationCase.rfc,
+        searchTerms: undefined,
+      };
 };
 
 const citationRequestFor = (
@@ -215,10 +223,9 @@ const defaultLiveEvaluationOptions: LiveEvaluationOptions = {
 /**
  * Run the opt-in live TypeSafe calibration against authoritative RFC Editor sources.
  *
- * Catalog and source refreshes happen before an untimed pass over every live
- * case and three sequential timed iterations. This warms currency successors
- * and provider-accepted topic sources while preserving a bounded provider call
- * order and excluding catalog refresh from both p95 gates. The provider key is
+ * An untimed pass over every live case warms request-local source entries before
+ * three sequential timed iterations. This preserves a bounded provider call
+ * order while excluding cache warming from both p95 gates. The provider key is
  * resolved from the same injectable Bun.secrets boundary used by the CLI.
  *
  * @param options Explicit live-run opt-in and credential boundary.
@@ -277,7 +284,6 @@ export const runLiveEvaluation = async (
   );
   const client = await createRfcCalibrationClient({
     cacheDirectory: config.evaluationCacheDirectory,
-    catalogPath: undefined,
     modelAlias: config.evaluationModel,
     policyPreset: config.policyPreset,
     typeSafeApiKey: apiKey,
@@ -285,14 +291,6 @@ export const runLiveEvaluation = async (
   });
 
   try {
-    await client.catalogRefresh();
-    await client.prefetchSources([
-      ...new Set(
-        liveCorpus.cases.flatMap((evaluationCase) =>
-          evaluationCase.rfc === null ? [] : [evaluationCase.rfc],
-        ),
-      ),
-    ]);
     const citationSources = await loadCitationSources();
     const evaluateCase = async (evaluationCase: EvaluationCase) => {
       try {

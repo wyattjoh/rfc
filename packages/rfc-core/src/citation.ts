@@ -2,13 +2,9 @@ import { Cause, Clock, Duration, Effect, FileSystem, Ref, Result, Schema } from 
 import * as AiError from "effect/unstable/ai/AiError";
 import * as Decision from "effect/unstable/ai/Decision";
 import * as DecisionModel from "effect/unstable/ai/DecisionModel";
-import {
-  CatalogDocumentSchema,
-  CatalogStatusSchema,
-  type CatalogDocument,
-  type CatalogStatus,
-  type RfcCatalog,
-} from "./catalog";
+import { CatalogDocumentSchema, type CatalogDocument, type RfcCatalog } from "./catalog";
+import { LiveRetrievalTraceSchema, type LiveRetrievalTrace } from "./discovery";
+import { LiveRfcSource, RfcSourceRevalidationError } from "./live-source";
 import { makeUtf8OffsetMap, utf8OffsetUnit } from "./offsets";
 import {
   DecisionModelError,
@@ -140,7 +136,7 @@ const CitationUsageSchema = Schema.Struct({
 });
 
 const CitationTimingsSchema = Schema.Struct({
-  catalogMs: Schema.Finite,
+  metadataMs: Schema.Finite,
   sourceMs: Schema.Finite,
   verificationMs: Schema.Finite,
   totalMs: Schema.Finite,
@@ -157,7 +153,7 @@ export const CitationVerificationDiagnosticsSchema = Schema.Struct({
   resolvedModels: Schema.Array(Schema.NonEmptyString),
   usage: CitationUsageSchema,
   timings: CitationTimingsSchema,
-  catalog: CatalogStatusSchema,
+  retrieval: Schema.optionalKey(LiveRetrievalTraceSchema),
   probabilities: Schema.Record(Schema.String, Schema.Finite),
   confidence: Schema.NullOr(Schema.Finite),
 });
@@ -237,21 +233,29 @@ export interface CitationVerificationOptions {
    */
   readonly catalog: RfcCatalog;
   /**
-   * Catalog status captured after freshness validation or refresh.
-   */
-  readonly catalogStatus: CatalogStatus;
-  /**
    * Source cache directory.
    */
   readonly sourceDirectory: string;
+  /**
+   * Optional request-local source loader used by live retrieval.
+   */
+  readonly sourceLoader?:
+    | ((
+        document: CatalogDocument,
+      ) => Effect.Effect<
+        RfcSource | { readonly source: RfcSource; readonly retrieval: LiveRetrievalTrace },
+        RfcSourceCacheError | RfcSourceFetchError | RfcSourceRevalidationError,
+        FileSystem.FileSystem | LiveRfcSource
+      >)
+    | undefined;
   /**
    * Model alias requested from the official provider.
    */
   readonly modelAlias: string;
   /**
-   * Time spent validating or refreshing the catalog.
+   * Time spent retrieving and decoding request-local RFC metadata.
    */
-  readonly catalogMs: number;
+  readonly metadataMs: number;
   /**
    * Start timestamp for the complete operation.
    */
@@ -503,12 +507,12 @@ interface CitationResultInput {
   readonly request: CitationVerificationRequest;
   readonly document: CatalogDocument;
   readonly source: RfcSource;
-  readonly catalogStatus: CatalogStatus;
+  readonly retrieval: LiveRetrievalTrace | undefined;
   readonly modelAlias: string;
   readonly resolvedModel: string;
   readonly resolvedModels: ReadonlyArray<string>;
   readonly timings: {
-    readonly catalogMs: number;
+    readonly metadataMs: number;
     readonly sourceMs: number;
     readonly verificationMs: number;
     readonly totalMs: number;
@@ -526,7 +530,7 @@ const resultFrom = ({
   request,
   document,
   source,
-  catalogStatus,
+  retrieval,
   modelAlias,
   resolvedModel,
   resolvedModels,
@@ -559,7 +563,7 @@ const resultFrom = ({
     resolvedModels,
     usage,
     timings,
-    catalog: catalogStatus,
+    retrieval,
     probabilities,
     confidence,
   } satisfies CitationVerificationDiagnostics;
@@ -598,11 +602,13 @@ export const verifyCitation = Effect.fnUntraced(function* (
   | CitationOffsetMismatchError
   | RfcSourceCacheError
   | RfcSourceFetchError
+  | RfcSourceRevalidationError
   | DecisionModelError
   | RfcNotFoundError,
   | FileSystem.FileSystem
   | RfcSourceStore
   | RfcSourceServiceTag
+  | LiveRfcSource
   | DecisionModel.DecisionModel
   | ResolvedModelName
   | ResolvedModelNames
@@ -615,7 +621,11 @@ export const verifyCitation = Effect.fnUntraced(function* (
       error instanceof RfcNotFoundError ? error : new RfcNotFoundError({ rfc: request.rfc }),
   });
   const sourceStarted = yield* Clock.currentTimeMillis;
-  const source = yield* loadRfcSource(document, options.sourceDirectory);
+  const loadedSource = yield* options.sourceLoader === undefined
+    ? loadRfcSource(document, options.sourceDirectory)
+    : options.sourceLoader(document);
+  const source = "source" in loadedSource ? loadedSource.source : loadedSource;
+  const retrieval = "source" in loadedSource ? loadedSource.retrieval : undefined;
   const sourceFinished = yield* Clock.currentTimeMillis;
   const offsets = makeUtf8OffsetMap(source.text);
   const occurrences = findOccurrences(source.text, request.quote, offsets);
@@ -628,12 +638,12 @@ export const verifyCitation = Effect.fnUntraced(function* (
       request,
       document,
       source,
-      catalogStatus: options.catalogStatus,
+      retrieval,
       modelAlias: options.modelAlias,
       resolvedModel: resolvedModelBeforeJudgment,
       resolvedModels: [],
       timings: {
-        catalogMs: options.catalogMs,
+        metadataMs: options.metadataMs,
         sourceMs,
         verificationMs: 0,
         totalMs: Math.max(0, finishedAt - options.startedAt),
@@ -701,12 +711,12 @@ export const verifyCitation = Effect.fnUntraced(function* (
     request: exactRequest,
     document,
     source,
-    catalogStatus: options.catalogStatus,
+    retrieval,
     modelAlias: options.modelAlias,
     resolvedModel,
     resolvedModels,
     timings: {
-      catalogMs: options.catalogMs,
+      metadataMs: options.metadataMs,
       sourceMs,
       verificationMs: Math.max(0, verificationFinished - verificationStarted),
       totalMs: Math.max(0, finishedAt - options.startedAt),

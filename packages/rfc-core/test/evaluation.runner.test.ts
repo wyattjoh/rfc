@@ -5,18 +5,18 @@ import { describe, expect, test } from "bun:test";
 import { Effect, Ref } from "effect";
 import * as Decision from "effect/unstable/ai/Decision";
 import * as DecisionModel from "effect/unstable/ai/DecisionModel";
+import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 import {
   evaluationCorpus,
   observationFromCitationResult,
   observationFromEvidenceBundle,
-  ResolvedModelName,
-  ResolvedModelNames,
   runEvaluation,
   type EvaluationCase,
   type EvaluationObservation,
   type RfcSourceFetcher,
 } from "../src/index";
 import { createRfcCalibrationClient } from "../src/internal-calibration";
+import { ResolvedModelName, ResolvedModelNames } from "../src/research";
 
 const fixtureDocuments = [
   {
@@ -270,11 +270,19 @@ const sourceFetcher: RfcSourceFetcher = async (document) => {
 const researchRequestForCase = (evaluationCase: EvaluationCase) => {
   if (evaluationCase.question === null)
     throw new Error(`Missing question for ${evaluationCase.id}`);
-  return {
-    schemaVersion: 1 as const,
-    question: evaluationCase.question,
-    rfc: evaluationCase.rfc,
-  };
+  return evaluationCase.rfc === null
+    ? {
+        schemaVersion: 2 as const,
+        question: evaluationCase.question,
+        rfc: null,
+        searchTerms: evaluationCase.searchTerms ?? ["HTTP client request message"],
+      }
+    : {
+        schemaVersion: 2 as const,
+        question: evaluationCase.question,
+        rfc: evaluationCase.rfc,
+        searchTerms: undefined,
+      };
 };
 
 const citationRequestForCase = (evaluationCase: EvaluationCase, source: string) => {
@@ -302,13 +310,65 @@ const citationRequestForCase = (evaluationCase: EvaluationCase, source: string) 
   };
 };
 
+const datatrackerClient = HttpClient.make((request, url) => {
+  const exactName = url.pathname.match(/\/document\/(rfc\d+)\/$/)?.[1];
+  if (exactName !== undefined) {
+    const document = fixtureDocuments.find(
+      (candidate) => candidate.identifier.toLowerCase() === exactName,
+    );
+    return Effect.succeed(
+      HttpClientResponse.fromWeb(
+        request,
+        document === undefined
+          ? new Response("not found", { status: 404 })
+          : Response.json({
+              name: exactName,
+              rfc_number: document.rfcNumber,
+              title: document.title,
+              abstract: document.abstract,
+              resource_uri: `/api/v1/doc/document/${exactName}/`,
+              stream: "/api/v1/name/streamname/ietf/",
+              states: [],
+            }),
+      ),
+    );
+  }
+  if (url.pathname.endsWith("/relateddocument/")) {
+    return Effect.succeed(
+      HttpClientResponse.fromWeb(
+        request,
+        Response.json({
+          meta: { limit: 64, offset: 0, total_count: 0, next: null },
+          objects: [],
+        }),
+      ),
+    );
+  }
+  return Effect.succeed(
+    HttpClientResponse.fromWeb(
+      request,
+      Response.json({
+        meta: { limit: 20, offset: 0, total_count: fixtureDocuments.length, next: null },
+        objects: fixtureDocuments.map((document) => ({
+          name: document.identifier.toLowerCase(),
+          rfc_number: document.rfcNumber,
+          title: document.title,
+          abstract: document.abstract,
+          resource_uri: `/api/v1/doc/document/${document.identifier.toLowerCase()}/`,
+          stream: "/api/v1/name/streamname/ietf/",
+          states: [],
+        })),
+      }),
+    ),
+  );
+});
+
 const clientOptions = (cacheDirectory: string, decisionModel: DecisionModel.DecisionModel) => ({
   cacheDirectory,
-  catalogPath: undefined,
+  datatrackerHttpClient: datatrackerClient,
   modelAlias: "jev-latest",
   typeSafeApiKey: undefined,
   typeSafeApiUrl: undefined,
-  catalogSource: async () => fixtureDocuments,
   rfcSourceFetcher: sourceFetcher,
   decisionModel,
   policyPreset: "precision-v1",

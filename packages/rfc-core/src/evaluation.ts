@@ -62,6 +62,7 @@ export const EvaluationCaseSchema = Schema.Struct({
   mode: EvaluationModeSchema,
   rfc: Schema.NullOr(Schema.NonEmptyString),
   question: Schema.NullOr(Schema.NonEmptyString),
+  searchTerms: Schema.optionalKey(Schema.Array(Schema.NonEmptyString)),
   claim: Schema.NullOr(Schema.NonEmptyString),
   quote: Schema.NullOr(Schema.NonEmptyString),
   offset: Schema.NullOr(Schema.Natural),
@@ -228,6 +229,7 @@ const corpusCases = [
     mode: "topic",
     rfc: null,
     question: "How does an HTTP client send a request message?",
+    searchTerms: ["HTTP client request message"],
     claim: null,
     quote: null,
     offset: null,
@@ -1043,7 +1045,7 @@ export const observationFromEvidenceBundle = (
 };
 
 const timingsFromCitation = (result: CitationVerificationResult): EvaluationTimings => ({
-  catalogMs: result.diagnostics.timings.catalogMs,
+  catalogMs: result.diagnostics.timings.metadataMs,
   documentMs: null,
   sourceMs: result.diagnostics.timings.sourceMs,
   lexicalMs: null,

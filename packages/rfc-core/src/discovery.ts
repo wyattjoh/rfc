@@ -85,6 +85,7 @@ export const LiveRetrievalTraceSchema = Schema.Struct({
   ]),
   upstreamRows: Schema.optionalKey(Schema.Natural),
   uniqueCandidates: Schema.optionalKey(Schema.Natural),
+  topicTruncated: Schema.optionalKey(Schema.Boolean),
   traversalComplete: Schema.optionalKey(Schema.Boolean),
   traversalContexts: Schema.optionalKey(Schema.Natural),
   traversalDepth: Schema.optionalKey(Schema.Natural),
@@ -167,6 +168,10 @@ export interface LiveTopicDiscovery {
    * Number of rows returned before RFC deduplication.
    */
   readonly upstreamRows: number;
+  /**
+   * Whether any bounded query reported additional unfetched rows.
+   */
+  readonly truncated: boolean;
   /**
    * Total time spent retrieving and merging candidates.
    */
@@ -572,9 +577,8 @@ const decodeDocumentPage = (
     try: () => {
       const page = Schema.decodeUnknownSync(DatatrackerDocumentPageSchema)(value);
       if (
-        page.meta.next !== null ||
-        page.meta.total_count > datatrackerTopicResultLimit ||
-        page.objects.length > datatrackerTopicResultLimit
+        page.objects.length > datatrackerTopicResultLimit ||
+        page.meta.total_count < page.objects.length
       ) {
         throw new Error("topic response exceeded its bound");
       }
@@ -640,6 +644,7 @@ const normalizeDocument = (
 type ExactLookup = {
   readonly document: CatalogDocument;
   readonly successorNames: ReadonlyArray<string>;
+  readonly relationshipRows: number;
   readonly relationshipBoundHit: boolean;
   readonly requests: ReadonlyArray<RetrievalRequestTrace>;
 };
@@ -692,6 +697,7 @@ const lookupOneRfc = Effect.fnUntraced(function* (
     successorNames: [...normalized.updatedBy, ...normalized.obsoletedBy]
       .map((identifier) => identifier.toLowerCase())
       .sort(),
+    relationshipRows: relationshipPage.objects.length,
     relationshipBoundHit:
       relationshipPage.meta.next !== null ||
       relationshipPage.meta.total_count > relationshipPage.objects.length ||
@@ -739,7 +745,7 @@ const lookupKnownRfc = Effect.fnUntraced(function* (
     documents.push(lookup.document);
     requests.push(...lookup.requests);
     traversalDepth = Math.max(traversalDepth, current.depth);
-    successorRows += lookup.successorNames.length;
+    successorRows += lookup.relationshipRows;
     if (lookup.relationshipBoundHit) traversalComplete = false;
 
     for (const successorName of lookup.successorNames) {
@@ -787,23 +793,29 @@ const discoverTopic = Effect.fnUntraced(function* (
   searchTerms: ReadonlyArray<string>,
 ): Effect.fn.Return<LiveTopicDiscovery, RfcDiscoveryError> {
   const startedAt = yield* Clock.currentTimeMillis;
-  const queries = searchTerms.flatMap((term) => [
-    { term, field: "title" as const },
-    { term, field: "abstract" as const },
-  ]);
-  const streams = yield* Effect.forEach(
-    queries,
-    Effect.fnUntraced(function* ({ field, term }) {
-      const url = makeTopicUrl(baseUrl, term, field);
-      const response = yield* fetchJson(http, url, "metadata");
-      const page = yield* decodeDocumentPage(response.value, url, response.trace.attempts);
-      const documents = yield* Effect.forEach(page.objects, (document) =>
-        normalizeDocument(document, [], url, response.trace.attempts),
-      );
-      return { documents, trace: response.trace };
-    }),
-    { concurrency: 4 },
+  const termStreams = yield* Effect.forEach(
+    searchTerms,
+    (term) =>
+      Effect.forEach(
+        ["title", "abstract"] as const,
+        Effect.fnUntraced(function* (field) {
+          const url = makeTopicUrl(baseUrl, term, field);
+          const response = yield* fetchJson(http, url, "metadata");
+          const page = yield* decodeDocumentPage(response.value, url, response.trace.attempts);
+          const documents = yield* Effect.forEach(page.objects, (document) =>
+            normalizeDocument(document, [], url, response.trace.attempts),
+          );
+          return {
+            documents,
+            trace: response.trace,
+            truncated: page.meta.next !== null || page.meta.total_count > page.objects.length,
+          };
+        }),
+        { concurrency: 2 },
+      ),
+    { concurrency: 1 },
   );
+  const streams = termStreams.flat();
 
   const merged: Array<CatalogDocument> = [];
   const seen = new Set<string>();
@@ -826,6 +838,7 @@ const discoverTopic = Effect.fnUntraced(function* (
     documents: merged,
     requests: streams.map(({ trace }) => trace),
     upstreamRows: streams.reduce((count, stream) => count + stream.documents.length, 0),
+    truncated: streams.some(({ truncated }) => truncated),
     metadataMs: Math.max(0, finishedAt - startedAt),
   };
 });

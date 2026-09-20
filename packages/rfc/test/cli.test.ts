@@ -793,58 +793,31 @@ describe("rfc process protocol", () => {
       "1. Requirements\\n\\nThe client MUST send a request containing the target resource.\\n";
     const fetchedAt = new Date().toISOString();
     const sourceHash = hashRfcSource(sourceText);
-    await mkdir(join(cacheDirectory, "sources"), { recursive: true });
-    await writeFile(
-      join(cacheDirectory, "catalog.json"),
-      JSON.stringify({
-        schemaVersion: 1,
-        kind: "rfc_catalog",
-        cacheIdentity: "rfc-catalog-v1",
-        fetchedAt,
-        documents: [
-          {
-            identifier: "RFC9110",
-            rfcNumber: 9110,
-            title: "HTTP Semantics",
-            abstract: "HTTP semantics.",
-            status: "published",
-            stream: "ietf",
-            canonicalUrl: "https://datatracker.ietf.org/doc/rfc9110/",
-            updates: [],
-            updatedBy: [],
-            obsoletes: [],
-            obsoletedBy: [],
-          },
-        ],
-      }),
-    );
-    await writeFile(
-      join(cacheDirectory, "sources", `${sourceHash}.json`),
-      JSON.stringify({
-        schemaVersion: 1,
-        kind: "rfc_source_content",
-        contentHash: sourceHash,
-        text: sourceText,
-      }),
-    );
-    await writeFile(
-      join(cacheDirectory, "sources", "RFC9110.json"),
-      JSON.stringify({
-        schemaVersion: 1,
-        kind: "rfc_source_index",
-        identifier: "RFC9110",
-        rfcNumber: 9110,
-        sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
-        contentHash: sourceHash,
-        fetchedAt,
-      }),
-    );
+    await writeLiveSourceCache(cacheDirectory, sourceText, fetchedAt);
 
     let modelCalls = 0;
     const server = Bun.serve({
       port: 0,
       fetch(request) {
-        if (new URL(request.url).pathname !== "/systemone") {
+        const url = new URL(request.url);
+        if (url.pathname === "/api/v1/doc/document/rfc9110/") {
+          return Response.json({
+            name: "rfc9110",
+            rfc_number: 9110,
+            title: "HTTP Semantics",
+            abstract: "HTTP semantics.",
+            resource_uri: "/api/v1/doc/document/rfc9110/",
+            stream: "/api/v1/name/streamname/ietf/",
+            states: [],
+          });
+        }
+        if (url.pathname === "/api/v1/doc/relateddocument/") {
+          return Response.json({
+            meta: { limit: 64, offset: 0, total_count: 0, next: null },
+            objects: [],
+          });
+        }
+        if (url.pathname !== "/systemone") {
           return new Response("not found", { status: 404 });
         }
         modelCalls += 1;
@@ -869,6 +842,8 @@ describe("rfc process protocol", () => {
       cacheDirectory,
       "--typesafe-api-url",
       server.url.toString(),
+      "--datatracker-api-url",
+      `${server.url}api/v1/`,
       "--rfc",
       "RFC9110",
       "--claim",
@@ -896,6 +871,8 @@ describe("rfc process protocol", () => {
         cacheDirectory,
         "--typesafe-api-url",
         server.url.toString(),
+        "--datatracker-api-url",
+        `${server.url}api/v1/`,
       ],
       JSON.stringify({
         schemaVersion: 1,

@@ -1,59 +1,27 @@
-import { createRfcClient, type RfcClient, type RfcClientOptions } from "./index";
-import { calibrationOperationsFor } from "./internal-client";
 import { calibrationAnswerActivation } from "./activation";
-import type { EvidenceBundle } from "./research";
-import type { CatalogRefreshResult, CatalogSource, CatalogStatus } from "./catalog";
-import type { HttpClient } from "effect/unstable/http";
+import { createRfcClient, type RfcClient, type RfcClientOptions } from "./index";
 
 /**
- * Private schema-version-one request retained only by calibration fixtures.
+ * Private calibration client that exercises the same request-local version-two
+ * retrieval path as the public client while enabling measured answer outcomes.
  */
-export interface CalibrationResearchRequest {
-  readonly schemaVersion: 1;
-  readonly question: string;
-  readonly rfc: string | null;
-}
+export type RfcCalibrationClient = RfcClient;
 
 /**
- * Private calibration client isolated from the public version-two contract.
+ * Options for the private live-calibration client.
  */
-export type RfcCalibrationClient = Omit<RfcClient, "research"> & {
-  readonly research: (request: CalibrationResearchRequest) => Promise<EvidenceBundle>;
-  readonly catalogStatus: () => Promise<CatalogStatus>;
-  readonly catalogRefresh: () => Promise<CatalogRefreshResult>;
-  readonly prefetchSources: (rfcs: ReadonlyArray<string>) => Promise<void>;
-};
+export type RfcCalibrationClientOptions = Omit<RfcClientOptions, "automaticAnswerActivation">;
 
 /**
- * Construct the private live-calibration client without exposing its bypass
- * capability through the public client interface.
+ * Construct the private live-calibration client.
  *
- * @param options Cache, catalog fixture, clock, and provider options for calibration.
- * @returns A private client with calibration answers and legacy fixtures enabled.
+ * @param options Live discovery, source cache, clock, and provider options.
+ * @returns A version-two client with the private calibration capability.
  */
-export interface RfcCalibrationClientOptions extends Omit<
-  RfcClientOptions,
-  "automaticAnswerActivation"
-> {
-  readonly catalogPath?: string | undefined;
-  readonly catalogSource?: CatalogSource | undefined;
-  readonly catalogHttpClient?: HttpClient.HttpClient | undefined;
-  readonly catalogFetch?: typeof globalThis.fetch | undefined;
-}
-
-export const createRfcCalibrationClient = async (
+export const createRfcCalibrationClient = (
   options: RfcCalibrationClientOptions,
-): Promise<RfcCalibrationClient> => {
-  const client = await createRfcClient({
+): Promise<RfcCalibrationClient> =>
+  createRfcClient({
     ...options,
     automaticAnswerActivation: calibrationAnswerActivation,
   });
-  const operations = calibrationOperationsFor(client);
-  return {
-    ...client,
-    catalogStatus: operations.catalogStatus,
-    catalogRefresh: operations.catalogRefresh,
-    prefetchSources: operations.prefetchSources,
-    research: operations.researchLegacy,
-  };
-};

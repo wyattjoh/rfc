@@ -1632,7 +1632,7 @@ const resolveRfcCurrencyFromDocument = (
     hasSuccessorMetadata ||= lookup.hasSuccessorMetadata;
 
     if (lookup.edges.length === 0) {
-      if (document !== requested) {
+      if (document !== requested && lookup.unresolved.length === 0) {
         currentContexts.push({
           role: "current",
           document,

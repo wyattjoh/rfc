@@ -2,10 +2,12 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
-import { Cause, Effect } from "effect";
+import { Cause, Duration, Effect } from "effect";
+import { TestClock } from "effect/testing";
 import type * as Decision from "effect/unstable/ai/Decision";
 import * as DecisionModel from "effect/unstable/ai/DecisionModel";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
+import * as PublicApi from "../src/index";
 import {
   InvalidInputError,
   RfcClientClosedError,
@@ -21,7 +23,6 @@ import {
 const clients: Array<RfcClient> = [];
 type TestClientOptions = Omit<RfcClientOptions, "automaticAnswerActivation"> & {
   readonly automaticAnswerActivation?: RfcClientOptions["automaticAnswerActivation"];
-  readonly catalogPath?: undefined;
 };
 const createRfcClient = (options: TestClientOptions) =>
   createCoreRfcClient({
@@ -108,7 +109,6 @@ describe("createRfcClient", () => {
     const cacheDirectory = await makeCacheDirectory();
     const client = await createRfcClient({
       cacheDirectory,
-      catalogPath: undefined,
       modelAlias: undefined,
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
@@ -118,6 +118,11 @@ describe("createRfcClient", () => {
     expect("catalogStatus" in client).toBe(false);
     expect("catalogRefresh" in client).toBe(false);
     expect("prefetchSources" in client).toBe(false);
+    expect("RfcDiscovery" in PublicApi).toBe(false);
+    expect("LiveRfcSource" in PublicApi).toBe(false);
+    expect("RfcSourceServiceTag" in PublicApi).toBe(false);
+    expect("makeRfcSourceHttpLayer" in PublicApi).toBe(false);
+    expect("researchKnownRfc" in PublicApi).toBe(false);
 
     await rm(cacheDirectory, { recursive: true, force: true });
   });
@@ -137,9 +142,11 @@ describe("createRfcClient", () => {
       return new Response("not found", { status: 404 });
     });
     let sourceFetches = 0;
+    const clock = await Effect.runPromise(
+      Effect.scoped(TestClock.make({ warningDelay: Duration.seconds(30) })),
+    );
     const client = await createRfcClient({
       cacheDirectory,
-      catalogPath: undefined,
       datatrackerHttpClient: datatracker.client,
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
@@ -148,11 +155,13 @@ describe("createRfcClient", () => {
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
       rfcSourceFetcher: async () => {
         sourceFetches += 1;
+        await Effect.runPromise(clock.adjust(Duration.millis(7)));
         return {
           sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
           text: sourceText,
         };
       },
+      clock,
     });
     clients.push(client);
 
@@ -180,6 +189,8 @@ describe("createRfcClient", () => {
       },
     });
     expect(first.diagnostics.catalog).toBeUndefined();
+    expect(first.diagnostics.retrieval?.sourceMs).toBe(7);
+    expect(first.diagnostics.retrieval?.requests[2]?.durationMs).toBe(7);
     expect(first.diagnostics.retrieval?.requests.map(({ url }) => url)).toEqual([
       "https://datatracker.ietf.org/api/v1/doc/document/rfc9110/?format=json",
       "https://datatracker.ietf.org/api/v1/doc/relateddocument/?format=json&limit=64&offset=0&relationship__slug__in=obs%2Cupdates&target__name=rfc9110",
@@ -208,6 +219,10 @@ describe("createRfcClient", () => {
       sourceRequestCount: 0,
       sourceCacheOutcome: "hit",
     });
+    expect(second.diagnostics.retrieval?.requests).toHaveLength(2);
+    expect(second.diagnostics.retrieval?.requests.every(({ kind }) => kind !== "source")).toBe(
+      true,
+    );
     expect(sourceFetches).toBe(1);
     expect(datatracker.urls).toHaveLength(4);
     expect(await Bun.file(join(cacheDirectory, "catalog.json")).exists()).toBe(false);
@@ -268,7 +283,6 @@ describe("createRfcClient", () => {
     });
     const client = await createRfcClient({
       cacheDirectory,
-      catalogPath: undefined,
       datatrackerHttpClient: datatracker.client,
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
@@ -346,6 +360,11 @@ describe("createRfcClient", () => {
                   target: "/api/v1/doc/document/rfc9110/",
                   relationship: "/api/v1/name/docrelationshipname/updates/",
                 },
+                {
+                  source: "/api/v1/doc/document/rfc9111/",
+                  target: "/api/v1/doc/document/rfc9110/",
+                  relationship: "/api/v1/name/docrelationshipname/updates/",
+                },
               ],
             }
           : { meta: { limit: 64, offset: 0, total_count: 0, next: null }, objects: [] },
@@ -353,7 +372,6 @@ describe("createRfcClient", () => {
     });
     const client = await createRfcClient({
       cacheDirectory,
-      catalogPath: undefined,
       datatrackerHttpClient: datatracker.client,
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
@@ -380,7 +398,7 @@ describe("createRfcClient", () => {
     });
     expect(result.diagnostics.retrieval).toMatchObject({
       traversalComplete: false,
-      successorRows: 1,
+      successorRows: 2,
       relationshipLimit: 64,
     });
   });
@@ -395,7 +413,6 @@ describe("createRfcClient", () => {
     );
     const client = await createRfcClient({
       cacheDirectory,
-      catalogPath: undefined,
       datatrackerHttpClient: datatracker.client,
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
@@ -433,6 +450,49 @@ describe("createRfcClient", () => {
     });
   });
 
+  test("accepts bounded topic pages and reports upstream truncation", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const datatracker = makeDatatrackerHttpClient(() =>
+      Response.json({
+        meta: {
+          limit: 20,
+          offset: 0,
+          total_count: 42,
+          next: "/api/v1/doc/document/?offset=20",
+        },
+        objects: [datatrackerDocument],
+      }),
+    );
+    const client = await createRfcClient({
+      cacheDirectory,
+      datatrackerHttpClient: datatracker.client,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      rfcSourceFetcher: async () => ({
+        sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+        text: sourceText,
+      }),
+      decisionModel: makeDecisionModel(),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 2,
+      question: "Which requirements apply?",
+      rfc: null,
+      searchTerms: ["HTTP semantics"],
+    });
+
+    expect(result.status).toBe("needs_review");
+    expect(result.diagnostics.retrieval).toMatchObject({
+      upstreamRows: 2,
+      uniqueCandidates: 1,
+      topicTruncated: true,
+    });
+  });
+
   test("retries transient Datatracker responses within three attempts", async () => {
     const cacheDirectory = await makeCacheDirectory();
     let documentAttempts = 0;
@@ -450,7 +510,6 @@ describe("createRfcClient", () => {
     });
     const client = await createRfcClient({
       cacheDirectory,
-      catalogPath: undefined,
       datatrackerHttpClient: datatracker.client,
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
@@ -496,7 +555,6 @@ describe("createRfcClient", () => {
     });
     const client = await createRfcClient({
       cacheDirectory,
-      catalogPath: undefined,
       datatrackerHttpClient: datatracker.client,
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
@@ -551,7 +609,6 @@ describe("createRfcClient", () => {
     });
     const client = await createRfcClient({
       cacheDirectory,
-      catalogPath: undefined,
       datatrackerHttpClient: http,
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
@@ -582,7 +639,6 @@ describe("createRfcClient", () => {
     );
     const client = await createRfcClient({
       cacheDirectory,
-      catalogPath: undefined,
       datatrackerHttpClient: datatracker.client,
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
@@ -614,7 +670,6 @@ describe("createRfcClient", () => {
     );
     const client = await createRfcClient({
       cacheDirectory,
-      catalogPath: undefined,
       datatrackerHttpClient: datatracker.client,
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
@@ -683,7 +738,6 @@ describe("createRfcClient", () => {
     });
     const client = await createRfcClient({
       cacheDirectory,
-      catalogPath: undefined,
       datatrackerHttpClient: datatracker.client,
       rfcSourceHttpClient: sourceHttp,
       modelAlias: "jev-test",
@@ -752,7 +806,6 @@ describe("createRfcClient", () => {
     });
     const client = await createRfcClient({
       cacheDirectory,
-      catalogPath: undefined,
       datatrackerHttpClient: datatracker.client,
       rfcSourceHttpClient: sourceHttp,
       modelAlias: "jev-test",
@@ -807,7 +860,6 @@ describe("createRfcClient", () => {
     let sourceFetches = 0;
     const client = await createRfcClient({
       cacheDirectory,
-      catalogPath: undefined,
       datatrackerHttpClient: datatracker.client,
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
@@ -843,7 +895,6 @@ describe("createRfcClient", () => {
     const datatracker = makeDatatrackerHttpClient(() => new Response("not found", { status: 404 }));
     const client = await createRfcClient({
       cacheDirectory,
-      catalogPath: undefined,
       datatrackerHttpClient: datatracker.client,
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
@@ -933,7 +984,6 @@ describe("createRfcClient", () => {
     const cacheDirectory = await makeCacheDirectory();
     const client = await createRfcClient({
       cacheDirectory,
-      catalogPath: undefined,
       modelAlias: undefined,
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
@@ -957,7 +1007,6 @@ describe("createRfcClient", () => {
     const cacheDirectory = await makeCacheDirectory();
     const client = await createRfcClient({
       cacheDirectory,
-      catalogPath: undefined,
       modelAlias: undefined,
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,

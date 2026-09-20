@@ -1,8 +1,20 @@
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
-import { Clock, Context, Effect, FileSystem, Layer, Option, Result, Schema } from "effect";
+import {
+  Cause,
+  Clock,
+  Context,
+  Duration,
+  Effect,
+  FileSystem,
+  Layer,
+  Option,
+  Result,
+  Schema,
+  Stream,
+} from "effect";
 import * as PlatformError from "effect/PlatformError";
-import { Headers, HttpClient } from "effect/unstable/http";
+import { Headers, HttpClient, HttpClientResponse } from "effect/unstable/http";
 import type { CatalogDocument } from "./catalog";
 import {
   RfcSourceCacheError,
@@ -23,6 +35,9 @@ export const liveRfcSourceCacheVersion = 2 as const;
  * Stable identity for version-two RFC source-cache entries.
  */
 export const liveRfcSourceCacheIdentity = "rfc-source-v2" as const;
+
+const rfcSourceDeadlineMilliseconds = 10_000;
+const rfcSourceMaximumBytes = 8 * 1024 * 1024;
 
 /**
  * Observable result of one RFC source-cache read.
@@ -167,83 +182,137 @@ const responseEtag = (
       }),
   });
 
-const fetchFromRfcEditor = Effect.fnUntraced(function* (
-  http: HttpClient.HttpClient,
-  document: CatalogDocument,
-  etag: string | undefined,
-): Effect.fn.Return<LiveSourceResponse, RfcSourceFetchError> {
-  const url = makeRfcSourceUrl(defaultRfcEditorBaseUrl, document.rfcNumber);
-  const response = yield* http
-    .get(url, etag === undefined ? undefined : { headers: { "if-none-match": etag } })
-    .pipe(
-      Effect.mapError(
-        (error) =>
-          new RfcSourceFetchError({
-            stage: "request",
-            url,
-            reason: errorMessage(error),
-          }),
-      ),
-    );
-  const responseUrl = response.url || url;
-  if (responseUrl !== url) {
-    return yield* new RfcSourceFetchError({
-      stage: "request",
-      url: responseUrl,
-      reason: "RFC Editor redirected away from the exact canonical source URL",
-    });
-  }
-  if (response.status === 304) {
-    if (etag === undefined) {
+const readBoundedSourceText = Effect.fnUntraced(function* (
+  response: HttpClientResponse.HttpClientResponse,
+  url: string,
+): Effect.fn.Return<string, RfcSourceFetchError> {
+  const contentLengthValue = Option.getOrUndefined(Headers.get("content-length")(response.headers));
+  if (contentLengthValue !== undefined) {
+    const contentLength = Number(contentLengthValue);
+    if (!Number.isSafeInteger(contentLength) || contentLength < 0) {
       return yield* new RfcSourceFetchError({
         stage: "decode",
         url,
-        reason: "RFC Editor returned 304 without a conditional request",
+        reason: "RFC Editor returned an invalid Content-Length",
       });
     }
-    return {
-      status: 304,
-      sourceUrl: url,
-      text: undefined,
-      etag: (yield* responseEtag(response.headers, url)) ?? etag,
-      maxAgeMilliseconds: maxAgeMilliseconds(response.headers),
-    };
+    if (contentLength > rfcSourceMaximumBytes) {
+      return yield* new RfcSourceFetchError({
+        stage: "decode",
+        url,
+        reason: `RFC Editor source exceeds ${rfcSourceMaximumBytes} bytes`,
+      });
+    }
   }
-  if (response.status < 200 || response.status >= 300) {
-    return yield* new RfcSourceFetchError({
-      stage: "request",
-      url,
-      reason: `RFC Editor returned HTTP ${response.status}`,
-    });
-  }
-  const contentType = Option.getOrUndefined(Headers.get("content-type")(response.headers));
-  if (contentType !== undefined && !contentType.toLowerCase().startsWith("text/plain")) {
-    return yield* new RfcSourceFetchError({
-      stage: "decode",
-      url,
-      reason: "RFC Editor returned a non-plain-text source",
-    });
-  }
-  const text = yield* response.text.pipe(
-    Effect.mapError(
-      (error) => new RfcSourceFetchError({ stage: "decode", url, reason: errorMessage(error) }),
+
+  const body = yield* response.stream.pipe(
+    Stream.runFoldEffect(
+      () => ({ size: 0, chunks: [] as Array<Uint8Array> }),
+      (state, chunk) => {
+        const size = state.size + chunk.byteLength;
+        if (size > rfcSourceMaximumBytes) {
+          return Effect.fail(
+            new RfcSourceFetchError({
+              stage: "decode",
+              url,
+              reason: `RFC Editor source exceeds ${rfcSourceMaximumBytes} bytes`,
+            }),
+          );
+        }
+        state.chunks.push(chunk);
+        return Effect.succeed({ size, chunks: state.chunks });
+      },
+    ),
+    Effect.mapError((error) =>
+      error instanceof RfcSourceFetchError
+        ? error
+        : new RfcSourceFetchError({ stage: "decode", url, reason: errorMessage(error) }),
     ),
   );
-  if (text.length === 0) {
+  if (body.size === 0) {
     return yield* new RfcSourceFetchError({
       stage: "decode",
       url,
       reason: "RFC Editor returned an empty source",
     });
   }
-  return {
-    status: 200,
-    sourceUrl: url,
-    text,
-    etag: yield* responseEtag(response.headers, url),
-    maxAgeMilliseconds: maxAgeMilliseconds(response.headers),
-  };
+  return Buffer.concat(
+    body.chunks.map((chunk) => Buffer.from(chunk)),
+    body.size,
+  ).toString("utf8");
 });
+
+const fetchFromRfcEditor = (
+  http: HttpClient.HttpClient,
+  document: CatalogDocument,
+  etag: string | undefined,
+): Effect.Effect<LiveSourceResponse, RfcSourceFetchError> => {
+  const url = makeRfcSourceUrl(defaultRfcEditorBaseUrl, document.rfcNumber);
+  return Effect.gen(function* () {
+    const response = yield* http.get(
+      url,
+      etag === undefined ? undefined : { headers: { "if-none-match": etag } },
+    );
+    const responseUrl = response.url || url;
+    if (responseUrl !== url) {
+      return yield* new RfcSourceFetchError({
+        stage: "request",
+        url: responseUrl,
+        reason: "RFC Editor redirected away from the exact canonical source URL",
+      });
+    }
+    if (response.status === 304) {
+      if (etag === undefined) {
+        return yield* new RfcSourceFetchError({
+          stage: "decode",
+          url,
+          reason: "RFC Editor returned 304 without a conditional request",
+        });
+      }
+      return {
+        status: 304 as const,
+        sourceUrl: url,
+        text: undefined,
+        etag: (yield* responseEtag(response.headers, url)) ?? etag,
+        maxAgeMilliseconds: maxAgeMilliseconds(response.headers),
+      };
+    }
+    if (response.status !== 200) {
+      return yield* new RfcSourceFetchError({
+        stage: "request",
+        url,
+        reason: `RFC Editor returned HTTP ${response.status}`,
+      });
+    }
+    const contentType = Option.getOrUndefined(Headers.get("content-type")(response.headers));
+    if (contentType !== undefined && !contentType.toLowerCase().startsWith("text/plain")) {
+      return yield* new RfcSourceFetchError({
+        stage: "decode",
+        url,
+        reason: "RFC Editor returned a non-plain-text source",
+      });
+    }
+    return {
+      status: 200 as const,
+      sourceUrl: url,
+      text: yield* readBoundedSourceText(response, url),
+      etag: yield* responseEtag(response.headers, url),
+      maxAgeMilliseconds: maxAgeMilliseconds(response.headers),
+    };
+  }).pipe(
+    Effect.timeout(Duration.millis(rfcSourceDeadlineMilliseconds)),
+    Effect.mapError((error) => {
+      if (error instanceof RfcSourceFetchError) return error;
+      return new RfcSourceFetchError({
+        stage: "request",
+        url,
+        reason: Cause.isTimeoutError(error)
+          ? "RFC Editor request exceeded the ten-second deadline"
+          : errorMessage(error),
+      });
+    }),
+  );
+};
 
 /**
  * Create a version-two source layer backed by a supplied HTTP client.
@@ -449,8 +518,20 @@ export const loadLiveRfcSource = Effect.fnUntraced(function* (
 
   const service = yield* LiveRfcSource;
   const stale = entry !== undefined;
+  const sourceUrl = makeRfcSourceUrl(defaultRfcEditorBaseUrl, document.rfcNumber);
   const responseResult = yield* Effect.result(
-    service.fetch(document, stale ? (entry.etag ?? undefined) : undefined),
+    service.fetch(document, stale ? (entry.etag ?? undefined) : undefined).pipe(
+      Effect.timeout(Duration.millis(rfcSourceDeadlineMilliseconds)),
+      Effect.mapError((error) =>
+        Cause.isTimeoutError(error)
+          ? new RfcSourceFetchError({
+              stage: "request",
+              url: sourceUrl,
+              reason: "RFC Editor request exceeded the ten-second deadline",
+            })
+          : error,
+      ),
+    ),
   );
   if (Result.isFailure(responseResult)) {
     if (stale) {
@@ -500,6 +581,12 @@ export const loadLiveRfcSource = Effect.fnUntraced(function* (
     Effect.try({
       try: () => {
         if (response.text?.length === 0) throw new Error("RFC Editor returned an empty source");
+        if (
+          response.text !== undefined &&
+          Buffer.byteLength(response.text, "utf8") > rfcSourceMaximumBytes
+        ) {
+          throw new Error(`RFC Editor source exceeds ${rfcSourceMaximumBytes} bytes`);
+        }
         return entryFromResponse(document, response, now);
       },
       catch: (error) =>
