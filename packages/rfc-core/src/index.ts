@@ -875,6 +875,7 @@ const liveKnownResearchProgram = Effect.fnUntraced(function* (
     traversalContexts: lookup.traversalContexts,
     traversalDepth: lookup.traversalDepth,
     successorRows: lookup.successorRows,
+    boundedExits: lookup.boundedExits,
     contextLimit: datatrackerCurrencyContextLimit,
     depthLimit: datatrackerCurrencyDepthLimit,
     relationshipLimit: datatrackerSuccessorLimit,

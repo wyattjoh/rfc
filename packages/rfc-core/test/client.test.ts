@@ -121,6 +121,19 @@ const datatrackerDocument = {
   states: ["/api/v1/doc/state/177/"],
 };
 
+type CurrencyRelationship = {
+  readonly source: number;
+  readonly relationship: "obs" | "updates";
+};
+
+const currencyDocument = (rfcNumber: number) => ({
+  ...datatrackerDocument,
+  name: `rfc${rfcNumber}`,
+  rfc_number: rfcNumber,
+  title: `RFC ${rfcNumber}`,
+  resource_uri: `/api/v1/doc/document/rfc${rfcNumber}/`,
+});
+
 const makeDatatrackerHttpClient = (
   handler: (url: URL, call: number) => Response,
 ): { readonly client: HttpClient.HttpClient; readonly urls: ReadonlyArray<string> } => {
@@ -132,6 +145,54 @@ const makeDatatrackerHttpClient = (
       return Effect.succeed(HttpClientResponse.fromWeb(request, handler(url, urls.length)));
     }),
   };
+};
+
+const makeCurrencyFixture = async (
+  relationships: ReadonlyMap<number, ReadonlyArray<CurrencyRelationship>>,
+  missingDocuments: ReadonlySet<number> = new Set(),
+) => {
+  const cacheDirectory = await makeCacheDirectory();
+  const sourceIdentifiers: Array<string> = [];
+  const datatracker = makeDatatrackerHttpClient((url) => {
+    const exactNumber = url.pathname.match(/\/document\/rfc(\d+)\/$/)?.[1];
+    if (exactNumber !== undefined) {
+      const rfcNumber = Number(exactNumber);
+      return missingDocuments.has(rfcNumber)
+        ? new Response("not found", { status: 404 })
+        : Response.json(currencyDocument(rfcNumber));
+    }
+    if (url.pathname.endsWith("/relateddocument/")) {
+      const targetName = url.searchParams.get("target__name");
+      const targetNumber = Number(targetName?.slice(3));
+      const successors = relationships.get(targetNumber) ?? [];
+      return Response.json({
+        meta: { limit: 64, offset: 0, total_count: successors.length, next: null },
+        objects: successors.map(({ source, relationship }) => ({
+          source: `/api/v1/doc/document/rfc${source}/`,
+          target: `/api/v1/doc/document/rfc${targetNumber}/`,
+          relationship: `/api/v1/name/docrelationshipname/${relationship}/`,
+        })),
+      });
+    }
+    return new Response("not found", { status: 404 });
+  });
+  const client = await createRfcClient({
+    cacheDirectory,
+    datatrackerHttpClient: datatracker.client,
+    modelAlias: "jev-test",
+    typeSafeApiKey: undefined,
+    typeSafeApiUrl: undefined,
+    rfcSourceFetcher: async (document) => {
+      sourceIdentifiers.push(document.identifier);
+      return {
+        sourceUrl: `https://www.rfc-editor.org/rfc/rfc${document.rfcNumber}.txt`,
+        text: sourceText,
+      };
+    },
+    decisionModel: makeDecisionModel(),
+  });
+  clients.push(client);
+  return { cacheDirectory, client, datatracker, sourceIdentifiers };
 };
 
 const researchWithSeededCache = async (
@@ -397,6 +458,73 @@ describe("createRfcClient", () => {
     await rm(cacheDirectory, { recursive: true, force: true });
   });
 
+  test("researches a direct current successor as an independent RFC context", async () => {
+    const fixture = await makeCurrencyFixture(
+      new Map([
+        [9110, [{ source: 9111, relationship: "updates" }]],
+        [9111, []],
+      ]),
+    );
+
+    const result = await fixture.client.research({
+      schemaVersion: 2,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+      searchTerms: undefined,
+    });
+
+    expect(result.currency).toMatchObject({
+      requested: "RFC9110",
+      current: ["RFC9111"],
+      complete: true,
+      issues: [],
+      unresolved: [],
+    });
+    expect(result.contexts).toEqual([
+      expect.objectContaining({
+        role: "requested",
+        document: expect.objectContaining({ identifier: "RFC9110" }),
+        relationshipPath: [],
+        state: "researched",
+      }),
+      expect.objectContaining({
+        role: "current",
+        document: expect.objectContaining({ identifier: "RFC9111" }),
+        relationshipPath: [{ from: "RFC9110", to: "RFC9111", relationship: "updates" }],
+        state: "researched",
+      }),
+    ]);
+    expect(new Set(result.evidence.map(({ provenance }) => provenance.identifier))).toEqual(
+      new Set(["RFC9110", "RFC9111"]),
+    );
+    expect(
+      result.evidence.find(({ provenance }) => provenance.identifier === "RFC9110")?.provenance,
+    ).toMatchObject({ context: "requested", relationshipPath: [] });
+    expect(
+      result.evidence.find(({ provenance }) => provenance.identifier === "RFC9111")?.provenance,
+    ).toMatchObject({
+      context: "current",
+      relationshipPath: [{ from: "RFC9110", to: "RFC9111", relationship: "updates" }],
+    });
+    expect(fixture.sourceIdentifiers).toEqual(["RFC9110", "RFC9111"]);
+    expect(
+      fixture.datatracker.urls
+        .filter((url) => url.includes("/relateddocument/"))
+        .map((url) => new URL(url).searchParams.get("target__name")),
+    ).toEqual(["rfc9110", "rfc9111"]);
+    expect(
+      fixture.datatracker.urls
+        .filter((url) => url.includes("/relateddocument/"))
+        .every(
+          (url) =>
+            url.includes("relationship__slug__in=obs%2Cupdates") && !url.includes("source__name"),
+        ),
+    ).toBe(true);
+    expect(await Bun.file(join(fixture.cacheDirectory, "catalog.json")).exists()).toBe(false);
+
+    await rm(fixture.cacheDirectory, { recursive: true, force: true });
+  });
+
   test("recursively discovers successor metadata before resolving current RFCs", async () => {
     const cacheDirectory = await makeCacheDirectory();
     const documents = new Map([
@@ -495,6 +623,195 @@ describe("createRfcClient", () => {
     });
   });
 
+  test("researches branching terminal successors with deterministic provenance", async () => {
+    const fixture = await makeCurrencyFixture(
+      new Map([
+        [
+          9110,
+          [
+            { source: 9112, relationship: "obs" },
+            { source: 9111, relationship: "updates" },
+          ],
+        ],
+        [9111, []],
+        [9112, []],
+      ]),
+    );
+
+    const result = await fixture.client.research({
+      schemaVersion: 2,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+      searchTerms: undefined,
+    });
+
+    expect(result.currency).toMatchObject({
+      current: ["RFC9111", "RFC9112"],
+      complete: true,
+      issues: [],
+    });
+    expect(result.currency?.paths).toEqual([
+      { identifier: "RFC9110", path: [] },
+      {
+        identifier: "RFC9111",
+        path: [{ from: "RFC9110", to: "RFC9111", relationship: "updates" }],
+      },
+      {
+        identifier: "RFC9112",
+        path: [{ from: "RFC9110", to: "RFC9112", relationship: "obsoletes" }],
+      },
+    ]);
+    expect(result.contexts?.map(({ document }) => document.identifier)).toEqual([
+      "RFC9110",
+      "RFC9111",
+      "RFC9112",
+    ]);
+    expect(fixture.sourceIdentifiers).toEqual(["RFC9110", "RFC9111", "RFC9112"]);
+    expect(result.diagnostics.retrieval).toMatchObject({
+      traversalComplete: true,
+      traversalContexts: 3,
+      traversalDepth: 1,
+      successorRows: 2,
+      boundedExits: [],
+    });
+
+    await rm(fixture.cacheDirectory, { recursive: true, force: true });
+  });
+
+  test("fails closed and terminates when live successor relationships cycle", async () => {
+    const fixture = await makeCurrencyFixture(
+      new Map([
+        [9110, [{ source: 9111, relationship: "updates" }]],
+        [9111, [{ source: 9110, relationship: "updates" }]],
+      ]),
+    );
+
+    const result = await fixture.client.research({
+      schemaVersion: 2,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+      searchTerms: undefined,
+    });
+
+    expect(result.status).toBe("needs_review");
+    expect(result.currency).toMatchObject({
+      current: [],
+      complete: false,
+      issues: ["cycle_detected", "missing_current_context"],
+    });
+    expect(result.diagnostics.retrieval).toMatchObject({
+      traversalComplete: true,
+      traversalContexts: 2,
+      traversalDepth: 1,
+      successorRows: 2,
+      boundedExits: [],
+    });
+    expect(fixture.datatracker.urls).toHaveLength(4);
+
+    await rm(fixture.cacheDirectory, { recursive: true, force: true });
+  });
+
+  test("fails the operation when required successor metadata cannot be resolved", async () => {
+    const fixture = await makeCurrencyFixture(
+      new Map([[9110, [{ source: 9111, relationship: "updates" }]]]),
+      new Set([9111]),
+    );
+
+    await expect(
+      fixture.client.research({
+        schemaVersion: 2,
+        question: "What must the client send?",
+        rfc: "RFC9110",
+        searchTerms: undefined,
+      }),
+    ).rejects.toMatchObject({
+      _tag: "RfcDiscoveryError",
+      stage: "request",
+      url: "https://datatracker.ietf.org/api/v1/doc/document/rfc9111/?format=json",
+      attempts: 1,
+    } satisfies Partial<RfcDiscoveryError>);
+    expect(fixture.sourceIdentifiers).toEqual([]);
+    expect(fixture.datatracker.urls).toEqual([
+      "https://datatracker.ietf.org/api/v1/doc/document/rfc9110/?format=json",
+      "https://datatracker.ietf.org/api/v1/doc/relateddocument/?format=json&limit=64&offset=0&relationship__slug__in=obs%2Cupdates&target__name=rfc9110",
+      "https://datatracker.ietf.org/api/v1/doc/document/rfc9111/?format=json",
+    ]);
+
+    await rm(fixture.cacheDirectory, { recursive: true, force: true });
+  });
+
+  test("forces review and reports the eight-context traversal bound", async () => {
+    const successors = Array.from({ length: 8 }, (_, index) => ({
+      source: 9111 + index,
+      relationship: "updates" as const,
+    }));
+    const fixture = await makeCurrencyFixture(
+      new Map<number, ReadonlyArray<CurrencyRelationship>>([
+        [9110, successors],
+        ...successors.map(({ source }) => [source, []] as const),
+      ]),
+    );
+
+    const result = await fixture.client.research({
+      schemaVersion: 2,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+      searchTerms: undefined,
+    });
+
+    expect(result.status).toBe("needs_review");
+    expect(result.currency).toMatchObject({
+      complete: false,
+      issues: expect.arrayContaining(["missing_successor", "traversal_limit"]),
+      unresolved: ["RFC9118"],
+    });
+    expect(result.diagnostics.retrieval).toMatchObject({
+      traversalComplete: false,
+      traversalContexts: 8,
+      traversalDepth: 1,
+      successorRows: 8,
+      contextLimit: 8,
+      depthLimit: 16,
+      relationshipLimit: 64,
+      boundedExits: ["context_limit"],
+    });
+    expect(fixture.datatracker.urls).toHaveLength(16);
+
+    await rm(fixture.cacheDirectory, { recursive: true, force: true });
+  });
+
+  test("rejects more than 64 successor relationship records without consuming metadata", async () => {
+    const fixture = await makeCurrencyFixture(
+      new Map([
+        [
+          9110,
+          Array.from({ length: 65 }, () => ({
+            source: 9111,
+            relationship: "updates" as const,
+          })),
+        ],
+      ]),
+    );
+
+    await expect(
+      fixture.client.research({
+        schemaVersion: 2,
+        question: "What must the client send?",
+        rfc: "RFC9110",
+        searchTerms: undefined,
+      }),
+    ).rejects.toMatchObject({
+      _tag: "RfcDiscoveryError",
+      stage: "decode",
+      reason: "Datatracker returned malformed or unbounded successor relationships",
+      attempts: 1,
+    } satisfies Partial<RfcDiscoveryError>);
+    expect(fixture.sourceIdentifiers).toEqual([]);
+    expect(fixture.datatracker.urls).toHaveLength(2);
+
+    await rm(fixture.cacheDirectory, { recursive: true, force: true });
+  });
+
   test("forces review when successor relationship results hit their bound", async () => {
     const cacheDirectory = await makeCacheDirectory();
     const datatracker = makeDatatrackerHttpClient((url) => {
@@ -567,6 +884,7 @@ describe("createRfcClient", () => {
       traversalComplete: false,
       successorRows: 2,
       relationshipLimit: 64,
+      boundedExits: ["relationship_limit"],
     });
   });
 

@@ -84,6 +84,20 @@ export const datatrackerCurrencyContextLimit = 8;
  */
 export const datatrackerCurrencyDepthLimit = 16;
 
+const TraversalBoundedExitSchema = Schema.Literals([
+  "depth_limit",
+  "context_limit",
+  "relationship_limit",
+]);
+
+type TraversalBoundedExit = Schema.Schema.Type<typeof TraversalBoundedExitSchema>;
+
+const traversalBoundedExitOrder: ReadonlyArray<TraversalBoundedExit> = [
+  "depth_limit",
+  "context_limit",
+  "relationship_limit",
+];
+
 /**
  * One request-local upstream request trace.
  */
@@ -126,6 +140,7 @@ export const LiveRetrievalTraceSchema = Schema.Struct({
   traversalContexts: Schema.optionalKey(Schema.Natural),
   traversalDepth: Schema.optionalKey(Schema.Natural),
   successorRows: Schema.optionalKey(Schema.Natural),
+  boundedExits: Schema.optionalKey(Schema.Array(TraversalBoundedExitSchema)),
   contextLimit: Schema.optionalKey(Schema.Natural),
   depthLimit: Schema.optionalKey(Schema.Natural),
   relationshipLimit: Schema.optionalKey(Schema.Natural),
@@ -225,6 +240,10 @@ export interface LiveRfcLookup {
    * Number of successor relationship rows observed.
    */
   readonly successorRows: number;
+  /**
+   * Hard traversal bounds that prevented complete successor coverage.
+   */
+  readonly boundedExits: ReadonlyArray<TraversalBoundedExit>;
   /**
    * Datatracker request traces produced by this lookup.
    */
@@ -955,12 +974,14 @@ const lookupKnownRfc = Effect.fnUntraced(function* (
   let traversalComplete = true;
   let traversalDepth = 0;
   let successorRows = 0;
+  const boundedExits = new Set<TraversalBoundedExit>();
 
   while (queue.length > 0) {
     const current = queue.shift();
     if (current === undefined || visited.has(current.name)) continue;
     if (documents.length >= datatrackerCurrencyContextLimit) {
       traversalComplete = false;
+      boundedExits.add("context_limit");
       break;
     }
     visited.add(current.name);
@@ -969,16 +990,21 @@ const lookupKnownRfc = Effect.fnUntraced(function* (
     requests.push(...lookup.requests);
     traversalDepth = Math.max(traversalDepth, current.depth);
     successorRows += lookup.relationshipRows;
-    if (lookup.relationshipBoundHit) traversalComplete = false;
+    if (lookup.relationshipBoundHit) {
+      traversalComplete = false;
+      boundedExits.add("relationship_limit");
+    }
 
     for (const successorName of lookup.successorNames) {
       if (visited.has(successorName) || queued.has(successorName)) continue;
       if (current.depth >= datatrackerCurrencyDepthLimit) {
         traversalComplete = false;
+        boundedExits.add("depth_limit");
         continue;
       }
       if (queued.size >= datatrackerCurrencyContextLimit) {
         traversalComplete = false;
+        boundedExits.add("context_limit");
         continue;
       }
       queued.add(successorName);
@@ -1005,6 +1031,7 @@ const lookupKnownRfc = Effect.fnUntraced(function* (
     traversalContexts: documents.length,
     traversalDepth,
     successorRows,
+    boundedExits: traversalBoundedExitOrder.filter((exit) => boundedExits.has(exit)),
     requests,
     metadataMs: Math.max(0, finishedAt - startedAt),
   };
