@@ -1,4 +1,4 @@
-import { Cause, Clock, Duration, Effect, FileSystem, Ref, Result, Schema } from "effect";
+import { Cause, Clock, Duration, Effect, FileSystem, Path, Ref, Result, Schema } from "effect";
 import * as AiError from "effect/unstable/ai/AiError";
 import * as Decision from "effect/unstable/ai/Decision";
 import * as DecisionModel from "effect/unstable/ai/DecisionModel";
@@ -245,7 +245,7 @@ export interface CitationVerificationOptions {
       ) => Effect.Effect<
         RfcSource | { readonly source: RfcSource; readonly retrieval: LiveRetrievalTrace },
         RfcSourceCacheError | RfcSourceFetchError | RfcSourceRevalidationError,
-        FileSystem.FileSystem | LiveRfcSource
+        FileSystem.FileSystem | LiveRfcSource | Path.Path
       >)
     | undefined;
   /**
@@ -610,6 +610,7 @@ export const verifyCitation = Effect.fnUntraced(function* (
   | RfcSourceServiceTag
   | LiveRfcSource
   | DecisionModel.DecisionModel
+  | Path.Path
   | ResolvedModelName
   | ResolvedModelNames
 > {

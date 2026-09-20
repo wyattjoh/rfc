@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { dirname, join } from "node:path";
 import {
   Cause,
   Clock,
@@ -9,6 +8,7 @@ import {
   FileSystem,
   Layer,
   Option,
+  Path,
   Result,
   Schema,
   Stream,
@@ -38,6 +38,16 @@ export const liveRfcSourceCacheIdentity = "rfc-source-v2" as const;
 
 const rfcSourceDeadlineMilliseconds = 10_000;
 const rfcSourceMaximumBytes = 8 * 1024 * 1024;
+
+/**
+ * Maximum on-disk size of one serialized source-cache entry.
+ *
+ * An entry wraps bounded source text in a JSON envelope, so this allows headroom
+ * above `rfcSourceMaximumBytes` for that envelope and for string escaping. A
+ * larger file is treated as corrupt and repaired rather than decoded, which
+ * keeps a damaged entry from allocating without bound.
+ */
+const rfcSourceCacheEntryMaximumBytes = 2 * rfcSourceMaximumBytes;
 
 /**
  * Observable result of one RFC source-cache read.
@@ -138,8 +148,8 @@ const errorMessage = (error: unknown): string =>
 const isNotFound = (error: PlatformError.PlatformError): boolean =>
   error.reason._tag === "NotFound";
 
-const entryPath = (sourceDirectory: string, identifier: string): string =>
-  join(sourceDirectory, "v2", `${identifier}.json`);
+const entryPath = (pathService: Path.Path, sourceDirectory: string, identifier: string): string =>
+  pathService.join(sourceDirectory, "v2", `${identifier}.json`);
 
 const validEtag = (value: string): boolean => /^(?:W\/)?"[^"\r\n]*"$/.test(value);
 
@@ -392,10 +402,28 @@ const readEntry = Effect.fnUntraced(function* (
 ): Effect.fn.Return<
   { readonly entry: LiveSourceCacheEntry | undefined; readonly corrupt: boolean },
   RfcSourceCacheError,
-  FileSystem.FileSystem
+  FileSystem.FileSystem | Path.Path
 > {
   const fileSystem = yield* FileSystem.FileSystem;
-  const path = entryPath(sourceDirectory, document.identifier);
+  const pathService = yield* Path.Path;
+  const path = entryPath(pathService, sourceDirectory, document.identifier);
+  const info = yield* fileSystem.stat(path).pipe(
+    Effect.catchTag("PlatformError", (error) =>
+      isNotFound(error)
+        ? Effect.succeed(undefined)
+        : Effect.fail(
+            new RfcSourceCacheError({
+              stage: "read",
+              sourcePath: path,
+              reason: error.message,
+            }),
+          ),
+    ),
+  );
+  if (info === undefined) return { entry: undefined, corrupt: false };
+  if (info.size > BigInt(rfcSourceCacheEntryMaximumBytes)) {
+    return { entry: undefined, corrupt: true };
+  }
   const contents = yield* fileSystem.readFileString(path).pipe(
     Effect.catchTag("PlatformError", (error) =>
       isNotFound(error)
@@ -417,13 +445,17 @@ const readEntry = Effect.fnUntraced(function* (
           JSON.parse(contents) as unknown,
         );
         const expectedUrl = makeRfcSourceUrl(defaultRfcEditorBaseUrl, document.rfcNumber);
+        const fetchedAt = Date.parse(entry.fetchedAt);
+        const freshUntil = Date.parse(entry.freshUntil);
         if (
           entry.identifier !== document.identifier ||
           entry.rfcNumber !== document.rfcNumber ||
           entry.sourceUrl !== expectedUrl ||
           hashRfcSource(entry.text) !== entry.contentHash ||
-          !Number.isFinite(Date.parse(entry.fetchedAt)) ||
-          !Number.isFinite(Date.parse(entry.freshUntil)) ||
+          !Number.isFinite(fetchedAt) ||
+          !Number.isFinite(freshUntil) ||
+          freshUntil < fetchedAt ||
+          freshUntil - fetchedAt > maximumFreshnessMilliseconds ||
           (entry.etag !== null && !validEtag(entry.etag))
         ) {
           throw new Error("invalid source cache entry");
@@ -441,15 +473,16 @@ const readEntry = Effect.fnUntraced(function* (
 const writeEntry = Effect.fnUntraced(function* (
   sourceDirectory: string,
   entry: LiveSourceCacheEntry,
-): Effect.fn.Return<void, RfcSourceCacheError, FileSystem.FileSystem> {
+): Effect.fn.Return<void, RfcSourceCacheError, FileSystem.FileSystem | Path.Path> {
   const fileSystem = yield* FileSystem.FileSystem;
-  const path = entryPath(sourceDirectory, entry.identifier);
+  const pathService = yield* Path.Path;
+  const path = entryPath(pathService, sourceDirectory, entry.identifier);
   const temporaryPath = `${path}.tmp-${crypto.randomUUID()}`;
   const cleanup = fileSystem
     .remove(temporaryPath, { force: true })
     .pipe(Effect.catch(() => Effect.void));
   return yield* Effect.gen(function* () {
-    yield* fileSystem.makeDirectory(dirname(path), { recursive: true });
+    yield* fileSystem.makeDirectory(pathService.dirname(path), { recursive: true });
     yield* fileSystem.writeFileString(temporaryPath, `${JSON.stringify(entry, null, 2)}\n`);
     yield* fileSystem.rename(temporaryPath, path);
   }).pipe(
@@ -508,7 +541,7 @@ export const loadLiveRfcSource = Effect.fnUntraced(function* (
 ): Effect.fn.Return<
   LiveRfcSourceResult,
   RfcSourceCacheError | RfcSourceFetchError | RfcSourceRevalidationError,
-  FileSystem.FileSystem | LiveRfcSource
+  FileSystem.FileSystem | LiveRfcSource | Path.Path
 > {
   const { corrupt, entry } = yield* readEntry(sourceDirectory, document);
   const now = yield* Clock.currentTimeMillis;

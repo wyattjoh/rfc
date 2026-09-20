@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -32,6 +32,29 @@ const createRfcClient = (options: TestClientOptions) =>
   });
 
 const makeCacheDirectory = async () => mkdtemp(join(tmpdir(), "rfc-core-test-"));
+
+const seedLiveSourceCacheEntry = async (
+  cacheDirectory: string,
+  entry: { readonly text: string; readonly fetchedAt: string; readonly freshUntil: string },
+): Promise<void> => {
+  await mkdir(join(cacheDirectory, "sources", "v2"), { recursive: true });
+  await writeFile(
+    join(cacheDirectory, "sources", "v2", "RFC9110.json"),
+    JSON.stringify({
+      schemaVersion: 2,
+      kind: "rfc_source_cache_entry",
+      cacheIdentity: "rfc-source-v2",
+      identifier: "RFC9110",
+      rfcNumber: 9110,
+      sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+      text: entry.text,
+      contentHash: hashRfcSource(entry.text),
+      etag: '"fixture"',
+      fetchedAt: entry.fetchedAt,
+      freshUntil: entry.freshUntil,
+    }),
+  );
+};
 
 const sourceText = [
   "1. Requirements",
@@ -99,6 +122,57 @@ const makeDatatrackerHttpClient = (
       return Effect.succeed(HttpClientResponse.fromWeb(request, handler(url, urls.length)));
     }),
   };
+};
+
+const researchWithSeededCache = async (
+  cacheDirectory: string,
+): Promise<{
+  readonly result: Awaited<ReturnType<RfcClient["research"]>>;
+  readonly sourceRequests: number;
+}> => {
+  const datatracker = makeDatatrackerHttpClient((url) =>
+    url.pathname.endsWith("/document/rfc9110/")
+      ? Response.json(datatrackerDocument)
+      : Response.json({
+          meta: { limit: 64, offset: 0, total_count: 0, next: null },
+          objects: [],
+        }),
+  );
+  let sourceRequests = 0;
+  const sourceHttp = HttpClient.make((request) => {
+    sourceRequests += 1;
+    return Effect.succeed(
+      HttpClientResponse.fromWeb(
+        request,
+        new Response(sourceText, {
+          status: 200,
+          headers: {
+            etag: '"fresh"',
+            "cache-control": "max-age=60",
+            "content-type": "text/plain; charset=utf-8",
+          },
+        }),
+      ),
+    );
+  });
+  const client = await createRfcClient({
+    cacheDirectory,
+    datatrackerHttpClient: datatracker.client,
+    rfcSourceHttpClient: sourceHttp,
+    modelAlias: "jev-test",
+    typeSafeApiKey: undefined,
+    typeSafeApiUrl: undefined,
+    decisionModel: makeDecisionModel(),
+    now: () => 30_000,
+  });
+  clients.push(client);
+  const result = await client.research({
+    schemaVersion: 2 as const,
+    question: "What must the client send?",
+    rfc: "RFC9110",
+    searchTerms: undefined,
+  });
+  return { result, sourceRequests };
 };
 
 afterEach(async () => {
@@ -882,6 +956,37 @@ describe("createRfcClient", () => {
     expect(replaced.evidence[0]?.provenance.sourceHash).toBe(
       hashRfcSource(sourceText.replace("target", "selected")),
     );
+  });
+
+  test("repairs a cache entry whose freshness exceeds the maximum upstream lifetime", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    // A far-future freshUntil would otherwise suppress revalidation forever.
+    await seedLiveSourceCacheEntry(cacheDirectory, {
+      text: sourceText,
+      fetchedAt: new Date(0).toISOString(),
+      freshUntil: "9999-12-31T23:59:59.999Z",
+    });
+    const { result, sourceRequests } = await researchWithSeededCache(cacheDirectory);
+
+    expect(result.diagnostics.retrieval?.sourceCacheOutcome).toBe("repaired");
+    expect(sourceRequests).toBe(1);
+  });
+
+  test("repairs an oversized cache entry without decoding it", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    // Otherwise valid and fresh: only its size makes it unreadable, so a hit
+    // here would prove the reader allocated the whole file before bounding it.
+    const oversizedText = "a".repeat(17 * 1024 * 1024);
+    await seedLiveSourceCacheEntry(cacheDirectory, {
+      text: oversizedText,
+      fetchedAt: new Date(0).toISOString(),
+      freshUntil: new Date(60_000).toISOString(),
+    });
+    const { result, sourceRequests } = await researchWithSeededCache(cacheDirectory);
+
+    expect(result.diagnostics.retrieval?.sourceCacheOutcome).toBe("repaired");
+    expect(sourceRequests).toBe(1);
+    expect(result.evidence[0]?.provenance.sourceHash).toBe(hashRfcSource(sourceText));
   });
 
   test("fails closed when stale RFC text cannot be revalidated", async () => {

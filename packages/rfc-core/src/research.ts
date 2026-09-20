@@ -6,6 +6,7 @@ import {
   Duration,
   Effect,
   FileSystem,
+  Path,
   Predicate,
   Ref,
   Result,
@@ -615,7 +616,7 @@ export interface KnownRfcResearchOptions {
       ) => Effect.Effect<
         RfcSource,
         RfcSourceCacheError | RfcSourceFetchError | RfcSourceRevalidationError,
-        FileSystem.FileSystem | LiveRfcSource
+        FileSystem.FileSystem | LiveRfcSource | Path.Path
       >)
     | undefined;
   /**
@@ -2030,6 +2031,7 @@ const researchContext = Effect.fnUntraced(function* (
   | RfcSourceServiceTag
   | LiveRfcSource
   | DecisionModel.DecisionModel
+  | Path.Path
 > {
   const sourceStarted = yield* Clock.currentTimeMillis;
   const source = yield* options.sourceLoader === undefined
@@ -2430,6 +2432,7 @@ export const researchKnownRfc = Effect.fnUntraced(function* (
   | RfcSourceServiceTag
   | LiveRfcSource
   | DecisionModel.DecisionModel
+  | Path.Path
   | ResolvedModelName
   | ResolvedModelNames
 > {
@@ -2613,6 +2616,7 @@ export const researchTopic = Effect.fnUntraced(function* (
   | RfcSourceServiceTag
   | LiveRfcSource
   | DecisionModel.DecisionModel
+  | Path.Path
   | ResolvedModelName
   | ResolvedModelNames
 > {

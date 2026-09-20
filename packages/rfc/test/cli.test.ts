@@ -73,7 +73,10 @@ const writeLiveSourceCache = async (
       contentHash: hashRfcSource(sourceText),
       etag: '"fixture"',
       fetchedAt,
-      freshUntil: "9999-12-31T23:59:59.999Z",
+      // A bounded window: the cache reader rejects entries whose freshness
+      // exceeds the maximum upstream lifetime, so a far-future sentinel would
+      // be treated as corrupt rather than fresh.
+      freshUntil: new Date(Date.parse(fetchedAt) + 24 * 60 * 60 * 1_000).toISOString(),
     }),
   );
 };
