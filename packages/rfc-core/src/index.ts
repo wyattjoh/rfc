@@ -31,15 +31,17 @@ import {
   makeArtifactActivation,
   type AutomaticAnswerActivation,
 } from "./activation";
-import { catalogStatusFromValue, defaultDatatrackerApiUrl, makeCatalog } from "./catalog";
+import { catalogStatusFromValue, makeCatalog } from "./catalog";
 import {
   RfcDiscovery,
   RfcDiscoveryError,
+  defaultDatatrackerApiUrl,
   datatrackerCurrencyContextLimit,
   datatrackerCurrencyDepthLimit,
   datatrackerSuccessorLimit,
   makeDefaultRfcDiscoveryLayer,
   makeRfcDiscoveryHttpLayer,
+  type RfcMetadata,
 } from "./discovery";
 import {
   CitationOffsetMismatchError,
@@ -641,11 +643,24 @@ const sourceRequestTraces = (loads: ReadonlyArray<LoadedLiveSource>) =>
 /**
  * RFC Editor requests a failed source load is known to have issued.
  *
- * A cache failure never reaches the network, while fetch and revalidation
- * failures each represent at least one upstream attempt.
+ * Cache reads and decodes happen before any network access, so they report no
+ * attempt. A cache write only runs after a successful fetch, so a persistence
+ * failure must still be counted; reporting zero there would understate the
+ * traffic the request actually produced. Fetch and revalidation failures each
+ * represent at least one upstream attempt.
  */
 const failedSourceAttempts = (error: unknown): number =>
-  error instanceof RfcSourceCacheError ? 0 : 1;
+  error instanceof RfcSourceCacheError && error.stage !== "write" ? 0 : 1;
+
+/**
+ * Adapt request-local discovery metadata to the research input.
+ *
+ * `researchKnownRfc` still accepts the version-one catalog value, so this is the
+ * single place that bridges the two. Removing the value itself belongs to the
+ * catalog contraction, not to live discovery; nothing here is persisted.
+ */
+const requestLocalMetadata = (documents: ReadonlyArray<RfcMetadata>, now: number) =>
+  makeCatalog(documents, now);
 
 const makeLiveSourceLoader = (sourceDirectory: string, loads: Array<LoadedLiveSource>) =>
   Effect.fnUntraced(function* (document: import("./catalog").CatalogDocument) {
@@ -714,12 +729,12 @@ const liveKnownResearchProgram = Effect.fnUntraced(function* (
   const sourceLoads: Array<LoadedLiveSource> = [];
   const sourceLoader = makeLiveSourceLoader(sourceDirectory, sourceLoads);
   const now = yield* Clock.currentTimeMillis;
-  const requestLocalMetadata = makeCatalog(lookup.documents, now);
+  const requestLocalDocuments = requestLocalMetadata(lookup.documents, now);
   const result = yield* researchKnownRfc(request.question, request.rfc, {
-    catalog: requestLocalMetadata,
+    catalog: requestLocalDocuments,
     catalogStatus: catalogStatusFromValue(
       "request-local://rfc-discovery",
-      requestLocalMetadata,
+      requestLocalDocuments,
       now,
     ),
     sourceDirectory,
@@ -795,12 +810,12 @@ const liveTopicResearchProgram = Effect.fnUntraced(function* (
   const sourceLoads: Array<LoadedLiveSource> = [];
   const sourceLoader = makeLiveSourceLoader(sourceDirectory, sourceLoads);
   const now = yield* Clock.currentTimeMillis;
-  const requestLocalMetadata = makeCatalog(discovered.documents, now);
+  const requestLocalDocuments = requestLocalMetadata(discovered.documents, now);
   const result = yield* researchTopic(request.question, {
-    catalog: requestLocalMetadata,
+    catalog: requestLocalDocuments,
     catalogStatus: catalogStatusFromValue(
       "request-local://rfc-discovery",
-      requestLocalMetadata,
+      requestLocalDocuments,
       now,
     ),
     documentCandidates: discovered.documents,
@@ -867,9 +882,9 @@ const citationProgram = (options: RfcClientOptions, request: CitationVerificatio
     const sourceLoads: Array<LoadedLiveSource> = [];
     const loadSource = makeLiveSourceLoader(sourceDirectory, sourceLoads);
     const now = yield* Clock.currentTimeMillis;
-    const requestLocalMetadata = makeCatalog([lookup.document], now);
+    const requestLocalDocuments = requestLocalMetadata([lookup.document], now);
     return yield* verifyCitation(request, {
-      catalog: requestLocalMetadata,
+      catalog: requestLocalDocuments,
       sourceDirectory,
       sourceLoader: (document) =>
         Effect.gen(function* () {

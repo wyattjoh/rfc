@@ -16,7 +16,6 @@ export const catalogCacheIdentity = "rfc-catalog-v1" as const;
 /**
  * The default Datatracker API base URL used for catalog refreshes.
  */
-export const defaultDatatrackerApiUrl = "https://datatracker.ietf.org/api/v1/";
 
 /**
  * The number of upstream records requested per Datatracker page.

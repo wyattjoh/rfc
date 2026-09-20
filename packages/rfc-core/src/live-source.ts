@@ -15,7 +15,7 @@ import {
 } from "effect";
 import * as PlatformError from "effect/PlatformError";
 import { Headers, HttpClient, HttpClientResponse } from "effect/unstable/http";
-import type { CatalogDocument } from "./catalog";
+import type { RfcMetadata } from "./discovery";
 import {
   RfcSourceCacheError,
   RfcSourceFetchError,
@@ -112,7 +112,7 @@ export interface LiveRfcSourceService {
    * Fetch or conditionally revalidate one canonical RFC Editor source.
    */
   readonly fetch: (
-    document: CatalogDocument,
+    document: RfcMetadata,
     etag: string | undefined,
   ) => Effect.Effect<LiveSourceResponse, RfcSourceFetchError>;
 }
@@ -291,7 +291,7 @@ const readBoundedSourceText = Effect.fnUntraced(function* (
 
 const fetchFromRfcEditor = (
   http: HttpClient.HttpClient,
-  document: CatalogDocument,
+  document: RfcMetadata,
   etag: string | undefined,
 ): Effect.Effect<LiveSourceResponse, RfcSourceFetchError> => {
   const url = makeRfcSourceUrl(defaultRfcEditorBaseUrl, document.rfcNumber);
@@ -438,7 +438,7 @@ export const makeLiveRfcSourceLayer = (fetcher: RfcSourceFetcher): Layer.Layer<L
 
 const readEntry = Effect.fnUntraced(function* (
   sourceDirectory: string,
-  document: CatalogDocument,
+  document: RfcMetadata,
 ): Effect.fn.Return<
   { readonly entry: LiveSourceCacheEntry | undefined; readonly corrupt: boolean },
   RfcSourceCacheError,
@@ -570,7 +570,7 @@ const sourceFromEntry = (entry: LiveSourceCacheEntry): RfcSource => ({
 });
 
 const entryFromResponse = (
-  document: CatalogDocument,
+  document: RfcMetadata,
   response: LiveSourceResponse,
   now: number,
 ): LiveSourceCacheEntry => {
@@ -598,7 +598,7 @@ const entryFromResponse = (
  * @returns Exact source text and the observed cache outcome.
  */
 export const loadLiveRfcSource = Effect.fnUntraced(function* (
-  document: CatalogDocument,
+  document: RfcMetadata,
   sourceDirectory: string,
 ): Effect.fn.Return<
   LiveRfcSourceResult,
@@ -661,9 +661,22 @@ export const loadLiveRfcSource = Effect.fnUntraced(function* (
         reason: "RFC Editor returned 304 without cached source text",
       });
     }
+    // A 304 asserts that the representation behind the conditional validator is
+    // unchanged. Rebinding the cached bytes to any other validator - weak, or
+    // simply different - would let unrelated text be reported as exact evidence.
+    if (
+      conditionalEtag === undefined ||
+      (response.etag !== undefined &&
+        !(isStrongEtag(response.etag) && response.etag === conditionalEtag))
+    ) {
+      return yield* new RfcSourceRevalidationError({
+        url: response.sourceUrl,
+        reason: "RFC Editor returned 304 with a validator that does not match the cached source",
+      });
+    }
     const refreshed: LiveSourceCacheEntry = {
       ...entry,
-      etag: response.etag ?? entry.etag,
+      etag: conditionalEtag,
       fetchedAt: new Date(now).toISOString(),
       freshUntil: new Date(now + response.maxAgeMilliseconds).toISOString(),
     };

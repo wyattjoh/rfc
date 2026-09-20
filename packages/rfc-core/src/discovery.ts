@@ -12,7 +12,37 @@ import {
   Stream,
 } from "effect";
 import { Headers, HttpClient, HttpClientError, HttpClientResponse } from "effect/unstable/http";
-import { defaultDatatrackerApiUrl, type CatalogDocument } from "./catalog";
+
+/**
+ * Default anonymous Datatracker v1 API root.
+ */
+export const defaultDatatrackerApiUrl = "https://datatracker.ietf.org/api/v1/";
+
+/**
+ * Request-local RFC metadata produced by live discovery.
+ *
+ * Values of this type exist only for the duration of one request. Nothing
+ * persists them, and no operation assembles them into a corpus; the relationship
+ * fields carry only the edges the current traversal retrieved.
+ */
+export type RfcMetadata = {
+  readonly identifier: string;
+  readonly rfcNumber: number;
+  readonly title: string;
+  readonly abstract: string;
+  readonly status: string;
+  readonly stream: string;
+  readonly canonicalUrl: string;
+  readonly updates: ReadonlyArray<string>;
+  readonly updatedBy: ReadonlyArray<string>;
+  readonly obsoletes: ReadonlyArray<string>;
+  readonly obsoletedBy: ReadonlyArray<string>;
+};
+
+/**
+ * One RFC admitted to semantic document selection for a topic request.
+ */
+export type DocumentCandidate = RfcMetadata;
 
 /**
  * Maximum number of attempts for one required Datatracker request.
@@ -112,13 +142,24 @@ export type LiveRetrievalTrace = Schema.Schema.Type<typeof LiveRetrievalTraceSch
  */
 export const RfcDocumentSchema = Schema.Struct({
   identifier: Schema.NonEmptyString.check(Schema.isMaxLength(64)),
-  rfcNumber: Schema.Natural,
+  rfcNumber: Schema.Int.check(Schema.isGreaterThan(0)),
   title: Schema.String.check(Schema.isMaxLength(2_000)),
   abstract: Schema.String.check(Schema.isMaxLength(100_000)),
   status: Schema.NonEmptyString.check(Schema.isMaxLength(256)),
   stream: Schema.NonEmptyString.check(Schema.isMaxLength(256)),
   canonicalUrl: Schema.NonEmptyString.check(Schema.isMaxLength(2_048)),
-});
+}).check(
+  // The identifier and number describe the same RFC, so a document that pairs
+  // them inconsistently cannot satisfy the version-two contract.
+  Schema.makeFilter((document) =>
+    document.identifier === `RFC${document.rfcNumber}`
+      ? undefined
+      : {
+          path: ["identifier"],
+          issue: "identifier must be RFC followed by its RFC number",
+        },
+  ),
+);
 
 /**
  * Request-local RFC metadata exposed through the version-two public facade.
@@ -145,7 +186,7 @@ export interface LiveExactRfcLookup {
   /**
    * Exact normalized metadata for the requested published RFC.
    */
-  readonly document: CatalogDocument;
+  readonly document: RfcMetadata;
   /**
    * Datatracker request traces produced by this lookup.
    */
@@ -163,11 +204,11 @@ export interface LiveRfcLookup {
   /**
    * Exact normalized metadata for the requested published RFC.
    */
-  readonly document: CatalogDocument;
+  readonly document: RfcMetadata;
   /**
    * Request-local metadata for every RFC visited during bounded currency traversal.
    */
-  readonly documents: ReadonlyArray<CatalogDocument>;
+  readonly documents: ReadonlyArray<RfcMetadata>;
   /**
    * Whether every discovered successor fit within traversal bounds.
    */
@@ -201,7 +242,7 @@ export interface LiveTopicDiscovery {
   /**
    * Deterministically merged RFC metadata candidates.
    */
-  readonly documents: ReadonlyArray<CatalogDocument>;
+  readonly documents: ReadonlyArray<RfcMetadata>;
   /**
    * Datatracker request traces produced by topic discovery.
    */
@@ -745,7 +786,7 @@ const normalizeDocument = (
   relationships: ReadonlyArray<DatatrackerRelationship>,
   url: string,
   attempts: number,
-): Effect.Effect<CatalogDocument, RfcDiscoveryError> =>
+): Effect.Effect<RfcMetadata, RfcDiscoveryError> =>
   Effect.try({
     try: () => {
       const identifier = `RFC${document.rfc_number}`;
@@ -823,7 +864,7 @@ const fetchExactDocument = Effect.fnUntraced(function* (
 });
 
 type ExactLookup = {
-  readonly document: CatalogDocument;
+  readonly document: RfcMetadata;
   readonly successorNames: ReadonlyArray<string>;
   readonly relationshipRows: number;
   readonly relationshipBoundHit: boolean;
@@ -909,7 +950,7 @@ const lookupKnownRfc = Effect.fnUntraced(function* (
   ];
   const queued = new Set([requestedName]);
   const visited = new Set<string>();
-  const documents: Array<CatalogDocument> = [];
+  const documents: Array<RfcMetadata> = [];
   const requests: Array<RetrievalRequestTrace> = [];
   let traversalComplete = true;
   let traversalDepth = 0;
@@ -999,7 +1040,7 @@ const discoverTopic = Effect.fnUntraced(function* (
   );
   const streams = termStreams.flat();
 
-  const merged: Array<CatalogDocument> = [];
+  const merged: Array<RfcMetadata> = [];
   const seen = new Set<string>();
   for (let row = 0; merged.length < datatrackerDocumentCandidateLimit; row += 1) {
     let found = false;

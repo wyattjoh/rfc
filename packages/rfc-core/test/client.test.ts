@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -13,6 +13,7 @@ import {
   InvalidInputError,
   RfcClientClosedError,
   RfcDiscoveryError,
+  RfcDocumentSchema,
   RfcSourceFetchError,
   createRfcClient as createCoreRfcClient,
   decodeResearchRequest,
@@ -1331,6 +1332,191 @@ describe("createRfcClient", () => {
     });
   });
 
+  test("rejects a 304 whose validator does not match the conditional request", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    await seedLiveSourceCacheEntry(cacheDirectory, {
+      text: sourceText,
+      fetchedAt: new Date(0).toISOString(),
+      freshUntil: new Date(1_000).toISOString(),
+      etag: '"one"',
+    });
+    const datatracker = makeDatatrackerHttpClient((url) =>
+      url.pathname.endsWith("/document/rfc9110/")
+        ? Response.json(datatrackerDocument)
+        : Response.json({
+            meta: { limit: 64, offset: 0, total_count: 0, next: null },
+            objects: [],
+          }),
+    );
+    // A 304 that names a different entity than the one we asked about.
+    const sourceHttp = HttpClient.make((request) =>
+      Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          new Response(null, {
+            status: 304,
+            headers: { etag: '"two"', "cache-control": "max-age=60" },
+          }),
+        ),
+      ),
+    );
+    const client = await createRfcClient({
+      cacheDirectory,
+      datatrackerHttpClient: datatracker.client,
+      rfcSourceHttpClient: sourceHttp,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      decisionModel: makeDecisionModel(),
+      now: () => 30_000,
+    });
+    clients.push(client);
+
+    await expect(
+      client.research({
+        schemaVersion: 2 as const,
+        question: "What must the client send?",
+        rfc: "RFC9110",
+        searchTerms: undefined,
+      }),
+    ).rejects.toMatchObject({ _tag: "RfcSourceRevalidationError" });
+  });
+
+  test("rejects a 304 answered with a weak validator", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    await seedLiveSourceCacheEntry(cacheDirectory, {
+      text: sourceText,
+      fetchedAt: new Date(0).toISOString(),
+      freshUntil: new Date(1_000).toISOString(),
+      etag: '"one"',
+    });
+    const datatracker = makeDatatrackerHttpClient((url) =>
+      url.pathname.endsWith("/document/rfc9110/")
+        ? Response.json(datatrackerDocument)
+        : Response.json({
+            meta: { limit: 64, offset: 0, total_count: 0, next: null },
+            objects: [],
+          }),
+    );
+    const sourceHttp = HttpClient.make((request) =>
+      Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          new Response(null, {
+            status: 304,
+            headers: { etag: 'W/"one"', "cache-control": "max-age=60" },
+          }),
+        ),
+      ),
+    );
+    const client = await createRfcClient({
+      cacheDirectory,
+      datatrackerHttpClient: datatracker.client,
+      rfcSourceHttpClient: sourceHttp,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      decisionModel: makeDecisionModel(),
+      now: () => 30_000,
+    });
+    clients.push(client);
+
+    await expect(
+      client.research({
+        schemaVersion: 2 as const,
+        question: "What must the client send?",
+        rfc: "RFC9110",
+        searchTerms: undefined,
+      }),
+    ).rejects.toMatchObject({ _tag: "RfcSourceRevalidationError" });
+  });
+
+  test("counts the upstream request when persisting a fetched source fails", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    // The requested RFC is served from a fresh entry, so only the successor
+    // needs to write - and its directory is read-only by then.
+    await seedLiveSourceCacheEntry(cacheDirectory, {
+      text: sourceText,
+      fetchedAt: new Date(0).toISOString(),
+      freshUntil: new Date(600_000).toISOString(),
+    });
+    await chmod(join(cacheDirectory, "sources", "v2"), 0o500);
+    const documents = new Map([
+      ["rfc9110", datatrackerDocument],
+      [
+        "rfc9111",
+        {
+          ...datatrackerDocument,
+          name: "rfc9111",
+          rfc_number: 9111,
+          title: "HTTP Replacement",
+          resource_uri: "/api/v1/doc/document/rfc9111/",
+        },
+      ],
+    ]);
+    const datatracker = makeDatatrackerHttpClient((url) => {
+      const name = url.pathname.match(/\/document\/(rfc\d+)\/$/)?.[1];
+      if (name !== undefined) return Response.json(documents.get(name));
+      if (url.pathname.endsWith("/relateddocument/")) {
+        const target = url.searchParams.get("target__name");
+        return Response.json({
+          meta: { limit: 64, offset: 0, total_count: target === "rfc9110" ? 1 : 0, next: null },
+          objects:
+            target === "rfc9110"
+              ? [
+                  {
+                    source: "/api/v1/doc/document/rfc9111/",
+                    target: "/api/v1/doc/document/rfc9110/",
+                    relationship: "/api/v1/name/docrelationshipname/obs/",
+                  },
+                ]
+              : [],
+        });
+      }
+      return new Response("not found", { status: 404 });
+    });
+    const sourceHttp = HttpClient.make((request) =>
+      Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          new Response(sourceText, {
+            status: 200,
+            headers: {
+              etag: '"strong"',
+              "cache-control": "max-age=60",
+              "content-type": "text/plain; charset=utf-8",
+            },
+          }),
+        ),
+      ),
+    );
+    const client = await createRfcClient({
+      cacheDirectory,
+      datatrackerHttpClient: datatracker.client,
+      rfcSourceHttpClient: sourceHttp,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      decisionModel: makeDecisionModel(),
+      now: () => 30_000,
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 2 as const,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+      searchTerms: undefined,
+    });
+
+    const failed = (result.diagnostics.retrieval?.requests ?? []).find(
+      (request) => request.kind === "source" && request.url.endsWith("rfc9111.txt"),
+    );
+    // The fetch succeeded and only persistence failed, so the attempt counts.
+    expect(failed?.attempts).toBe(1);
+    await chmod(join(cacheDirectory, "sources", "v2"), 0o700);
+  });
+
   test("fails closed when stale RFC text cannot be revalidated", async () => {
     const cacheDirectory = await makeCacheDirectory();
     let now = 0;
@@ -1580,6 +1766,29 @@ describe("createRfcClient", () => {
     ).rejects.toBeInstanceOf(RfcClientClosedError);
 
     await rm(cacheDirectory, { recursive: true, force: true });
+  });
+
+  test("rejects published RFC documents that break the identifier contract", () => {
+    const valid = {
+      identifier: "RFC9110",
+      rfcNumber: 9110,
+      title: "HTTP Semantics",
+      abstract: "HTTP semantics.",
+      status: "published",
+      stream: "ietf",
+      canonicalUrl: "https://datatracker.ietf.org/doc/rfc9110/",
+    };
+
+    expect(Schema.decodeUnknownSync(RfcDocumentSchema)(valid)).toEqual(valid);
+    expect(() =>
+      Schema.decodeUnknownSync(RfcDocumentSchema)({ ...valid, rfcNumber: 0, identifier: "RFC0" }),
+    ).toThrow();
+    expect(() =>
+      Schema.decodeUnknownSync(RfcDocumentSchema)({ ...valid, identifier: "RFC9111" }),
+    ).toThrow();
+    expect(() =>
+      Schema.decodeUnknownSync(RfcDocumentSchema)({ ...valid, rfcNumber: -9110 }),
+    ).toThrow();
   });
 
   test("maps typed failures to a safe versioned error envelope", () => {
