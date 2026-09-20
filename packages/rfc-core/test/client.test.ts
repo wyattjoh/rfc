@@ -41,13 +41,12 @@ const seedLiveSourceCacheEntry = async (
     readonly text: string;
     readonly fetchedAt: string;
     readonly freshUntil: string;
-    readonly etag?: string | undefined;
-    readonly identifier?: string | undefined;
-    readonly rfcNumber?: number | undefined;
+    readonly etag?: string;
   },
+  identity: { readonly identifier: string; readonly rfcNumber: number } | undefined = undefined,
 ): Promise<void> => {
-  const identifier = entry.identifier ?? "RFC9110";
-  const rfcNumber = entry.rfcNumber ?? 9110;
+  const identifier = identity?.identifier ?? "RFC9110";
+  const rfcNumber = identity?.rfcNumber ?? 9110;
   await mkdir(join(cacheDirectory, "sources", "v2"), { recursive: true });
   await writeFile(
     join(cacheDirectory, "sources", "v2", `${identifier}.json`),
@@ -220,13 +219,15 @@ describe("createRfcClient", () => {
     const fetchedAt = new Date(0).toISOString();
     const freshUntil = new Date(60_000).toISOString();
     await seedLiveSourceCacheEntry(cacheDirectory, { text: sourceText, fetchedAt, freshUntil });
-    await seedLiveSourceCacheEntry(cacheDirectory, {
-      text: sourceText.replace("target", "selected"),
-      fetchedAt,
-      freshUntil,
-      identifier: "RFC9111",
-      rfcNumber: 9111,
-    });
+    await seedLiveSourceCacheEntry(
+      cacheDirectory,
+      {
+        text: sourceText.replace("target", "selected"),
+        fetchedAt,
+        freshUntil,
+      },
+      { identifier: "RFC9111", rfcNumber: 9111 },
+    );
     let networkRequests = 0;
     const networkClient = HttpClient.make((request) => {
       networkRequests += 1;
