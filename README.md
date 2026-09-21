@@ -57,7 +57,29 @@ echo '{"schemaVersion":2,"rfc":"RFC9110","claim":"A client must send a target re
 
 Errors remain versioned JSON envelopes on standard error for both input styles.
 
-## Use it from an MCP host
+## Install the Claude Code plugin
+
+The repository is a Claude Code marketplace containing the `rfc` plugin. The plugin bundles the RFC lookup skill and starts the pinned published MCP server through `bunx`, so Bun 1.4.2 or newer must be available:
+
+```sh
+claude plugin marketplace add wyattjoh/rfc
+claude plugin install rfc@wyattjoh-rfc --scope user
+```
+
+Authenticate once outside Claude Code, then start a fresh session:
+
+```sh
+bunx @wyattjoh/rfc@0.1.0 auth add
+```
+
+The plugin exposes the MCP tools automatically and registers the skill as `/rfc:rfc-lookup`. For local development, validate and load the checkout directly:
+
+```sh
+claude plugin validate . --strict
+claude --plugin-dir .
+```
+
+## Use it from another MCP host
 
 Run the server over stdio:
 

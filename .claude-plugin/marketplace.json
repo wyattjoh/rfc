@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "wyattjoh-rfc",
+  "description": "Evidence-grounded IETF RFC tools for Claude Code.",
+  "owner": {
+    "name": "Wyatt Johnson",
+    "url": "https://github.com/wyattjoh"
+  },
+  "plugins": [
+    {
+      "name": "rfc",
+      "source": "./",
+      "description": "Research and verify IETF RFC claims from authoritative source text.",
+      "version": "0.1.0",
+      "category": "development"
+    }
+  ]
+}
