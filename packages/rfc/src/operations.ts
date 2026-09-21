@@ -108,7 +108,13 @@ const usageAccountingWarning = Object.freeze({
 
 const renderTokenCount = (value: number | null): string => value?.toString() ?? "unavailable";
 
-const renderEstimatedUsd = (value: number | null): string =>
+/**
+ * Render an estimated USD value consistently across CLI output.
+ *
+ * @param value Estimated cost, or null when pricing is unavailable.
+ * @returns A dollar value with fixed sub-cent precision or `unavailable`.
+ */
+export const renderEstimatedUsd = (value: number | null): string =>
   value === null ? "unavailable" : `$${value.toFixed(9)}`;
 
 const credentialErrorEnvelope = (error: unknown): ErrorEnvelope | undefined => {

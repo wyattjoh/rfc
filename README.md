@@ -48,6 +48,12 @@ echo '{"schemaVersion":2,"rfc":"RFC9110","claim":"A client must send a target re
   | rfc verify-citation
 ```
 
+Inspect cumulative global usage and estimated input cost:
+
+```sh
+rfc costs
+```
+
 Every command emits versioned JSON on stdout and a versioned error envelope on stderr. Add `--format human` for readable output.
 
 ## Use it from an MCP host

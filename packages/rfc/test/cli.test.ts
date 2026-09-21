@@ -36,9 +36,9 @@ const makeFixtureCredentialStore = (value: string | null = "fixture-key"): Crede
   };
 };
 
-const discardUsage: RfcCliDependencies["recordUsage"] = async () => ({
-  schemaVersion: 1,
-  kind: "rfc_usage_totals",
+const noUsageTotals = {
+  schemaVersion: 1 as const,
+  kind: "rfc_usage_totals" as const,
   updatedAt: "2026-01-01T00:00:00.000Z",
   operations: 0,
   pricedOperations: 0,
@@ -48,7 +48,11 @@ const discardUsage: RfcCliDependencies["recordUsage"] = async () => ({
   pricedInputTokens: 0,
   unpricedInputTokens: 0,
   estimatedInputCostUsd: 0,
-});
+};
+
+const readNoUsage: RfcCliDependencies["readUsage"] = async () => noUsageTotals;
+
+const discardUsage: RfcCliDependencies["recordUsage"] = async () => noUsageTotals;
 
 const runCli = async (
   args: Array<string>,
@@ -56,12 +60,14 @@ const runCli = async (
   credentialStore: CredentialStore = makeFixtureCredentialStore(),
   createClient: RfcCliDependencies["createClient"] = createRfcClient,
   recordUsage: RfcCliDependencies["recordUsage"] = discardUsage,
+  readUsage: RfcCliDependencies["readUsage"] = readNoUsage,
 ): Promise<{ readonly exitCode: number; readonly stdout: string; readonly stderr: string }> => {
   let stdout = "";
   let stderr = "";
   const exitCode = await run(args, {
     credentialStore,
     createClient,
+    readUsage,
     recordUsage,
     readStandardInput: async () => input ?? "",
     promptCredential: async () => "fixture-key",
@@ -249,6 +255,57 @@ describe("rfc process protocol", () => {
 
     expect(result.exitCode).not.toBe(0);
     expect(result.stdout).toBe("");
+  });
+
+  test("prints cumulative global costs as JSON or human output", async () => {
+    const totals = {
+      ...noUsageTotals,
+      updatedAt: "2026-01-02T03:04:05.000Z",
+      operations: 3,
+      pricedOperations: 1,
+      unpricedOperations: 1,
+      operationsWithoutInputTokens: 1,
+      inputTokens: 150,
+      pricedInputTokens: 100,
+      unpricedInputTokens: 50,
+      estimatedInputCostUsd: 0.0000042,
+    };
+    const readUsage: RfcCliDependencies["readUsage"] = async () => totals;
+
+    const json = await runCli(
+      ["costs"],
+      undefined,
+      makeFixtureCredentialStore(),
+      createRfcClient,
+      discardUsage,
+      readUsage,
+    );
+    const human = await runCli(
+      ["costs", "--format", "human"],
+      undefined,
+      makeFixtureCredentialStore(),
+      createRfcClient,
+      discardUsage,
+      readUsage,
+    );
+
+    expect(json).toEqual({ exitCode: 0, stdout: `${JSON.stringify(totals)}\n`, stderr: "" });
+    expect(human).toEqual({
+      exitCode: 0,
+      stdout: [
+        "Updated: 2026-01-02T03:04:05.000Z",
+        "Operations: 3",
+        "Priced operations: 1",
+        "Unpriced operations: 1",
+        "Operations without input tokens: 1",
+        "Input tokens: 150",
+        "Priced input tokens: 100",
+        "Unpriced input tokens: 50",
+        "Estimated input cost (USD): $0.000004200",
+        "",
+      ].join("\n"),
+      stderr: "",
+    });
   });
 
   test("routes named-RFC cache status and removal through the client facade", async () => {

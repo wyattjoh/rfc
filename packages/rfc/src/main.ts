@@ -19,13 +19,20 @@ import {
   renderAuthStatus,
   renderCitationVerification,
   renderEvidenceBundle,
+  renderEstimatedUsd,
   renderSourceCacheRemove,
   renderSourceCacheStatus,
   toRfcOperationErrorEnvelope,
   type RfcOperationOptions,
   type RfcOperationWarning,
 } from "./operations";
-import { makeUsageRecorder, type UsageRecorder } from "./usage-store";
+import {
+  makeUsageReader,
+  makeUsageRecorder,
+  type UsageReader,
+  type UsageRecorder,
+  type UsageTotals,
+} from "./usage-store";
 import {
   CredentialInputError,
   addStoredCredential,
@@ -61,6 +68,10 @@ export interface RfcCliDependencies {
    * Write one already-rendered value to standard error.
    */
   readonly writeStderr: (value: string) => void;
+  /**
+   * Read the cumulative per-user usage totals.
+   */
+  readonly readUsage: UsageReader;
   /**
    * Persist one successful operation in the per-user usage totals.
    */
@@ -222,6 +233,7 @@ export const makeDefaultCliDependencies = (): RfcCliDependencies => ({
   promptCredential: readMaskedCredential,
   writeStdout: (value) => process.stdout.write(value),
   writeStderr: (value) => process.stderr.write(value),
+  readUsage: makeUsageReader(),
   recordUsage: makeUsageRecorder(),
   createClient: createRfcClient,
 });
@@ -301,6 +313,19 @@ const parseCitationOffset = (value: string): number => {
   }
   return parsed;
 };
+
+const renderUsageTotals = (totals: UsageTotals): string =>
+  [
+    `Updated: ${totals.updatedAt}`,
+    `Operations: ${totals.operations}`,
+    `Priced operations: ${totals.pricedOperations}`,
+    `Unpriced operations: ${totals.unpricedOperations}`,
+    `Operations without input tokens: ${totals.operationsWithoutInputTokens}`,
+    `Input tokens: ${totals.inputTokens}`,
+    `Priced input tokens: ${totals.pricedInputTokens}`,
+    `Unpriced input tokens: ${totals.unpricedInputTokens}`,
+    `Estimated input cost (USD): ${renderEstimatedUsd(totals.estimatedInputCostUsd)}`,
+  ].join("\n");
 
 const makeApplication = (dependencies: RfcCliDependencies) => {
   const writeStdout = (value: string): Effect.Effect<void> =>
@@ -595,6 +620,18 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
     Command.withSubcommands([authAddCommand, authStatusCommand, authRemoveCommand]),
   );
 
+  const costsCommand = Command.make(
+    "costs",
+    { format },
+    Effect.fn(function* ({ format }) {
+      const totals = yield* Effect.tryPromise({
+        try: dependencies.readUsage,
+        catch: (error) => error,
+      });
+      yield* writeStdout(format === "human" ? renderUsageTotals(totals) : JSON.stringify(totals));
+    }),
+  ).pipe(Command.withDescription("Print cumulative per-user RFC usage costs"));
+
   const mcpCommand = Command.make(
     "mcp",
     { cacheDirectory, datatrackerApiUrl, typeSafeApiUrl },
@@ -621,6 +658,7 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
     Command.withSubcommands([
       authCommand,
       sourceCacheCommand,
+      costsCommand,
       researchCommand,
       verifyCitationCommand,
       mcpCommand,

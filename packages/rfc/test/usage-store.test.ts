@@ -3,13 +3,64 @@ import { mkdtemp, readFile, readdir, utimes, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
-import { makeUsageRecorder, UsageTotalsSchema, type UsageObservation } from "../src/usage-store";
+import {
+  makeUsageReader,
+  makeUsageRecorder,
+  UsageTotalsSchema,
+  type UsageObservation,
+} from "../src/usage-store";
 import { Schema } from "effect";
 
 const readTotals = async (path: string) =>
   Schema.decodeUnknownSync(UsageTotalsSchema)(JSON.parse(await readFile(path, "utf8")));
 
 describe("per-user RFC usage store", () => {
+  test("reads zero totals when the global state does not exist", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "rfc-usage-read-empty-"));
+    const path = join(directory, "usage.json");
+
+    expect(await makeUsageReader(path, () => new Date("2026-01-02T03:04:05.000Z"))()).toEqual({
+      schemaVersion: 1,
+      kind: "rfc_usage_totals",
+      updatedAt: "2026-01-02T03:04:05.000Z",
+      operations: 0,
+      pricedOperations: 0,
+      unpricedOperations: 0,
+      operationsWithoutInputTokens: 0,
+      inputTokens: 0,
+      pricedInputTokens: 0,
+      unpricedInputTokens: 0,
+      estimatedInputCostUsd: 0,
+    });
+    expect(existsSync(path)).toBe(false);
+  });
+
+  test("reads and validates existing global totals without changing them", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "rfc-usage-read-existing-"));
+    const path = join(directory, "usage.json");
+    const contents = `${JSON.stringify({
+      schemaVersion: 1,
+      kind: "rfc_usage_totals",
+      updatedAt: "2026-01-02T03:04:05.000Z",
+      operations: 3,
+      pricedOperations: 1,
+      unpricedOperations: 1,
+      operationsWithoutInputTokens: 1,
+      inputTokens: 150,
+      pricedInputTokens: 100,
+      unpricedInputTokens: 50,
+      estimatedInputCostUsd: 0.0000042,
+    })}\n`;
+    await writeFile(path, contents);
+
+    expect(await makeUsageReader(path)()).toMatchObject({
+      operations: 3,
+      inputTokens: 150,
+      estimatedInputCostUsd: 0.0000042,
+    });
+    expect(await readFile(path, "utf8")).toBe(contents);
+  });
+
   test("tracks priced, unpriced, and missing input usage separately", async () => {
     const directory = await mkdtemp(join(tmpdir(), "rfc-usage-store-"));
     const path = join(directory, "usage.json");

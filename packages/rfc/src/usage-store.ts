@@ -57,6 +57,11 @@ export interface UsageObservation {
  */
 export type UsageRecorder = (observation: UsageObservation) => Promise<UsageTotals>;
 
+/**
+ * Function that reads the cumulative per-user RFC CLI usage.
+ */
+export type UsageReader = () => Promise<UsageTotals>;
+
 const isFileSystemError = (error: unknown, code: string): boolean =>
   error instanceof Error && "code" in error && error.code === code;
 
@@ -198,6 +203,21 @@ const writeTotals = async (path: string, totals: UsageTotals): Promise<void> => 
     throw error;
   }
 };
+
+/**
+ * Create a reader for a per-user usage totals file.
+ *
+ * Reads are safe without taking the writer lock because updates replace the
+ * complete file atomically. A missing file is represented by zero totals.
+ *
+ * @param path Source JSON file. Defaults to `~/.config/rfc/usage.json`.
+ * @param now Clock used to timestamp zero totals when no file exists.
+ * @returns A reader that validates the versioned totals before returning them.
+ */
+export const makeUsageReader =
+  (path: string = defaultUsageFile, now: () => Date = () => new Date()): UsageReader =>
+  () =>
+    readTotals(path, now().toISOString());
 
 /**
  * Create an atomic per-user usage recorder for a JSON totals file.
