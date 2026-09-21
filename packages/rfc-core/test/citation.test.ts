@@ -163,6 +163,9 @@ const makeDecisionModel = (
   confidence = 0.95,
   failFirst = false,
   onAttempt: (() => void) | undefined = undefined,
+  // Kept independent of `confidence` so the two halves of the acceptance
+  // guard can be exercised separately.
+  verdictProbability = 0.95,
 ): DecisionModel.DecisionModel => {
   let attempts = 0;
   const model = {
@@ -188,9 +191,11 @@ const makeDecisionModel = (
           citation_verdict: {
             label: verdict,
             probabilities: {
-              verified: verdict === "verified" ? 0.95 : 0.025,
-              unsupported: verdict === "unsupported" ? 0.95 : 0.025,
-              contradicted: verdict === "contradicted" ? 0.95 : 0.025,
+              verified: verdict === "verified" ? verdictProbability : (1 - verdictProbability) / 2,
+              unsupported:
+                verdict === "unsupported" ? verdictProbability : (1 - verdictProbability) / 2,
+              contradicted:
+                verdict === "contradicted" ? verdictProbability : (1 - verdictProbability) / 2,
             },
             confidence,
           },
@@ -570,6 +575,176 @@ describe("citation verification", () => {
         },
       });
     }
+  });
+
+  test("verifies a quotation reflowed across the source's hard line wrapping", async () => {
+    // RFC plain text wraps at ~72 columns, so a caller quoting a sentence that
+    // spans a line break supplies it on one line. That text is present in the
+    // source, and reporting it as fabricated accuses the caller of inventing it.
+    const wrapped = [
+      "1. Requirements",
+      "",
+      "   The server SHOULD generate a Location header field in the response",
+      "   containing a preferred URI reference for the new permanent URI.",
+      "",
+    ].join("\n");
+    const wrappedSentence =
+      "The server SHOULD generate a Location header field in the response\n   containing a preferred URI reference for the new permanent URI.";
+    const reflowed =
+      "The server SHOULD generate a Location header field in the response containing a preferred URI reference for the new permanent URI.";
+
+    const cacheDirectory = await makeCacheDirectory();
+    const client = await createRfcClient({
+      cacheDirectory,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      metadataSource: async () => [rfcDocument],
+      rfcSourceFetcher: makeSourceFetcher(wrapped),
+      decisionModel: makeDecisionModel([], "verified", 0.95),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.verifyCitation({
+      schemaVersion: 2,
+      rfc: "RFC9110",
+      claim: "The server should send a Location header field.",
+      quote: reflowed,
+      offset: null,
+    });
+
+    expect(result.verdict).toBe("verified");
+    // The quotation carried in the result is the source's own text, not the
+    // caller's reflowed version, so exactness is preserved.
+    expect(result.quote).toBe(wrappedSentence);
+    const startOffset = result.provenance.startOffset ?? undefined;
+    const endOffset = result.provenance.endOffset ?? undefined;
+    expect(wrapped.slice(startOffset, endOffset)).toBe(wrappedSentence);
+  });
+
+  test("fails closed when one operation exceeds its whole-operation budget", async () => {
+    // Every stage is individually bounded, but a fan-out restarts each stage's
+    // deadline. This ceiling is what stops a slow upstream holding a call open.
+    const slowModel = {
+      [DecisionModel.TypeId]: DecisionModel.TypeId,
+      decide: () => Effect.sleep(Duration.seconds(30)).pipe(Effect.as({} as never)),
+    } as unknown as DecisionModel.DecisionModel;
+
+    const cacheDirectory = await makeCacheDirectory();
+    const client = await createRfcClient({
+      cacheDirectory,
+      operationBudgetMilliseconds: 25,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      metadataSource: async () => [rfcDocument],
+      rfcSourceFetcher: makeSourceFetcher(sourceText),
+      decisionModel: slowModel,
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    await expect(
+      client.verifyCitation({
+        schemaVersion: 2,
+        rfc: "RFC9110",
+        claim: "The client sends a request.",
+        quote: "The client MUST send a request containing the target resource.",
+        offset: null,
+      }),
+    ).rejects.toMatchObject({ _tag: "OperationTimeoutError", milliseconds: 25 });
+  });
+
+  test("still reports genuinely absent text as fabricated", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const client = await createRfcClient({
+      cacheDirectory,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      metadataSource: async () => [rfcDocument],
+      rfcSourceFetcher: makeSourceFetcher(sourceText),
+      decisionModel: makeDecisionModel([], "verified", 0.95),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.verifyCitation({
+      schemaVersion: 2,
+      rfc: "RFC9110",
+      claim: "The server caches requests.",
+      quote: "The server MUST cache every request it receives.",
+      offset: null,
+    });
+    expect(result.verdict).toBe("fabricated");
+  });
+
+  test("keeps a sub-threshold contradiction rather than reporting it as unsupported", async () => {
+    // `contradicted` tells a caller the RFC says the opposite, so it must
+    // survive the acceptance guard: collapsing it to `unsupported` invites a
+    // retry with a different quotation instead of re-examining the claim.
+    const cases = [
+      { verdict: "contradicted" as const, confidence: 0.4, verdictProbability: 0.95 },
+      { verdict: "contradicted" as const, confidence: 0.95, verdictProbability: 0.5 },
+    ] as const;
+
+    for (const testCase of cases) {
+      const cacheDirectory = await makeCacheDirectory();
+      const client = await createRfcClient({
+        cacheDirectory,
+        modelAlias: "jev-test",
+        typeSafeApiKey: undefined,
+        typeSafeApiUrl: undefined,
+        metadataSource: async () => [rfcDocument],
+        rfcSourceFetcher: makeSourceFetcher(sourceText),
+        decisionModel: makeDecisionModel(
+          [],
+          testCase.verdict,
+          testCase.confidence,
+          false,
+          undefined,
+          testCase.verdictProbability,
+        ),
+        now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+      });
+      clients.push(client);
+
+      const result = await client.verifyCitation({
+        schemaVersion: 2,
+        rfc: "RFC9110",
+        claim: "The server must cache requests.",
+        quote: "The client MUST send a request containing the target resource.",
+        offset: null,
+      });
+      expect(result.verdict).toBe("contradicted");
+    }
+  });
+
+  test("withholds a verdict whose own probability mass is below the threshold", async () => {
+    // The confidence and verdict-probability halves of the acceptance guard
+    // are independent; this exercises the second one with confidence high.
+    const cacheDirectory = await makeCacheDirectory();
+    const client = await createRfcClient({
+      cacheDirectory,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      metadataSource: async () => [rfcDocument],
+      rfcSourceFetcher: makeSourceFetcher(sourceText),
+      decisionModel: makeDecisionModel([], "verified", 0.95, false, undefined, 0.5),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.verifyCitation({
+      schemaVersion: 2,
+      rfc: "RFC9110",
+      claim: "The client sends a request.",
+      quote: "The client MUST send a request containing the target resource.",
+      offset: null,
+    });
+    expect(result.verdict).toBe("unsupported");
   });
 
   test("retries retryable provider failures and fails after the retry budget", async () => {

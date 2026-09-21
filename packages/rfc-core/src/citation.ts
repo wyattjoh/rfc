@@ -475,6 +475,41 @@ const findOccurrences = (
   return occurrences;
 };
 
+const escapeForRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * Locate a quotation whose only difference from the source is how whitespace
+ * is distributed.
+ *
+ * RFC plain text is hard-wrapped, so a caller quoting a sentence that spans a
+ * line break naturally supplies it reflowed onto one line. That quotation is
+ * present in the source, and treating it as absent would report a fabrication.
+ * Only the span is resolved here: the caller's text is never returned, because
+ * the verified quotation is re-sliced from the source at these offsets.
+ */
+const findReflowedOccurrences = (
+  text: string,
+  quote: string,
+  offsets: ReturnType<typeof makeUtf8OffsetMap>,
+): ReadonlyArray<CitationOccurrence> => {
+  const tokens = quote
+    .trim()
+    .split(/\s+/)
+    .filter((token) => token.length > 0);
+  if (tokens.length < 2) return [];
+  const matcher = new RegExp(tokens.map(escapeForRegExp).join("\\s+"), "g");
+  const occurrences: Array<CitationOccurrence> = [];
+  for (const match of text.matchAll(matcher)) {
+    const startCodeUnitOffset = match.index;
+    const endCodeUnitOffset = startCodeUnitOffset + match[0].length;
+    const startOffset = offsets.byteOffsetAtCodeUnit(startCodeUnitOffset);
+    const endOffset = offsets.byteOffsetAtCodeUnit(endCodeUnitOffset);
+    if (startOffset === undefined || endOffset === undefined) continue;
+    occurrences.push({ startCodeUnitOffset, endCodeUnitOffset, startOffset, endOffset });
+  }
+  return occurrences;
+};
+
 const sectionAtOffset = (text: string, codeUnitOffset: number): string | null => {
   const block = parseSourceBlocks(text).find(
     (candidate) => candidate.startOffset <= codeUnitOffset && codeUnitOffset < candidate.endOffset,
@@ -612,7 +647,11 @@ export const verifyCitation = Effect.fnUntraced(function* (
   const retrieval = "source" in loadedSource ? loadedSource.retrieval : undefined;
   const sourceFinished = yield* Clock.currentTimeMillis;
   const offsets = makeUtf8OffsetMap(source.text);
-  const occurrences = findOccurrences(source.text, request.quote, offsets);
+  const exactOccurrences = findOccurrences(source.text, request.quote, offsets);
+  const occurrences =
+    exactOccurrences.length > 0
+      ? exactOccurrences
+      : findReflowedOccurrences(source.text, request.quote, offsets);
   const resolvedModelBeforeJudgment = yield* Ref.get(resolvedModelRef);
   const sourceMs = Math.max(0, sourceFinished - sourceStarted);
 
@@ -683,7 +722,13 @@ export const verifyCitation = Effect.fnUntraced(function* (
     confidence !== null &&
     confidence >= citationPolicy.confidenceThreshold &&
     (judgment.probabilities[judgment.verdict] ?? 0) >= citationPolicy.verdictProbabilityThreshold;
-  const verdict = accepted ? judgment.verdict : "unsupported";
+  // A sub-threshold judgment falls back to the most cautious verdict still
+  // consistent with it. `contradicted` is a stronger caution than
+  // `unsupported`: it tells a caller to stop and re-examine the claim rather
+  // than retry with another quotation, so collapsing it would discard the
+  // safety signal instead of failing closed.
+  const verdict =
+    accepted || judgment.verdict === "contradicted" ? judgment.verdict : "unsupported";
   const fallbackResolvedModel = yield* Ref.get(resolvedModelRef);
   const observedResolvedModels = yield* Ref.get(resolvedModelsRef);
   const resolvedModel = summarizeResolvedModels(fallbackResolvedModel, observedResolvedModels);
