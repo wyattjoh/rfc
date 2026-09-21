@@ -57,6 +57,16 @@ export const rfcSourceMaximumBytes = 8 * 1024 * 1024;
 const rfcSourceCacheEntryMaximumBytes = 2 * rfcSourceMaximumBytes;
 
 /**
+ * Maximum total on-disk size of the version-two RFC source cache.
+ *
+ * Cached source never expires on its own and the agent surface deliberately
+ * offers no bulk clear, so without a budget a caller walking RFC numbers can
+ * fill the user's home directory with no supported way to recover but a manual
+ * delete. The budget holds several hundred typical RFCs.
+ */
+export const rfcSourceCacheMaximumTotalBytes = 256 * 1024 * 1024;
+
+/**
  * Observable result of one RFC source-cache read.
  */
 export const LiveSourceCacheOutcomeSchema = Schema.Literals([
@@ -544,6 +554,65 @@ const readEntry = Effect.fnUntraced(function* (
     : { entry: undefined, corrupt: true };
 });
 
+/**
+ * Evict the least recently written entries until the cache fits its budget.
+ *
+ * Modification time is the recency key: an entry's file is rewritten whenever
+ * its `fetchedAt` is refreshed, so the two advance together and ordering costs
+ * one `stat` per entry rather than a decode of the whole cache. Every file in
+ * the directory counts toward the total and is evictable, which also reclaims
+ * the temporaries a crashed writer left behind.
+ *
+ * Pruning is best effort. A cache that cannot be listed or trimmed must not
+ * fail the operation that populated it, so every failure here is swallowed.
+ *
+ * @param sourceDirectory Root source-cache directory.
+ * @param retainedPath Entry just written, which is never evicted.
+ */
+const pruneCache = Effect.fnUntraced(function* (
+  sourceDirectory: string,
+  retainedPath: string,
+): Effect.fn.Return<void, never, FileSystem.FileSystem | Path.Path> {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const pathService = yield* Path.Path;
+  const directory = pathService.join(sourceDirectory, "v2");
+  const names = yield* fileSystem
+    .readDirectory(directory)
+    .pipe(Effect.catch(() => Effect.succeed<ReadonlyArray<string>>([])));
+  const evictable: Array<{
+    readonly path: string;
+    readonly size: number;
+    readonly modifiedAt: number;
+  }> = [];
+  let total = 0;
+  for (const name of names) {
+    const path = pathService.join(directory, name);
+    const info = yield* fileSystem.stat(path).pipe(Effect.catch(() => Effect.succeed(undefined)));
+    if (info === undefined || info.type !== "File") continue;
+    const size = Number(info.size);
+    total += size;
+    if (path === retainedPath) continue;
+    evictable.push({
+      path,
+      size,
+      modifiedAt: Option.getOrUndefined(info.mtime)?.getTime() ?? 0,
+    });
+  }
+  if (total <= rfcSourceCacheMaximumTotalBytes) return;
+
+  evictable.sort((left, right) => left.modifiedAt - right.modifiedAt);
+  for (const candidate of evictable) {
+    if (total <= rfcSourceCacheMaximumTotalBytes) return;
+    const removed = yield* fileSystem.remove(candidate.path, { force: true }).pipe(
+      Effect.matchEffect({
+        onFailure: () => Effect.succeed(false),
+        onSuccess: () => Effect.succeed(true),
+      }),
+    );
+    if (removed) total -= candidate.size;
+  }
+});
+
 const writeEntry = Effect.fnUntraced(function* (
   sourceDirectory: string,
   entry: LiveSourceCacheEntry,
@@ -559,6 +628,7 @@ const writeEntry = Effect.fnUntraced(function* (
     yield* fileSystem.makeDirectory(pathService.dirname(path), { recursive: true });
     yield* fileSystem.writeFileString(temporaryPath, `${JSON.stringify(entry, null, 2)}\n`);
     yield* fileSystem.rename(temporaryPath, path);
+    yield* pruneCache(sourceDirectory, path);
   }).pipe(
     Effect.ensuring(cleanup),
     Effect.mapError(

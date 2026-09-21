@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, rm, truncate, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -333,6 +333,64 @@ describe("createRfcClient", () => {
       true,
     );
     expect(networkRequests).toBe(0);
+
+    await rm(cacheDirectory, { recursive: true, force: true });
+  });
+
+  test("evicts the least recently written source-cache files once the budget is exceeded", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const sourceDirectory = join(cacheDirectory, "sources", "v2");
+    await mkdir(sourceDirectory, { recursive: true });
+
+    // Sparse fillers: `stat` reports the declared size while the files occupy
+    // no blocks, so the 256 MiB budget can be crossed without writing 256 MiB.
+    const filler = async (name: string, modifiedAtSeconds: number): Promise<string> => {
+      const path = join(sourceDirectory, name);
+      await writeFile(path, "");
+      await truncate(path, 200 * 1024 * 1024);
+      await utimes(path, modifiedAtSeconds, modifiedAtSeconds);
+      return path;
+    };
+    const stranded = await filler("RFC1002.json.tmp-abandoned", 1_000);
+    const oldest = await filler("RFC1000.json", 2_000);
+    const newest = await filler("RFC1001.json", 3_000);
+
+    const datatracker = makeDatatrackerHttpClient((url) =>
+      url.pathname.endsWith("/document/rfc9110/")
+        ? Response.json(datatrackerDocument)
+        : Response.json({
+            meta: { limit: 64, offset: 0, total_count: 0, next: null, previous: null },
+            objects: [],
+          }),
+    );
+    const client = await createRfcClient({
+      cacheDirectory,
+      datatrackerHttpClient: datatracker.client,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      decisionModel: makeDecisionModel(),
+      rfcSourceFetcher: async () => ({
+        sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+        text: sourceText,
+      }),
+    });
+    clients.push(client);
+
+    await client.research({
+      schemaVersion: 2 as const,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+      searchTerms: undefined,
+    });
+
+    // 600 MiB of fillers plus the new entry: eviction walks oldest first and
+    // stops as soon as the remainder fits, so the newest filler survives.
+    expect(await Bun.file(stranded).exists()).toBe(false);
+    expect(await Bun.file(oldest).exists()).toBe(false);
+    expect(await Bun.file(newest).exists()).toBe(true);
+    // The entry that triggered the prune is never its own victim.
+    expect(await Bun.file(join(sourceDirectory, "RFC9110.json")).exists()).toBe(true);
 
     await rm(cacheDirectory, { recursive: true, force: true });
   });
