@@ -1,6 +1,6 @@
 # `@wyattjoh/rfc`
 
-The private `rfc` package exposes the RFC evidence engine through an agent-facing CLI and a self-describing local MCP server.
+This package exposes the RFC evidence engine through an agent-facing CLI and a self-describing local MCP server. It is the reference for the process protocol, the MCP surface, credential handling, and configuration; start from the [repository README](../../README.md) for what the tool is, how to install it, and what it sends where.
 
 ## MCP server
 
@@ -116,18 +116,18 @@ To migrate an existing setup, run `rfc auth add`, verify with `rfc auth status`,
 
 ## Precision calibration
 
-The committed `@wyattjoh/rfc-core` evaluation corpus covers HTTP, TLS, OAuth, and DNS known-RFC research, ordered multi-term topic research, candidate fan-out, empty discovery, currency changes, answer statuses, and citation verdicts. Its deterministic retrieval cases execute current RFCs, update chains, cycle safety, relationship bounds, a saturated 32-candidate/eight-source topic fan-out, source-cache misses and zero-network hits, `304` validator revalidation, changed-source replacement, corrupt-entry repair, typed metadata failure, and typed stale-source revalidation failure through the public `RfcClient` seam; a missing or failed retrieval observation closes the release gate. Retrieval request counts represent logical Datatracker and RFC Editor trace entries, while each entry records its bounded retry attempts separately. Every expected semantic outcome is exact while `precision-v2` remains uncalibrated; no bounded alternative or old release outcome is carried forward as certified. The modern normative case remains an answered positive control and citation verdicts remain exact. Deterministic tests inject Datatracker, RFC Editor, DecisionModel, clock, and credential behavior and never require a provider credential, the real OS credential manager, or network access.
+Automatic answering is off. `answered` requires a locally present calibration report proving a passing release gate, a recorded human acceptance, and explicit runtime enablement; anything weaker fails closed to `needs_review`. The most recent calibration was **rejected**, so a published install returns evidence, provenance, and a non-answer status.
 
-Run the live TypeSafe calibration only through the explicit evaluator command after storing a credential:
+Run a calibration against the live provider only through the explicit evaluator, after storing a credential. It costs money and reaches the network:
 
 ```sh
 rfc auth status
 bun run evaluate:live
 ```
 
-The command starts with the typed `jev-latest` alias and exercises the normal live RFC discovery and read-through RFC source-cache paths for every live case before timing three sequential iterations. Citation controls carry exact committed RFC text and therefore need no direct-fetch or prefetch bypass. The evaluator records every provider-resolved model and writes a sanitized report to `.scratch/rfc-evaluation-report.json` by default. The report contains the complete policy snapshot, model identity, corpus and policy digests, an authoritative RFC-identifier-to-source-hash manifest, executable retrieval-case observations, retrieval traces, cache before/after and returned-source hashes, source request counts, validator behavior, cache outcomes, semantic probabilities, confidence, usage, stage timings, expected outcomes, status/verdict rates, positive-control status, and gate failures; it never writes credentials, prompts, questions beyond the committed corpus, or provider reasoning. The command exits zero for a passing gate and two for a complete report that fails review, so the same command reproducibly produces the artifact for either release decision.
+It writes a sanitized report to `.scratch/rfc-evaluation-report.json`, exiting zero for a passing gate and two for a complete report that fails review. The report never contains credentials, prompts, questions beyond the committed corpus, or provider reasoning.
 
-The reviewed 2026-09-21 report resolved `jev-latest` exclusively to the pinned `jev-1.13.0` model and passed supported-claim precision at 100%, citation safety with zero unsafe acceptances, every deterministic retrieval case, every retrieval bound, and topic warm-cache p95 at 719 ms against the 3,000 ms target. Topic observations stayed within eight Datatracker calls, 29 upstream rows, 21 merged and semantic candidates, two selected sources, and therefore 22 questions in the largest native TypeSafe bulk request (one atomicity question plus one per candidate). The report was rejected because observed outcomes left their committed sets, the answered positive control returned `needs_review` in all three repetitions, and known-RFC warm-cache p95 was 3,534 ms against the strict 2,000 ms target. The human release owner explicitly approved recording report digest `3ce4d88e7ee0450562679342fc3f9e4a27b545ca5a2b0d0dbb9f8955efe400f1` as rejected. The durable decision is committed in `packages/rfc-core/src/precision-v2-release-decision.ts`; the compiled release attestation references that decision and matches its digest, release identity, review time, expiry, and three gate failures. Thresholds remain unchanged and uncalibrated, and automatic answers remain disabled. A later activation requires a new passing report, explicit review, a compiled accepted attestation, and explicit runtime enablement; changing the model pin likewise requires recertification.
+What the corpus measures, what the report contains, and the recorded 2026-09-21 rejection are in [ADR 0004](../../docs/adr/0004-gate-automatic-answers-on-a-reviewed-calibration.md). The durable decision itself is committed in `packages/rfc-core/src/precision-v2-release-decision.ts`.
 
 ## Configuration
 
