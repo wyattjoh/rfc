@@ -130,6 +130,9 @@ export type RetrievalRequestTrace = Schema.Schema.Type<typeof RetrievalRequestTr
 
 /**
  * Live retrieval diagnostics for a schema-version-two research request.
+ *
+ * Request counts describe logical trace entries. Each entry records its own
+ * bounded upstream attempt count and status sequence independently.
  */
 export const LiveRetrievalTraceSchema = Schema.Struct({
   schemaVersion: Schema.Literal(2),

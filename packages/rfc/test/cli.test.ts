@@ -106,7 +106,7 @@ const writeUnattestedCalibrationReport = async (path: string): Promise<void> => 
         expectedOutcome === "answered" ||
         (evaluationCase.kind === "citation" && evaluationCase.expectedVerdict === "verified"),
       unsafeCitationAccepted: false,
-      sourceHashes: ["fixture"],
+      sourceProvenance: [{ identifier: evaluationCase.rfc ?? "RFC9110", sourceHash: "fixture" }],
       requestedModel: "jev-latest",
       resolvedModel: "jev-1.13.0",
       resolvedModels: evaluationCase.category === "fabricated_quotation" ? [] : ["jev-1.13.0"],
@@ -155,20 +155,33 @@ const writeUnattestedCalibrationReport = async (path: string): Promise<void> => 
   await writeFile(
     path,
     `${JSON.stringify(
-      makeEvaluationReport(timedCorpus, timedObservations, {
-        origin: "live",
-        releaseBuildId: "rfc-evidence-precision-v2",
-        corpusDigest: "fixture-corpus-digest",
-        createdAt: "2026-01-01T00:00:00.000Z",
-        expiresAt: "2026-02-01T00:00:00.000Z",
-        authoritativeSourceHashes: {},
-        policyVersion: "precision-v2",
-        requestedModel: "jev-latest",
-        pinnedModel: "jev-1.13.0",
-        minimumSupportedClaimPrecision: undefined,
-        maxKnownRfcP95LatencyMilliseconds: undefined,
-        maxTopicP95LatencyMilliseconds: undefined,
-      }),
+      makeEvaluationReport(
+        timedCorpus,
+        timedObservations,
+        evaluationCorpus.retrievalCases.map((retrievalCase) => ({
+          schemaVersion: evaluationSchemaVersion,
+          caseId: retrievalCase.id,
+          category: retrievalCase.category,
+          seam: retrievalCase.seam,
+          passed: true,
+          traces: [],
+          errorKind: null,
+        })),
+        {
+          origin: "live",
+          releaseBuildId: "rfc-evidence-precision-v2",
+          corpusDigest: "fixture-corpus-digest",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          expiresAt: "2026-02-01T00:00:00.000Z",
+          authoritativeSourceHashes: undefined,
+          policyVersion: "precision-v2",
+          requestedModel: "jev-latest",
+          pinnedModel: "jev-1.13.0",
+          minimumSupportedClaimPrecision: undefined,
+          maxKnownRfcP95LatencyMilliseconds: undefined,
+          maxTopicP95LatencyMilliseconds: undefined,
+        },
+      ),
     )}\n`,
   );
 };

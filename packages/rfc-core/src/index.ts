@@ -826,16 +826,13 @@ const liveKnownResearchProgram = Effect.fnUntraced(function* (
     metadataMs: lookup.metadataMs,
     startedAt,
   });
-  const sourceRequestCount = sourceLoads.reduce((count, load) => count + load.attempts, 0);
-  const datatrackerRequestCount = lookup.requests.reduce(
-    (count, trace) => count + trace.attempts,
-    0,
-  );
+  const sourceRequests = sourceRequestTraces(sourceLoads);
+  const requests = [...lookup.requests, ...sourceRequests];
   const retrieval = {
     schemaVersion: 2 as const,
-    requestCount: datatrackerRequestCount + sourceRequestCount,
-    datatrackerRequestCount,
-    sourceRequestCount,
+    requestCount: requests.length,
+    datatrackerRequestCount: lookup.requests.length,
+    sourceRequestCount: sourceRequests.length,
     metadataMs: lookup.metadataMs,
     sourceMs: result.diagnostics.timings.sourceMs,
     sourceCacheOutcome: cacheOutcomeFor(sourceLoads, lookup.document.identifier),
@@ -847,7 +844,7 @@ const liveKnownResearchProgram = Effect.fnUntraced(function* (
     contextLimit: datatrackerCurrencyContextLimit,
     depthLimit: lookup.depthLimit,
     relationshipLimit: datatrackerSuccessorLimit,
-    requests: [...lookup.requests, ...sourceRequestTraces(sourceLoads)],
+    requests,
   };
   const currency =
     lookup.traversalComplete || result.currency === undefined
@@ -888,10 +885,6 @@ const liveTopicResearchProgram = Effect.fnUntraced(function* (
 
     const finishedAt = yield* Clock.currentTimeMillis;
     const requestedModel = options.modelAlias ?? precisionPolicy.pinnedModel;
-    const datatrackerRequestCount = discovered.requests.reduce(
-      (count, trace) => count + trace.attempts,
-      0,
-    );
     return Schema.decodeUnknownSync(EvidenceBundleSchema)({
       schemaVersion: 2,
       kind: "evidence_bundle",
@@ -919,8 +912,8 @@ const liveTopicResearchProgram = Effect.fnUntraced(function* (
         sources: [],
         retrieval: {
           schemaVersion: 2,
-          requestCount: datatrackerRequestCount,
-          datatrackerRequestCount,
+          requestCount: discovered.requests.length,
+          datatrackerRequestCount: discovered.requests.length,
           sourceRequestCount: 0,
           metadataMs: discovered.metadataMs,
           sourceMs: 0,
@@ -964,16 +957,13 @@ const liveTopicResearchProgram = Effect.fnUntraced(function* (
     metadataMs: discovered.metadataMs,
     startedAt,
   });
-  const sourceRequestCount = sourceLoads.reduce((count, load) => count + load.attempts, 0);
-  const datatrackerRequestCount = discovered.requests.reduce(
-    (count, trace) => count + trace.attempts,
-    0,
-  );
+  const sourceRequests = sourceRequestTraces(sourceLoads);
+  const requests = [...discovered.requests, ...sourceRequests];
   const retrieval = {
     schemaVersion: 2 as const,
-    requestCount: datatrackerRequestCount + sourceRequestCount,
-    datatrackerRequestCount,
-    sourceRequestCount,
+    requestCount: requests.length,
+    datatrackerRequestCount: discovered.requests.length,
+    sourceRequestCount: sourceRequests.length,
     metadataMs: discovered.metadataMs,
     sourceMs: result.diagnostics.timings.sourceMs,
     sourceCacheOutcome: cacheOutcomeFor(sourceLoads, result.rfc?.identifier),
@@ -983,7 +973,7 @@ const liveTopicResearchProgram = Effect.fnUntraced(function* (
     semanticCandidates: discovered.documents.length,
     selectedSources: sourceLoads.length,
     topicTruncated: discovered.truncated,
-    requests: [...discovered.requests, ...sourceRequestTraces(sourceLoads)],
+    requests,
   };
 
   return Schema.decodeUnknownSync(EvidenceBundleSchema)({
@@ -1021,23 +1011,19 @@ const citationProgram = (options: RfcClientOptions, request: CitationVerificatio
         Effect.gen(function* () {
           const source = yield* loadSource(document);
           const sourceMs = sourceLoads.reduce((total, load) => total + load.durationMs, 0);
-          const datatrackerRequestCount = lookup.requests.reduce(
-            (total, trace) => total + trace.attempts,
-            0,
-          );
+          const sourceRequests = sourceRequestTraces(sourceLoads);
+          const requests = [...lookup.requests, ...sourceRequests];
           return {
             source,
             retrieval: {
               schemaVersion: 2,
-              requestCount:
-                datatrackerRequestCount +
-                sourceLoads.reduce((total, load) => total + load.attempts, 0),
-              datatrackerRequestCount,
-              sourceRequestCount: sourceLoads.reduce((total, load) => total + load.attempts, 0),
+              requestCount: requests.length,
+              datatrackerRequestCount: lookup.requests.length,
+              sourceRequestCount: sourceRequests.length,
               metadataMs: lookup.metadataMs,
               sourceMs,
               sourceCacheOutcome: cacheOutcomeFor(sourceLoads, document.identifier),
-              requests: [...lookup.requests, ...sourceRequestTraces(sourceLoads)],
+              requests,
             },
           };
         }),

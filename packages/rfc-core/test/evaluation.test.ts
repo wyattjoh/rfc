@@ -18,14 +18,18 @@ import {
   evaluationReleaseAttestation,
   evaluationSchemaVersion,
   evaluationResearchStatuses,
-  evaluateEvaluationGate,
+  evaluateEvaluationGate as evaluateGateWithRetrieval,
   evaluationReportDigest,
   isAcceptedEvaluationReport,
   isAcceptedEvaluationReportForAttestation,
   isValidProbabilityDistribution,
   makeEvaluationReport,
+  observationFromEvidenceBundle,
   type EvaluationCase,
   type EvaluationObservation,
+  type EvaluationRetrievalCase,
+  type EvaluationRetrievalObservation,
+  type EvidenceBundle,
 } from "../src/index";
 
 const outcomeFor = (evaluationCase: EvaluationCase): string =>
@@ -54,7 +58,7 @@ const makeObservation = (
       acceptedByPolicy &&
       (outcomeFor(evaluationCase) === "fabricated" ||
         outcomeFor(evaluationCase) === "contradicted"),
-    sourceHashes: ["a".repeat(64)],
+    sourceProvenance: [{ identifier: evaluationCase.rfc ?? "RFC9110", sourceHash: "a".repeat(64) }],
     requestedModel: "jev-latest",
     resolvedModel,
     resolvedModels: [resolvedModel],
@@ -72,8 +76,10 @@ const makeObservation = (
     },
     retrieval: {
       schemaVersion: 2,
-      requestCount: 2,
-      datatrackerRequestCount: 1,
+      requestCount:
+        evaluationCase.kind === "research" && evaluationCase.mode === "known_rfc" ? 3 : 2,
+      datatrackerRequestCount:
+        evaluationCase.kind === "research" && evaluationCase.mode === "known_rfc" ? 2 : 1,
       sourceRequestCount: 1,
       metadataMs: 1,
       sourceMs: 3,
@@ -88,6 +94,18 @@ const makeObservation = (
             topicTruncated: false,
           }
         : {}),
+      ...(evaluationCase.kind === "research" && evaluationCase.mode === "known_rfc"
+        ? {
+            traversalComplete: true,
+            traversalContexts: 1,
+            traversalDepth: 0,
+            successorRows: 0,
+            boundedExits: [],
+            contextLimit: 8,
+            depthLimit: 16,
+            relationshipLimit: 64,
+          }
+        : {}),
       requests: [
         {
           kind: "metadata",
@@ -97,6 +115,18 @@ const makeObservation = (
           statuses: [200],
           durationMs: 1,
         },
+        ...(evaluationCase.kind === "research" && evaluationCase.mode === "known_rfc"
+          ? [
+              {
+                kind: "relationships" as const,
+                url: "https://datatracker.ietf.org/api/v1/doc/relateddocument/?target=rfc9110",
+                attempts: 1,
+                status: 200,
+                statuses: [200],
+                durationMs: 1,
+              },
+            ]
+          : []),
         {
           kind: "source",
           url: "https://www.rfc-editor.org/rfc/rfc9110.txt",
@@ -123,6 +153,137 @@ const makeObservation = (
 const corpusObservations = (): ReadonlyArray<EvaluationObservation> =>
   evaluationCorpus.cases.map((evaluationCase) => makeObservation(evaluationCase));
 
+const makeRetrievalObservation = (
+  retrievalCase: EvaluationRetrievalCase,
+  passed = true,
+): EvaluationRetrievalObservation => {
+  const topicCase = evaluationCorpus.cases.find(({ mode }) => mode === "topic");
+  const knownCase = evaluationCorpus.cases.find(
+    ({ kind, mode }) => kind === "research" && mode === "known_rfc",
+  );
+  const sourceCase =
+    retrievalCase.category === "ordered_topic_terms" ||
+    retrievalCase.category === "candidate_fan_out" ||
+    retrievalCase.category === "no_candidate_outcome"
+      ? topicCase
+      : knownCase;
+  const trace = sourceCase === undefined ? null : makeObservation(sourceCase).retrieval;
+  const cacheOutcomes: Partial<
+    Record<
+      EvaluationRetrievalCase["category"],
+      "miss" | "hit" | "revalidated" | "replaced" | "repaired"
+    >
+  > = {
+    source_cache_miss: "miss",
+    source_cache_hit: "hit",
+    source_cache_revalidated: "revalidated",
+    source_cache_replaced: "replaced",
+    source_cache_repaired: "repaired",
+  };
+  const cacheOutcome = cacheOutcomes[retrievalCase.category];
+  const failClosed = retrievalCase.category === "fail_closed_upstream";
+  const requestCopies = (kind: "metadata" | "relationships" | "source", count: number) => {
+    const request = trace?.requests.find((candidate) => candidate.kind === kind);
+    if (request === undefined) return [];
+    return Array.from({ length: count }, (_, index) => ({
+      ...request,
+      url: `${request.url}${request.url.includes("?") ? "&" : "?"}fixture=${index}`,
+    }));
+  };
+  const scenarioTrace = (() => {
+    if (trace === null) return null;
+    if (retrievalCase.category === "update_chain" || retrievalCase.category === "cycle_safety") {
+      const requests = [
+        ...requestCopies("metadata", 2),
+        ...requestCopies("relationships", 2),
+        ...requestCopies("source", 1),
+      ];
+      return {
+        ...trace,
+        requestCount: requests.length,
+        datatrackerRequestCount: 4,
+        sourceRequestCount: 1,
+        traversalContexts: 2,
+        traversalDepth: 1,
+        successorRows: retrievalCase.category === "cycle_safety" ? 2 : 1,
+        requests,
+      };
+    }
+    if (
+      retrievalCase.category === "ordered_topic_terms" ||
+      retrievalCase.category === "candidate_fan_out"
+    ) {
+      const datatrackerRequestCount = retrievalCase.category === "candidate_fan_out" ? 8 : 4;
+      const requests = [
+        ...requestCopies("metadata", datatrackerRequestCount),
+        ...requestCopies("source", 1),
+      ];
+      return {
+        ...trace,
+        requestCount: requests.length,
+        datatrackerRequestCount,
+        sourceRequestCount: 1,
+        requests,
+      };
+    }
+    if (retrievalCase.category === "no_candidate_outcome") {
+      const requests = requestCopies("metadata", 2);
+      return {
+        ...trace,
+        requestCount: requests.length,
+        datatrackerRequestCount: 2,
+        sourceRequestCount: 0,
+        semanticCandidates: 0,
+        selectedSources: 0,
+        sourceCacheOutcome: "not_requested" as const,
+        requests,
+      };
+    }
+    if (retrievalCase.category === "relationship_bound") {
+      const requests = [
+        ...requestCopies("metadata", 8),
+        ...requestCopies("relationships", 8),
+        ...requestCopies("source", 1),
+      ];
+      return {
+        ...trace,
+        requestCount: requests.length,
+        datatrackerRequestCount: 16,
+        sourceRequestCount: 1,
+        traversalComplete: false,
+        traversalContexts: 8,
+        traversalDepth: 1,
+        depthLimit: 1,
+        successorRows: 64,
+        boundedExits: [
+          "relationship_limit" as const,
+          "context_limit" as const,
+          "depth_limit" as const,
+        ],
+        requests,
+      };
+    }
+    return { ...trace, sourceCacheOutcome: cacheOutcome ?? trace.sourceCacheOutcome };
+  })();
+  return {
+    schemaVersion: evaluationSchemaVersion,
+    caseId: retrievalCase.id,
+    category: retrievalCase.category,
+    seam: retrievalCase.seam,
+    passed,
+    traces: failClosed || scenarioTrace === null ? [] : [scenarioTrace],
+    errorKind: passed ? (failClosed ? "RfcDiscoveryError" : null) : "RetrievalAssertionError",
+  };
+};
+
+const corpusRetrievalObservations = (): ReadonlyArray<EvaluationRetrievalObservation> =>
+  evaluationCorpus.retrievalCases.map((retrievalCase) => makeRetrievalObservation(retrievalCase));
+
+const evaluateEvaluationGate = (
+  metrics: Parameters<typeof evaluateGateWithRetrieval>[0],
+  observations: ReadonlyArray<EvaluationObservation>,
+) => evaluateGateWithRetrieval(metrics, observations, corpusRetrievalObservations());
+
 const liveEvaluationCorpus = {
   ...evaluationCorpus,
   cases: evaluationCorpus.cases.flatMap((evaluationCase) =>
@@ -147,20 +308,25 @@ const acceptedFixtureReport = () => {
       (rfc) => [rfc, ["a".repeat(64)]],
     ),
   );
-  const report = makeEvaluationReport(liveEvaluationCorpus, liveCorpusObservations(), {
-    origin: "live",
-    releaseBuildId: "rfc-evidence-precision-v2",
-    corpusDigest: evaluationCorpusDigest,
-    createdAt: "2026-01-01T00:00:00.000Z",
-    expiresAt: "2026-02-01T00:00:00.000Z",
-    authoritativeSourceHashes,
-    policyVersion: "precision-v2",
-    requestedModel: "jev-latest",
-    pinnedModel: "jev-1.13.0",
-    minimumSupportedClaimPrecision: undefined,
-    maxKnownRfcP95LatencyMilliseconds: undefined,
-    maxTopicP95LatencyMilliseconds: undefined,
-  });
+  const report = makeEvaluationReport(
+    liveEvaluationCorpus,
+    liveCorpusObservations(),
+    corpusRetrievalObservations(),
+    {
+      origin: "live",
+      releaseBuildId: "rfc-evidence-precision-v2",
+      corpusDigest: evaluationCorpusDigest,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      expiresAt: "2026-02-01T00:00:00.000Z",
+      authoritativeSourceHashes,
+      policyVersion: "precision-v2",
+      requestedModel: "jev-latest",
+      pinnedModel: "jev-1.13.0",
+      minimumSupportedClaimPrecision: undefined,
+      maxKnownRfcP95LatencyMilliseconds: undefined,
+      maxTopicP95LatencyMilliseconds: undefined,
+    },
+  );
   return {
     report,
     attestation: {
@@ -311,7 +477,11 @@ describe("precision evaluation", () => {
     expect(evaluationAllowedOutcomeSets).toEqual({});
 
     const observations = corpusObservations();
-    const report = makeEvaluationReport(evaluationCorpus, observations);
+    const report = makeEvaluationReport(
+      evaluationCorpus,
+      observations,
+      corpusRetrievalObservations(),
+    );
     expect(report.gate.expectedOutcomePassed).toBe(true);
     expect(report.gate.passed).toBe(true);
 
@@ -437,7 +607,11 @@ describe("precision evaluation", () => {
 
   test("runs a deterministic report and round-trips it through its schema", () => {
     const observations = corpusObservations();
-    const report = makeEvaluationReport(evaluationCorpus, observations);
+    const report = makeEvaluationReport(
+      evaluationCorpus,
+      observations,
+      corpusRetrievalObservations(),
+    );
 
     expect(report.gate.passed).toBe(true);
     expect(report.policy).toEqual(evaluationPolicy);
@@ -449,6 +623,140 @@ describe("precision evaluation", () => {
     expect(
       Schema.decodeUnknownSync(EvaluationReportSchema)(JSON.parse(JSON.stringify(report))),
     ).toEqual(report);
+  });
+
+  test("preserves requested and successor RFC identities in bundle provenance", () => {
+    const evaluationCase = evaluationCorpus.cases.find(({ id }) => id === "older-definition");
+    if (evaluationCase === undefined) throw new Error("Missing older-definition case");
+    const baseline = makeObservation(evaluationCase);
+    const source = (identifier: string, sourceHash: string) => ({
+      identifier,
+      rfcNumber: Number(identifier.slice(3)),
+      sourceUrl: `https://www.rfc-editor.org/rfc/${identifier.toLowerCase()}.txt`,
+      sourceHash,
+      fetchedAt: "2026-01-01T00:00:00.000Z",
+    });
+    const bundle = {
+      status: "needs_review",
+      evidence: [],
+      diagnostics: {
+        sources: [
+          { context: "requested", source: source("RFC2616", "a".repeat(64)) },
+          { context: "current", source: source("RFC9110", "b".repeat(64)) },
+        ],
+        source: source("RFC2616", "a".repeat(64)),
+        retrieval: baseline.retrieval,
+        requestedModel: baseline.requestedModel,
+        resolvedModel: baseline.resolvedModel,
+        resolvedModels: baseline.resolvedModels,
+        policyVersion: baseline.policyVersion,
+        usage: baseline.usage,
+        timings: baseline.timings,
+        atomicity: null,
+        documentSelection: [],
+        selection: [],
+        classification: [],
+      },
+    } as unknown as EvidenceBundle;
+
+    expect(observationFromEvidenceBundle(evaluationCase, bundle).sourceProvenance).toEqual([
+      { identifier: "RFC2616", sourceHash: "a".repeat(64) },
+      { identifier: "RFC9110", sourceHash: "b".repeat(64) },
+    ]);
+  });
+
+  test("preserves RFC identifiers with source hashes in the report manifest", () => {
+    const observations = corpusObservations().map((observation) =>
+      observation.caseId === "modern-normative-requirement"
+        ? {
+            ...observation,
+            sourceProvenance: [
+              { identifier: "RFC9110", sourceHash: "a".repeat(64) },
+              { identifier: "RFC9110", sourceHash: "c".repeat(64) },
+              { identifier: "RFC9111", sourceHash: "b".repeat(64) },
+            ],
+          }
+        : observation,
+    );
+    const report = makeEvaluationReport(
+      evaluationCorpus,
+      observations,
+      corpusRetrievalObservations(),
+    );
+
+    expect(report.authoritativeSourceHashes.RFC9110).toEqual(["a".repeat(64), "c".repeat(64)]);
+    expect(report.authoritativeSourceHashes.RFC9111).toEqual(["b".repeat(64)]);
+  });
+
+  test("requires complete successful retrieval-case observations", () => {
+    const observations = corpusObservations();
+    const incomplete = makeEvaluationReport(
+      evaluationCorpus,
+      observations,
+      corpusRetrievalObservations().slice(1),
+    );
+    const failedRetrievals = corpusRetrievalObservations().map((observation, index) =>
+      index === 0 ? { ...observation, passed: false, errorKind: "AssertionError" } : observation,
+    );
+    const failed = makeEvaluationReport(evaluationCorpus, observations, failedRetrievals);
+
+    expect(incomplete.gate.corpusComplete).toBe(false);
+    expect(incomplete.gate.passed).toBe(false);
+    expect(failed.gate.retrievalCasesPassed).toBe(false);
+    expect(failed.gate.failures).toContain(
+      "one or more deterministic retrieval cases did not pass",
+    );
+  });
+
+  test("requires bounded traversal fields for research but not citation traces", () => {
+    const observations = corpusObservations();
+    const missingTraversal = observations.map((observation) =>
+      observation.caseId === "modern-normative-requirement" && observation.retrieval !== null
+        ? {
+            ...observation,
+            retrieval: { ...observation.retrieval, traversalDepth: undefined },
+          }
+        : observation,
+    );
+    const excessRelationships = observations.map((observation) =>
+      observation.caseId === "modern-normative-requirement" && observation.retrieval !== null
+        ? {
+            ...observation,
+            retrieval: { ...observation.retrieval, successorRows: 65 },
+          }
+        : observation,
+    );
+
+    expect(
+      evaluateEvaluationGate(calculateEvaluationMetrics(missingTraversal), missingTraversal)
+        .retrievalBoundsPassed,
+    ).toBe(false);
+    expect(
+      evaluateEvaluationGate(calculateEvaluationMetrics(excessRelationships), excessRelationships)
+        .retrievalBoundsPassed,
+    ).toBe(false);
+    expect(
+      evaluateEvaluationGate(calculateEvaluationMetrics(observations), observations)
+        .retrievalBoundsPassed,
+    ).toBe(true);
+  });
+
+  test("counts logical Datatracker requests independently from bounded retries", () => {
+    const observations = corpusObservations().map((observation) => {
+      if (observation.mode !== "topic" || observation.retrieval === null) return observation;
+      const [first, ...rest] = observation.retrieval.requests;
+      if (first === undefined) return observation;
+      return {
+        ...observation,
+        retrieval: {
+          ...observation.retrieval,
+          requests: [{ ...first, attempts: 3, statuses: [503, 503, 200], status: 200 }, ...rest],
+        },
+      };
+    });
+    const gate = evaluateEvaluationGate(calculateEvaluationMetrics(observations), observations);
+
+    expect(gate.retrievalBoundsPassed).toBe(true);
   });
 
   test("requires positive-control research cases to stay answered across live repetitions", () => {
@@ -497,6 +805,7 @@ describe("precision evaluation", () => {
     const allResearchReviewReport = makeEvaluationReport(
       allResearchReviewCorpus,
       allResearchReviewCorpus.cases.map((evaluationCase) => makeObservation(evaluationCase)),
+      corpusRetrievalObservations(),
     );
     expect(allResearchReviewReport.gate.expectedOutcomePassed).toBe(true);
     expect(allResearchReviewReport.gate.positiveControlPassed).toBe(false);
@@ -509,7 +818,11 @@ describe("precision evaluation", () => {
         ? { ...observation, expectedOutcome: "answered" as const }
         : observation,
     );
-    const report = makeEvaluationReport(evaluationCorpus, observations);
+    const report = makeEvaluationReport(
+      evaluationCorpus,
+      observations,
+      corpusRetrievalObservations(),
+    );
 
     expect(report.gate.corpusComplete).toBe(false);
     expect(report.gate.expectedOutcomePassed).toBe(false);
@@ -669,21 +982,30 @@ describe("precision evaluation", () => {
   });
 
   test("keeps calibration activation closed for an unattested report", () => {
-    const deterministicReport = makeEvaluationReport(evaluationCorpus, corpusObservations());
-    const report = makeEvaluationReport(liveEvaluationCorpus, liveCorpusObservations(), {
-      origin: "live",
-      releaseBuildId: "rfc-evidence-precision-v2",
-      corpusDigest: "pending",
-      createdAt: "2026-01-01T00:00:00.000Z",
-      expiresAt: "2026-02-01T00:00:00.000Z",
-      authoritativeSourceHashes: {},
-      policyVersion: "precision-v2",
-      requestedModel: "jev-latest",
-      pinnedModel: "jev-1.13.0",
-      minimumSupportedClaimPrecision: undefined,
-      maxKnownRfcP95LatencyMilliseconds: undefined,
-      maxTopicP95LatencyMilliseconds: undefined,
-    });
+    const deterministicReport = makeEvaluationReport(
+      evaluationCorpus,
+      corpusObservations(),
+      corpusRetrievalObservations(),
+    );
+    const report = makeEvaluationReport(
+      liveEvaluationCorpus,
+      liveCorpusObservations(),
+      corpusRetrievalObservations(),
+      {
+        origin: "live",
+        releaseBuildId: "rfc-evidence-precision-v2",
+        corpusDigest: "pending",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        expiresAt: "2026-02-01T00:00:00.000Z",
+        authoritativeSourceHashes: undefined,
+        policyVersion: "precision-v2",
+        requestedModel: "jev-latest",
+        pinnedModel: "jev-1.13.0",
+        minimumSupportedClaimPrecision: undefined,
+        maxKnownRfcP95LatencyMilliseconds: undefined,
+        maxTopicP95LatencyMilliseconds: undefined,
+      },
+    );
 
     expect(isAcceptedEvaluationReport(deterministicReport)).toBe(false);
     expect(isAcceptedEvaluationReport(report)).toBe(false);
@@ -834,6 +1156,40 @@ describe("precision evaluation", () => {
             ...attestation.authoritativeSourceHashes,
             RFC9110: ["b".repeat(64)],
           },
+        },
+        now,
+      ),
+    ).toBe(false);
+    const mismatchedSourceReport = {
+      ...report,
+      authoritativeSourceHashes: {
+        ...report.authoritativeSourceHashes,
+        RFC9110: ["b".repeat(64)],
+      },
+    };
+    expect(
+      isAcceptedEvaluationReportForAttestation(
+        mismatchedSourceReport,
+        {
+          ...attestation,
+          reportDigest: evaluationReportDigest(mismatchedSourceReport),
+          authoritativeSourceHashes: mismatchedSourceReport.authoritativeSourceHashes,
+        },
+        now,
+      ),
+    ).toBe(false);
+    const missingRetrievalEvidenceReport = {
+      ...report,
+      retrievalObservations: report.retrievalObservations.map((observation, index) =>
+        index === 0 ? { ...observation, traces: [] } : observation,
+      ),
+    };
+    expect(
+      isAcceptedEvaluationReportForAttestation(
+        missingRetrievalEvidenceReport,
+        {
+          ...attestation,
+          reportDigest: evaluationReportDigest(missingRetrievalEvidenceReport),
         },
         now,
       ),

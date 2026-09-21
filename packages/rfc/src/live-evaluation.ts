@@ -21,7 +21,10 @@ import {
   resolveStoredCredential,
   type CredentialStore,
 } from "./credentials";
-import { createRfcCalibrationClient } from "../../rfc-core/src/internal-calibration";
+import {
+  createRfcCalibrationClient,
+  evaluateDeterministicRetrievalCase,
+} from "../../rfc-core/src/internal-calibration";
 
 const liveCorpus = {
   ...evaluationCorpus,
@@ -148,7 +151,7 @@ export const runLiveEvaluation = async (
     });
   }
 
-  let reportOptions: EvaluationReportOptions = {
+  const reportOptions: EvaluationReportOptions = {
     origin: "live",
     releaseBuildId: evaluationReleaseAttestation.buildId,
     corpusDigest: evaluationCorpusDigest,
@@ -195,28 +198,12 @@ export const runLiveEvaluation = async (
         reason: "Live evaluation warm-up did not complete every corpus case",
       });
     }
-    const sourceHashes = new Map<string, Set<string>>();
-    for (const [index, evaluationCase] of liveCorpus.cases.entries()) {
-      if (evaluationCase.rfc === null) continue;
-      const observation = warmupObservations[index];
-      if (observation === undefined) {
-        throw new ConfigurationError({
-          reason: `Live evaluation did not produce source metadata for ${evaluationCase.id}`,
-        });
-      }
-      const hashes = sourceHashes.get(evaluationCase.rfc) ?? new Set<string>();
-      for (const hash of observation.sourceHashes) hashes.add(hash);
-      sourceHashes.set(evaluationCase.rfc, hashes);
-    }
-    reportOptions = {
-      ...reportOptions,
-      authoritativeSourceHashes: Object.fromEntries(
-        [...sourceHashes.entries()]
-          .sort(([left], [right]) => left.localeCompare(right))
-          .map(([identifier, hashes]) => [identifier, [...hashes].sort()]),
-      ),
-    };
-    const report = await runEvaluation(timedCorpus, evaluateCase, reportOptions);
+    const report = await runEvaluation(
+      timedCorpus,
+      evaluateCase,
+      evaluateDeterministicRetrievalCase,
+      reportOptions,
+    );
     const output = `${JSON.stringify(report, null, 2)}\n`;
     await mkdir(dirname(config.evaluationOutput), { recursive: true });
     await writeFile(config.evaluationOutput, output, "utf8");

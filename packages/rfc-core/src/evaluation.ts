@@ -5,7 +5,7 @@ import {
   type CitationVerificationResult,
   type CitationVerdict,
 } from "./citation";
-import { LiveRetrievalTraceSchema } from "./discovery";
+import { LiveRetrievalTraceSchema, type LiveRetrievalTrace } from "./discovery";
 import {
   precisionPolicy,
   ResearchStatusSchema,
@@ -16,7 +16,7 @@ import {
 /**
  * Version of the evaluation contracts and report format.
  */
-export const evaluationSchemaVersion = 4 as const;
+export const evaluationSchemaVersion = 5 as const;
 
 /**
  * Version of the committed precision evaluation corpus.
@@ -122,6 +122,26 @@ export const EvaluationRetrievalCaseSchema = Schema.Struct({
  * A deterministic public-client scenario in the evaluation corpus.
  */
 export type EvaluationRetrievalCase = Schema.Schema.Type<typeof EvaluationRetrievalCaseSchema>;
+
+/**
+ * Evidence that one deterministic retrieval case executed through the public client seam.
+ */
+export const EvaluationRetrievalObservationSchema = Schema.Struct({
+  schemaVersion: Schema.Literal(evaluationSchemaVersion),
+  caseId: Schema.NonEmptyString,
+  category: EvaluationRetrievalCategorySchema,
+  seam: Schema.Literal("rfc_client"),
+  passed: Schema.Boolean,
+  traces: Schema.Array(LiveRetrievalTraceSchema),
+  errorKind: Schema.NullOr(Schema.NonEmptyString),
+});
+
+/**
+ * The sanitized result of executing one deterministic retrieval case.
+ */
+export type EvaluationRetrievalObservation = Schema.Schema.Type<
+  typeof EvaluationRetrievalObservationSchema
+>;
 
 /**
  * Schema for the committed evaluation corpus.
@@ -739,6 +759,21 @@ export type EvaluationTimings = Schema.Schema.Type<typeof EvaluationTimingsSchem
 /**
  * Schema for one sanitized evaluation observation.
  */
+/**
+ * RFC source identity preserved in an evaluation observation.
+ */
+export const EvaluationSourceProvenanceSchema = Schema.Struct({
+  identifier: Schema.NonEmptyString,
+  sourceHash: Schema.NonEmptyString,
+});
+
+/**
+ * An authoritative RFC identifier and exact source hash pair.
+ */
+export type EvaluationSourceProvenance = Schema.Schema.Type<
+  typeof EvaluationSourceProvenanceSchema
+>;
+
 export const EvaluationObservationSchema = Schema.Struct({
   schemaVersion: Schema.Literal(evaluationSchemaVersion),
   caseId: Schema.NonEmptyString,
@@ -750,7 +785,7 @@ export const EvaluationObservationSchema = Schema.Struct({
   allowedOutcomes: Schema.Array(Schema.NonEmptyString),
   acceptedByPolicy: Schema.Boolean,
   unsafeCitationAccepted: Schema.Boolean,
-  sourceHashes: Schema.Array(Schema.NonEmptyString),
+  sourceProvenance: Schema.Array(EvaluationSourceProvenanceSchema),
   requestedModel: Schema.NonEmptyString,
   resolvedModel: Schema.NonEmptyString,
   resolvedModels: Schema.Array(Schema.NonEmptyString),
@@ -1030,6 +1065,7 @@ export const EvaluationGateSchema = Schema.Struct({
   positiveControlPassed: Schema.Boolean,
   precisionPassed: Schema.Boolean,
   citationSafetyPassed: Schema.Boolean,
+  retrievalCasesPassed: Schema.Boolean,
   retrievalBoundsPassed: Schema.Boolean,
   latencyPassed: Schema.Boolean,
   modelPinPassed: Schema.Boolean,
@@ -1065,6 +1101,7 @@ export const EvaluationReportSchema = Schema.Struct({
   resolvedModel: Schema.NonEmptyString,
   pinnedModel: Schema.NonEmptyString,
   observations: Schema.Array(EvaluationObservationSchema),
+  retrievalObservations: Schema.Array(EvaluationRetrievalObservationSchema),
   metrics: EvaluationMetricsSchema,
   gate: EvaluationGateSchema,
 });
@@ -1184,16 +1221,24 @@ const probabilityEntries = (
 ): ReadonlyArray<readonly [string, number]> =>
   Object.entries(probabilities).map(([label, value]) => [`${prefix}.${label}`, value] as const);
 
-const sourceHashesFromBundle = (bundle: EvidenceBundle): ReadonlyArray<string> => {
+const sourceProvenanceFromBundle = (
+  bundle: EvidenceBundle,
+): ReadonlyArray<EvaluationSourceProvenance> => {
   const sources = bundle.diagnostics.sources;
-  if (sources !== undefined) {
-    return unique(
-      sources.map((source) =>
-        "sourceHash" in source ? source.sourceHash : source.source.sourceHash,
-      ),
-    );
-  }
-  return bundle.diagnostics.source === null ? [] : [bundle.diagnostics.source.sourceHash];
+  const provenance =
+    sources === undefined
+      ? bundle.diagnostics.source === null
+        ? []
+        : [bundle.diagnostics.source]
+      : sources.map((source) => ("sourceHash" in source ? source : source.source));
+  return [
+    ...new Map(
+      provenance.map(({ identifier, sourceHash }) => [
+        `${identifier}\u0000${sourceHash}`,
+        { identifier, sourceHash },
+      ]),
+    ).values(),
+  ];
 };
 
 const probabilitiesFromBundle = (bundle: EvidenceBundle): Readonly<Record<string, number>> =>
@@ -1271,7 +1316,7 @@ export const observationFromEvidenceBundle = (
     allowedOutcomes: evaluationCase.allowedOutcomes,
     acceptedByPolicy,
     unsafeCitationAccepted: false,
-    sourceHashes: sourceHashesFromBundle(bundle),
+    sourceProvenance: sourceProvenanceFromBundle(bundle),
     requestedModel: bundle.diagnostics.requestedModel,
     resolvedModel: bundle.diagnostics.resolvedModel,
     resolvedModels: bundle.diagnostics.resolvedModels,
@@ -1327,7 +1372,12 @@ export const observationFromCitationResult = (
     acceptedByPolicy,
     unsafeCitationAccepted:
       acceptedByPolicy && (expectedOutcome === "fabricated" || expectedOutcome === "contradicted"),
-    sourceHashes: [result.provenance.sourceHash],
+    sourceProvenance: [
+      {
+        identifier: result.provenance.identifier,
+        sourceHash: result.provenance.sourceHash,
+      },
+    ],
     requestedModel: result.diagnostics.requestedModel,
     resolvedModel: result.diagnostics.resolvedModel,
     resolvedModels: result.diagnostics.resolvedModels,
@@ -1367,7 +1417,7 @@ export const failedEvaluationObservation = (
     allowedOutcomes: evaluationCase.allowedOutcomes,
     acceptedByPolicy: false,
     unsafeCitationAccepted: false,
-    sourceHashes: [],
+    sourceProvenance: [],
     requestedModel: resolved.requestedModel,
     resolvedModel: "unknown",
     resolvedModels: ["unknown"],
@@ -1566,21 +1616,15 @@ export const isAcceptedEvaluationReportForAttestation = (
     const policy = evaluationPolicy;
     const createdAt = Date.parse(report.createdAt);
     const expiresAt = Date.parse(report.expiresAt);
-    const sourceManifestComplete = calibrationCases.every((evaluationCase) => {
-      if (evaluationCase.rfc === null) return true;
-      const hashes = attestation.authoritativeSourceHashes[evaluationCase.rfc];
-      return hashes !== undefined && hashes.length > 0;
-    });
-    const observationsBoundToSources = report.observations.every((observation) => {
-      const baseId = /^(.*):iteration-[1-9][0-9]*$/.exec(observation.caseId)?.[1];
-      const evaluationCase = calibrationCases.find((candidate) => candidate.id === baseId);
-      if (evaluationCase?.rfc === null || evaluationCase?.rfc === undefined) return true;
-      const expectedHashes = attestation.authoritativeSourceHashes[evaluationCase.rfc] ?? [];
-      return (
-        observation.sourceHashes.length > 0 &&
-        observation.sourceHashes.every((hash) => expectedHashes.includes(hash))
-      );
-    });
+    const observedSourceManifest = sourceHashManifest(report.observations);
+    const sourceManifestComplete =
+      Object.keys(observedSourceManifest).length > 0 &&
+      stableJson(report.authoritativeSourceHashes) === stableJson(observedSourceManifest);
+    const observationsBoundToSources = report.observations.every((observation) =>
+      observation.sourceProvenance.every(({ identifier, sourceHash }) =>
+        (attestation.authoritativeSourceHashes[identifier] ?? []).includes(sourceHash),
+      ),
+    );
     return (
       attestation.status === "accepted" &&
       sourceManifestComplete &&
@@ -1610,6 +1654,7 @@ export const isAcceptedEvaluationReportForAttestation = (
       gate.positiveControlPassed &&
       gate.precisionPassed &&
       gate.citationSafetyPassed &&
+      gate.retrievalCasesPassed &&
       gate.retrievalBoundsPassed &&
       gate.latencyPassed &&
       gate.modelPinPassed &&
@@ -1618,6 +1663,13 @@ export const isAcceptedEvaluationReportForAttestation = (
       gate.topicP95LimitMilliseconds === policy.maxTopicP95LatencyMilliseconds &&
       gate.failures.length === 0 &&
       calibrationObservationSetPassed(report.observations) &&
+      retrievalObservationSetPassed(
+        evaluationCorpus.retrievalCases,
+        report.retrievalObservations,
+      ) &&
+      report.retrievalObservations.every((observation) =>
+        retrievalObservationHasEvidence(observation, policy),
+      ) &&
       report.observations.length > 0 &&
       JSON.stringify(calculateEvaluationMetrics(report.observations)) ===
         JSON.stringify(report.metrics) &&
@@ -1658,49 +1710,179 @@ export const isAcceptedEvaluationReportForAttestation = (
 export const isAcceptedEvaluationReport = (input: unknown): boolean =>
   isAcceptedEvaluationReportForAttestation(input, evaluationReleaseAttestation);
 
+const requestTraceWithinPolicy = (trace: LiveRetrievalTrace, policy: EvaluationPolicy): boolean => {
+  const datatrackerRequests = trace.requests.filter(({ kind }) => kind !== "source");
+  const sourceRequests = trace.requests.filter(({ kind }) => kind === "source");
+  return (
+    trace.requestCount === trace.requests.length &&
+    trace.datatrackerRequestCount === datatrackerRequests.length &&
+    trace.sourceRequestCount === sourceRequests.length &&
+    trace.requests.every(
+      ({ attempts, statuses }) => attempts > 0 && attempts === statuses.length,
+    ) &&
+    datatrackerRequests.every(
+      ({ attempts }) => attempts <= policy.retrievalLimits.datatrackerMaxAttempts,
+    )
+  );
+};
+
+const topicTraceWithinPolicy = (trace: LiveRetrievalTrace, policy: EvaluationPolicy): boolean =>
+  requestTraceWithinPolicy(trace, policy) &&
+  trace.datatrackerRequestCount <= policy.retrievalLimits.maxTopicRequests &&
+  trace.upstreamRows !== undefined &&
+  trace.upstreamRows <= policy.retrievalLimits.maxUpstreamTopicRows &&
+  trace.uniqueCandidates !== undefined &&
+  trace.mergeLimit === policy.candidateLimits.maxMergedDocumentCandidates &&
+  trace.semanticCandidates !== undefined &&
+  trace.semanticCandidates <= policy.candidateLimits.maxMergedDocumentCandidates &&
+  trace.selectedSources !== undefined &&
+  trace.selectedSources <= policy.candidateLimits.maxSourceRetrievalCandidates;
+
+const knownRfcTraceWithinPolicy = (
+  trace: LiveRetrievalTrace,
+  policy: EvaluationPolicy,
+): boolean => {
+  if (
+    !requestTraceWithinPolicy(trace, policy) ||
+    trace.traversalComplete === undefined ||
+    trace.traversalContexts === undefined ||
+    trace.traversalDepth === undefined ||
+    trace.successorRows === undefined ||
+    trace.boundedExits === undefined ||
+    trace.contextLimit === undefined ||
+    trace.depthLimit === undefined ||
+    trace.relationshipLimit === undefined
+  ) {
+    return false;
+  }
+
+  const datatrackerRequests = trace.requests.filter(({ kind }) => kind !== "source");
+  const traversalRequestsMatch =
+    datatrackerRequests.filter(({ kind }) => kind === "metadata").length ===
+      trace.traversalContexts &&
+    datatrackerRequests.filter(({ kind }) => kind === "relationships").length ===
+      trace.traversalContexts;
+  const boundedExitStateMatches = trace.traversalComplete
+    ? trace.boundedExits.length === 0
+    : trace.boundedExits.length > 0;
+  const boundedExitDetailsMatch =
+    (!trace.boundedExits.includes("context_limit") ||
+      trace.traversalContexts === trace.contextLimit) &&
+    (!trace.boundedExits.includes("depth_limit") || trace.traversalDepth === trace.depthLimit) &&
+    (!trace.boundedExits.includes("relationship_limit") ||
+      trace.successorRows >= trace.relationshipLimit);
+  return (
+    trace.contextLimit === policy.traversalLimits.maxContexts &&
+    trace.depthLimit <= policy.traversalLimits.maxDepth &&
+    trace.relationshipLimit === policy.traversalLimits.maxRelationshipsPerRfc &&
+    trace.traversalContexts > 0 &&
+    trace.traversalContexts <= trace.contextLimit &&
+    trace.traversalDepth <= trace.depthLimit &&
+    trace.successorRows <= trace.relationshipLimit * trace.traversalContexts &&
+    traversalRequestsMatch &&
+    boundedExitStateMatches &&
+    boundedExitDetailsMatch &&
+    trace.sourceRequestCount <= policy.candidateLimits.maxSourceRetrievalCandidates
+  );
+};
+
 const retrievalTraceWithinPolicy = (
   observation: EvaluationObservation,
   policy: EvaluationPolicy,
 ): boolean => {
   const trace = observation.retrieval;
   if (trace === null) return false;
-  const countedRequests = trace.datatrackerRequestCount + trace.sourceRequestCount;
-  const tracedAttempts = trace.requests.reduce((total, request) => total + request.attempts, 0);
-  const datatrackerAttemptsBounded = trace.requests
-    .filter(({ kind }) => kind !== "source")
-    .every(({ attempts }) => attempts <= policy.retrievalLimits.datatrackerMaxAttempts);
-  if (
-    trace.requestCount !== countedRequests ||
-    trace.requestCount !== tracedAttempts ||
-    !datatrackerAttemptsBounded
-  ) {
-    return false;
-  }
-
-  if (observation.mode === "topic") {
+  if (observation.kind === "citation") {
     return (
-      trace.datatrackerRequestCount <= policy.retrievalLimits.maxTopicRequests &&
-      trace.upstreamRows !== undefined &&
-      trace.upstreamRows <= policy.retrievalLimits.maxUpstreamTopicRows &&
-      trace.uniqueCandidates !== undefined &&
-      trace.mergeLimit === policy.candidateLimits.maxMergedDocumentCandidates &&
-      trace.semanticCandidates !== undefined &&
-      trace.semanticCandidates <= policy.candidateLimits.maxMergedDocumentCandidates &&
-      trace.selectedSources !== undefined &&
-      trace.selectedSources <= policy.candidateLimits.maxSourceRetrievalCandidates
+      requestTraceWithinPolicy(trace, policy) &&
+      trace.datatrackerRequestCount === 1 &&
+      trace.sourceRequestCount <= 1
     );
   }
+  return observation.mode === "topic"
+    ? topicTraceWithinPolicy(trace, policy)
+    : knownRfcTraceWithinPolicy(trace, policy) &&
+        trace.depthLimit === policy.traversalLimits.maxDepth;
+};
 
-  return (
-    (trace.contextLimit === undefined ||
-      trace.contextLimit === policy.traversalLimits.maxContexts) &&
-    (trace.depthLimit === undefined || trace.depthLimit <= policy.traversalLimits.maxDepth) &&
-    (trace.relationshipLimit === undefined ||
-      trace.relationshipLimit === policy.traversalLimits.maxRelationshipsPerRfc) &&
-    (trace.traversalContexts === undefined ||
-      trace.traversalContexts <= policy.traversalLimits.maxContexts) &&
-    trace.sourceRequestCount <= policy.candidateLimits.maxSourceRetrievalCandidates
-  );
+const retrievalObservationHasEvidence = (
+  observation: EvaluationRetrievalObservation,
+  policy: EvaluationPolicy,
+): boolean => {
+  if (!observation.passed) return false;
+  if (observation.category === "fail_closed_upstream") {
+    return observation.errorKind !== null && observation.traces.length === 0;
+  }
+  if (observation.errorKind !== null || observation.traces.length === 0) return false;
+  const finalTrace = observation.traces[observation.traces.length - 1];
+  if (finalTrace === undefined) return false;
+  switch (observation.category) {
+    case "known_current_rfc":
+      return (
+        observation.traces.every((trace) => knownRfcTraceWithinPolicy(trace, policy)) &&
+        finalTrace.traversalComplete === true &&
+        finalTrace.traversalContexts === 1 &&
+        finalTrace.traversalDepth === 0
+      );
+    case "update_chain":
+      return (
+        observation.traces.every((trace) => knownRfcTraceWithinPolicy(trace, policy)) &&
+        (finalTrace.traversalContexts ?? 0) >= 2 &&
+        (finalTrace.traversalDepth ?? 0) >= 1
+      );
+    case "cycle_safety":
+      return (
+        observation.traces.every((trace) => knownRfcTraceWithinPolicy(trace, policy)) &&
+        (finalTrace.traversalContexts ?? 0) >= 2 &&
+        (finalTrace.successorRows ?? 0) >= 2
+      );
+    case "ordered_topic_terms":
+      return (
+        observation.traces.every((trace) => topicTraceWithinPolicy(trace, policy)) &&
+        finalTrace.requests.filter(({ kind }) => kind === "metadata").length >= 4
+      );
+    case "candidate_fan_out":
+      return (
+        observation.traces.every((trace) => topicTraceWithinPolicy(trace, policy)) &&
+        finalTrace.datatrackerRequestCount === policy.retrievalLimits.maxTopicRequests &&
+        (finalTrace.semanticCandidates ?? 0) > 0
+      );
+    case "no_candidate_outcome":
+      return (
+        observation.traces.every((trace) => topicTraceWithinPolicy(trace, policy)) &&
+        finalTrace.semanticCandidates === 0 &&
+        finalTrace.selectedSources === 0 &&
+        finalTrace.sourceCacheOutcome === "not_requested"
+      );
+    case "relationship_bound": {
+      const exits = finalTrace.boundedExits ?? [];
+      return (
+        observation.traces.every((trace) => knownRfcTraceWithinPolicy(trace, policy)) &&
+        exits.includes("relationship_limit") &&
+        exits.includes("context_limit") &&
+        exits.includes("depth_limit")
+      );
+    }
+    case "source_cache_miss":
+    case "source_cache_hit":
+    case "source_cache_revalidated":
+    case "source_cache_replaced":
+    case "source_cache_repaired": {
+      const expectedCacheOutcome = {
+        source_cache_miss: "miss",
+        source_cache_hit: "hit",
+        source_cache_revalidated: "revalidated",
+        source_cache_replaced: "replaced",
+        source_cache_repaired: "repaired",
+      }[observation.category];
+      return (
+        observation.traces.every((trace) => knownRfcTraceWithinPolicy(trace, policy)) &&
+        observation.traces.some(
+          ({ sourceCacheOutcome }) => sourceCacheOutcome === expectedCacheOutcome,
+        )
+      );
+    }
+  }
 };
 
 /**
@@ -1710,14 +1892,16 @@ const retrievalTraceWithinPolicy = (
  * p95 gates are strict: a sample at the configured limit does not pass.
  *
  * @param metrics Aggregate evaluation metrics.
- * @param observations Sanitized observations used to check the model pin.
- * @param corpusComplete Whether every committed case produced an observation.
+ * @param observations Sanitized semantic observations used to check the model pin.
+ * @param retrievalObservations Deterministic public-client retrieval results.
+ * @param corpusComplete Whether every committed semantic and retrieval case produced an observation.
  * @param options Optional provisional gate overrides.
  * @returns Individual gate results and a final release decision.
  */
 export const evaluateEvaluationGate = (
   metrics: EvaluationMetrics,
   observations: ReadonlyArray<EvaluationObservation>,
+  retrievalObservations: ReadonlyArray<EvaluationRetrievalObservation>,
   corpusComplete: boolean | undefined = true,
   options: EvaluationReportOptions | undefined = undefined,
 ): EvaluationGate => {
@@ -1729,6 +1913,11 @@ export const evaluateEvaluationGate = (
     metrics.supportedClaims > 0 &&
     metrics.supportedClaimPrecision >= policy.minimumSupportedClaimPrecision;
   const citationSafetyPassed = metrics.unsafeCitationAcceptances === 0;
+  const retrievalCasesPassed =
+    retrievalObservations.length > 0 &&
+    retrievalObservations.every((observation) =>
+      retrievalObservationHasEvidence(observation, policy),
+    );
   const retrievalBoundsPassed =
     observations.length > 0 &&
     observations.every((observation) => retrievalTraceWithinPolicy(observation, policy));
@@ -1762,6 +1951,9 @@ export const evaluateEvaluationGate = (
     );
   }
   if (!citationSafetyPassed) failures.push("a fabricated or contradicted citation was accepted");
+  if (!retrievalCasesPassed) {
+    failures.push("one or more deterministic retrieval cases did not pass");
+  }
   if (!retrievalBoundsPassed) {
     failures.push("a retrieval trace exceeded the precision-v2 hard limits");
   }
@@ -1775,6 +1967,7 @@ export const evaluateEvaluationGate = (
       positiveControlPassed &&
       precisionPassed &&
       citationSafetyPassed &&
+      retrievalCasesPassed &&
       retrievalBoundsPassed &&
       latencyPassed &&
       modelPinPassed,
@@ -1783,6 +1976,7 @@ export const evaluateEvaluationGate = (
     positiveControlPassed,
     precisionPassed,
     citationSafetyPassed,
+    retrievalCasesPassed,
     retrievalBoundsPassed,
     latencyPassed,
     modelPinPassed,
@@ -1811,6 +2005,28 @@ const observationIdsMatchCorpus = (
     })
   );
 };
+
+const retrievalObservationsMatchCorpus = (
+  retrievalCases: ReadonlyArray<EvaluationRetrievalCase>,
+  observations: ReadonlyArray<EvaluationRetrievalObservation>,
+): boolean =>
+  retrievalCases.length === observations.length &&
+  new Set(observations.map(({ caseId }) => caseId)).size === observations.length &&
+  retrievalCases.every((retrievalCase) => {
+    const observation = observations.find(({ caseId }) => caseId === retrievalCase.id);
+    return (
+      observation !== undefined &&
+      observation.category === retrievalCase.category &&
+      observation.seam === retrievalCase.seam
+    );
+  });
+
+const retrievalObservationSetPassed = (
+  retrievalCases: ReadonlyArray<EvaluationRetrievalCase>,
+  observations: ReadonlyArray<EvaluationRetrievalObservation>,
+): boolean =>
+  retrievalObservationsMatchCorpus(retrievalCases, observations) &&
+  observations.every(({ passed }) => passed);
 
 const baseEvaluationCaseId = (caseId: string): string =>
   /^(.*):iteration-[1-9][0-9]*$/.exec(caseId)?.[1] ?? caseId;
@@ -1851,18 +2067,15 @@ const positiveControlObservationSetPassed = (
 };
 
 const sourceHashManifest = (
-  corpus: EvaluationCorpus,
   observations: ReadonlyArray<EvaluationObservation>,
 ): Readonly<Record<string, ReadonlyArray<string>>> => {
   const hashes = new Map<string, Set<string>>();
   for (const observation of observations) {
-    const evaluationCase = corpus.cases.find(
-      (candidate) => candidate.id === baseEvaluationCaseId(observation.caseId),
-    );
-    if (evaluationCase?.rfc === null || evaluationCase?.rfc === undefined) continue;
-    const values = hashes.get(evaluationCase.rfc) ?? new Set<string>();
-    for (const hash of observation.sourceHashes) values.add(hash);
-    hashes.set(evaluationCase.rfc, values);
+    for (const { identifier, sourceHash } of observation.sourceProvenance) {
+      const values = hashes.get(identifier) ?? new Set<string>();
+      values.add(sourceHash);
+      hashes.set(identifier, values);
+    }
   }
   return Object.fromEntries(
     [...hashes.entries()]
@@ -1875,31 +2088,53 @@ const sourceHashManifest = (
  * Build a reproducible report from one committed corpus and its observations.
  *
  * @param corpus Versioned committed corpus.
- * @param observations One sanitized observation per corpus case.
+ * @param observations One sanitized observation per semantic corpus case.
+ * @param retrievalObservations One public-client result per retrieval corpus case.
  * @param options Model, policy, and gate settings.
  * @returns A schema-validated evaluation report.
  */
 export const makeEvaluationReport = (
   corpus: EvaluationCorpus,
   observations: ReadonlyArray<EvaluationObservation>,
+  retrievalObservations: ReadonlyArray<EvaluationRetrievalObservation>,
   options: EvaluationReportOptions | undefined = undefined,
 ): EvaluationReport => {
   const decodedCorpus = decodeEvaluationCorpus(corpus);
   const decodedObservations = observations.map((observation) =>
     Schema.decodeUnknownSync(EvaluationObservationSchema)(observation),
   );
-  const corpusComplete = observationIdsMatchCorpus(decodedCorpus, decodedObservations);
+  const decodedRetrievalObservations = retrievalObservations.map((observation) =>
+    Schema.decodeUnknownSync(EvaluationRetrievalObservationSchema)(observation),
+  );
+  const corpusComplete =
+    observationIdsMatchCorpus(decodedCorpus, decodedObservations) &&
+    retrievalObservationsMatchCorpus(decodedCorpus.retrievalCases, decodedRetrievalObservations);
   const policy = resolveReportOptions(options);
+  const authoritativeSourceHashes = sourceHashManifest(decodedObservations);
+  if (
+    options?.authoritativeSourceHashes !== undefined &&
+    stableJson(options.authoritativeSourceHashes) !== stableJson(authoritativeSourceHashes)
+  ) {
+    throw new EvaluationInputError({
+      reason: "Authoritative source manifest does not match observed RFC source provenance",
+    });
+  }
   const metrics = calculateEvaluationMetrics(decodedObservations);
-  const gate = evaluateEvaluationGate(metrics, decodedObservations, corpusComplete, {
-    ...policy,
-    origin: undefined,
-    releaseBuildId: undefined,
-    corpusDigest: undefined,
-    createdAt: undefined,
-    expiresAt: undefined,
-    authoritativeSourceHashes: undefined,
-  });
+  const gate = evaluateEvaluationGate(
+    metrics,
+    decodedObservations,
+    decodedRetrievalObservations,
+    corpusComplete,
+    {
+      ...policy,
+      origin: undefined,
+      releaseBuildId: undefined,
+      corpusDigest: undefined,
+      createdAt: undefined,
+      expiresAt: undefined,
+      authoritativeSourceHashes: undefined,
+    },
+  );
   const resolvedModels = unique(
     decodedObservations.map((observation) => observation.resolvedModel),
   );
@@ -1913,14 +2148,14 @@ export const makeEvaluationReport = (
     corpusDigest: options?.corpusDigest ?? sha256(decodedCorpus),
     policyDigest: sha256(policy),
     policy,
-    authoritativeSourceHashes:
-      options?.authoritativeSourceHashes ?? sourceHashManifest(decodedCorpus, decodedObservations),
+    authoritativeSourceHashes,
     corpusVersion: decodedCorpus.corpusVersion,
     policyVersion: policy.policyVersion,
     requestedModel: policy.requestedModel,
     resolvedModel: resolvedModels.length === 1 ? resolvedModels[0] : "mixed",
     pinnedModel: policy.pinnedModel,
     observations: decodedObservations,
+    retrievalObservations: decodedRetrievalObservations,
     metrics,
     gate,
   });
@@ -1933,13 +2168,17 @@ export const makeEvaluationReport = (
  * reproducible and the live evaluator does not create an unbounded burst.
  *
  * @param corpus Versioned evaluation corpus.
- * @param runner Operation that evaluates one case with fake or live services.
+ * @param runner Operation that evaluates one semantic case with fake or live services.
+ * @param retrievalRunner Operation that executes one deterministic retrieval case through the public client.
  * @param options Model, policy, and gate settings.
  * @returns A report containing no user prompts or provider reasoning.
  */
 export const runEvaluation = async (
   corpus: EvaluationCorpus,
   runner: (evaluationCase: EvaluationCase) => Promise<EvaluationObservation>,
+  retrievalRunner: (
+    retrievalCase: EvaluationRetrievalCase,
+  ) => Promise<EvaluationRetrievalObservation>,
   options: EvaluationReportOptions | undefined = undefined,
 ): Promise<EvaluationReport> => {
   const observations: Array<EvaluationObservation> = [];
@@ -1952,7 +2191,23 @@ export const runEvaluation = async (
     }
     observations.push(result);
   }
-  return makeEvaluationReport(corpus, observations, options);
+  const retrievalObservations: Array<EvaluationRetrievalObservation> = [];
+  for (const retrievalCase of corpus.retrievalCases) {
+    const result = Schema.decodeUnknownSync(EvaluationRetrievalObservationSchema)(
+      await retrievalRunner(retrievalCase),
+    );
+    if (
+      result.caseId !== retrievalCase.id ||
+      result.category !== retrievalCase.category ||
+      result.seam !== retrievalCase.seam
+    ) {
+      throw new EvaluationInputError({
+        reason: `Retrieval runner returned metadata for ${retrievalCase.id} that does not match the committed case`,
+      });
+    }
+    retrievalObservations.push(result);
+  }
+  return makeEvaluationReport(corpus, observations, retrievalObservations, options);
 };
 
 /**

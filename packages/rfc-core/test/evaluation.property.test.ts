@@ -43,7 +43,7 @@ const generatedObservation = (
     allowedOutcomes: evaluationCase.allowedOutcomes,
     acceptedByPolicy,
     unsafeCitationAccepted: false,
-    sourceHashes: ["a".repeat(64)],
+    sourceProvenance: [{ identifier: evaluationCase.rfc ?? "RFC9110", sourceHash: "a".repeat(64) }],
     requestedModel: "jev-latest",
     resolvedModel: "jev-1.13.0",
     resolvedModels: ["jev-1.13.0"],
@@ -61,8 +61,10 @@ const generatedObservation = (
     },
     retrieval: {
       schemaVersion: 2,
-      requestCount: 1,
-      datatrackerRequestCount: 1,
+      requestCount:
+        evaluationCase.kind === "research" && evaluationCase.mode === "known_rfc" ? 2 : 1,
+      datatrackerRequestCount:
+        evaluationCase.kind === "research" && evaluationCase.mode === "known_rfc" ? 2 : 1,
       sourceRequestCount: 0,
       metadataMs: 1,
       sourceMs: 0,
@@ -77,6 +79,18 @@ const generatedObservation = (
             topicTruncated: false,
           }
         : {}),
+      ...(evaluationCase.kind === "research" && evaluationCase.mode === "known_rfc"
+        ? {
+            traversalComplete: true,
+            traversalContexts: 1,
+            traversalDepth: 0,
+            successorRows: 0,
+            boundedExits: [],
+            contextLimit: 8,
+            depthLimit: 16,
+            relationshipLimit: 64,
+          }
+        : {}),
       requests: [
         {
           kind: "metadata",
@@ -86,6 +100,18 @@ const generatedObservation = (
           statuses: [200],
           durationMs: 1,
         },
+        ...(evaluationCase.kind === "research" && evaluationCase.mode === "known_rfc"
+          ? [
+              {
+                kind: "relationships" as const,
+                url: "https://datatracker.ietf.org/api/v1/doc/relateddocument/?target=rfc9110",
+                attempts: 1,
+                status: 200,
+                statuses: [200],
+                durationMs: 1,
+              },
+            ]
+          : []),
       ],
     },
     totalLatencyMs,
@@ -150,7 +176,19 @@ describe("evaluation invariants", () => {
       const observations = evaluationCorpus.cases.map((evaluationCase) =>
         generatedObservation(evaluationCase, seed),
       );
-      const report = makeEvaluationReport(evaluationCorpus, observations);
+      const report = makeEvaluationReport(
+        evaluationCorpus,
+        observations,
+        evaluationCorpus.retrievalCases.map((retrievalCase) => ({
+          schemaVersion: evaluationSchemaVersion,
+          caseId: retrievalCase.id,
+          category: retrievalCase.category,
+          seam: retrievalCase.seam,
+          passed: true,
+          traces: [],
+          errorKind: null,
+        })),
+      );
       const encoded = JSON.parse(JSON.stringify(report)) as unknown;
       expect(Schema.decodeUnknownSync(EvaluationReportSchema)(encoded)).toEqual(report);
     }

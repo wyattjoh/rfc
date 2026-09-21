@@ -1,6 +1,8 @@
 import { calibrationAnswerActivation } from "./activation";
 import { createRfcClient, type RfcClient, type RfcClientOptions } from "./index";
 
+export { evaluateDeterministicRetrievalCase } from "./deterministic-retrieval-evaluation";
+
 /**
  * Private calibration client that exercises the same request-local version-two
  * retrieval path as the public client while enabling measured answer outcomes.

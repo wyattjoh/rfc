@@ -1694,6 +1694,11 @@ describe("createRfcClient", () => {
     });
 
     expect(documentAttempts).toBe(3);
+    expect(result.diagnostics.retrieval).toMatchObject({
+      requestCount: 3,
+      datatrackerRequestCount: 2,
+      sourceRequestCount: 1,
+    });
     expect(result.diagnostics.retrieval?.requests[0]).toMatchObject({
       attempts: 3,
       status: 200,

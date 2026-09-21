@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -7,15 +7,23 @@ import * as Decision from "effect/unstable/ai/Decision";
 import * as DecisionModel from "effect/unstable/ai/DecisionModel";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 import {
+  createRfcClient,
   evaluationCorpus,
+  evaluationSchemaVersion,
   observationFromCitationResult,
   observationFromEvidenceBundle,
   runEvaluation,
   type EvaluationCase,
   type EvaluationObservation,
+  type EvaluationRetrievalCase,
+  type EvaluationRetrievalObservation,
+  type LiveRetrievalTrace,
   type RfcSourceFetcher,
 } from "../src/index";
-import { createRfcCalibrationClient } from "../src/internal-calibration";
+import {
+  createRfcCalibrationClient,
+  evaluateDeterministicRetrievalCase,
+} from "../src/internal-calibration";
 import { ResolvedModelName, ResolvedModelNames } from "../src/research";
 
 const fixtureDocuments = [
@@ -382,13 +390,312 @@ const clientOptions = (cacheDirectory: string, decisionModel: DecisionModel.Deci
   now: () => Date.parse("2026-01-01T00:00:00.000Z"),
 });
 
+const retrievalObservation = async (
+  retrievalCase: EvaluationRetrievalCase,
+): Promise<EvaluationRetrievalObservation> => {
+  const cacheDirectory = await mkdtemp(join(tmpdir(), `rfc-retrieval-${retrievalCase.id}-`));
+  let now = 0;
+  let sourceRequests = 0;
+  const relationshipRows = (target: number) => {
+    if (retrievalCase.category === "update_chain" && target === 9110) {
+      return [{ source: 9111, relationship: "updates" }];
+    }
+    if (retrievalCase.category === "cycle_safety") {
+      if (target === 9110) return [{ source: 9111, relationship: "updates" }];
+      if (target === 9111) return [{ source: 9110, relationship: "updates" }];
+    }
+    if (retrievalCase.category === "relationship_bound" && target === 9110) {
+      return Array.from({ length: 64 }, () => ({ source: 9111, relationship: "updates" }));
+    }
+    return [];
+  };
+  const datatracker = HttpClient.make((request, url) => {
+    if (
+      retrievalCase.category === "fail_closed_upstream" &&
+      url.pathname.includes("/document/rfc9110/")
+    ) {
+      return Effect.succeed(
+        HttpClientResponse.fromWeb(request, new Response("unavailable", { status: 503 })),
+      );
+    }
+    const exactNumber = url.pathname.match(/\/document\/rfc(\d+)\/$/)?.[1];
+    if (exactNumber !== undefined) {
+      const rfcNumber = Number(exactNumber);
+      return Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          Response.json({
+            name: `rfc${rfcNumber}`,
+            rfc_number: rfcNumber,
+            title: `RFC ${rfcNumber}`,
+            abstract: "HTTP client requests and message semantics.",
+            resource_uri: `/api/v1/doc/document/rfc${rfcNumber}/`,
+            stream: "/api/v1/name/streamname/ietf/",
+            states: [],
+          }),
+        ),
+      );
+    }
+    if (url.pathname.endsWith("/relateddocument/")) {
+      const target = Number(url.searchParams.get("target__name")?.slice(3));
+      const rows = relationshipRows(target);
+      return Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          Response.json({
+            meta: {
+              limit: 64,
+              offset: 0,
+              total_count: retrievalCase.category === "relationship_bound" ? 65 : rows.length,
+              next:
+                retrievalCase.category === "relationship_bound"
+                  ? "/api/v1/doc/relateddocument/?offset=64"
+                  : null,
+            },
+            objects: rows.map(({ source, relationship }) => ({
+              source: `/api/v1/doc/document/rfc${source}/`,
+              target: `/api/v1/doc/document/rfc${target}/`,
+              relationship: `/api/v1/name/docrelationshipname/${relationship}/`,
+            })),
+          }),
+        ),
+      );
+    }
+    const documents = retrievalCase.category === "no_candidate_outcome" ? [] : fixtureDocuments;
+    return Effect.succeed(
+      HttpClientResponse.fromWeb(
+        request,
+        Response.json({
+          meta: { limit: 20, offset: 0, total_count: documents.length, next: null },
+          objects: documents.map((document) => ({
+            name: document.identifier.toLowerCase(),
+            rfc_number: document.rfcNumber,
+            title: document.title,
+            abstract: document.abstract,
+            resource_uri: `/api/v1/doc/document/${document.identifier.toLowerCase()}/`,
+            stream: "/api/v1/name/streamname/ietf/",
+            states: [],
+          })),
+        }),
+      ),
+    );
+  });
+  const sourceHttp = HttpClient.make((request) => {
+    sourceRequests += 1;
+    if (sourceRequests === 2 && retrievalCase.category === "source_cache_revalidated") {
+      return Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          new Response(null, {
+            status: 304,
+            headers: { etag: '"one"', "cache-control": "max-age=60" },
+          }),
+        ),
+      );
+    }
+    const changed = sourceRequests > 1 && retrievalCase.category === "source_cache_replaced";
+    return Effect.succeed(
+      HttpClientResponse.fromWeb(
+        request,
+        new Response(
+          changed ? fixtureSources.RFC9110?.replace("client", "sender") : fixtureSources.RFC9110,
+          {
+            status: 200,
+            headers: {
+              etag: sourceRequests === 1 ? '"one"' : '"two"',
+              "cache-control": "max-age=60",
+              "content-type": "text/plain; charset=utf-8",
+            },
+          },
+        ),
+      ),
+    );
+  });
+  const usesConditionalSource =
+    retrievalCase.category === "source_cache_revalidated" ||
+    retrievalCase.category === "source_cache_replaced";
+  const client = await createRfcClient({
+    cacheDirectory,
+    datatrackerHttpClient: datatracker,
+    modelAlias: "jev-latest",
+    typeSafeApiKey: undefined,
+    typeSafeApiUrl: undefined,
+    automaticAnswerActivation: undefined,
+    ...(usesConditionalSource
+      ? { rfcSourceHttpClient: sourceHttp }
+      : { rfcSourceFetcher: sourceFetcher }),
+    decisionModel: makeRecordedDecisionModel(),
+    policyPreset: "precision-v2" as const,
+    now: () => now,
+  });
+  const traces: Array<LiveRetrievalTrace> = [];
+  let passed = false;
+  let observedErrorKind: string | null = null;
+  const knownRequest = {
+    schemaVersion: 2 as const,
+    question: "How does an HTTP client send a request message?",
+    rfc: "RFC9110",
+    searchTerms: undefined,
+  };
+  const runKnown = async () => {
+    const result = await client.research(knownRequest);
+    traces.push(result.diagnostics.retrieval);
+    return result;
+  };
+
+  try {
+    switch (retrievalCase.category) {
+      case "known_current_rfc": {
+        const result = await runKnown();
+        passed = result.diagnostics.retrieval.traversalContexts === 1;
+        break;
+      }
+      case "update_chain": {
+        const result = await runKnown();
+        passed =
+          result.diagnostics.retrieval.traversalContexts === 2 &&
+          result.diagnostics.retrieval.traversalDepth === 1;
+        break;
+      }
+      case "cycle_safety": {
+        const result = await runKnown();
+        passed = result.status === "needs_review" && result.currency?.complete === false;
+        break;
+      }
+      case "ordered_topic_terms": {
+        const result = await client.research({
+          schemaVersion: 2,
+          question: "Which RFCs describe HTTP messages?",
+          rfc: null,
+          searchTerms: ["first term", "second term"],
+        });
+        traces.push(result.diagnostics.retrieval);
+        const urls = result.diagnostics.retrieval.requests.map(({ url }) => url);
+        passed =
+          urls.length === 4 &&
+          urls.slice(0, 2).every((url) => url.includes("first+term")) &&
+          urls.slice(2).every((url) => url.includes("second+term"));
+        break;
+      }
+      case "candidate_fan_out": {
+        const result = await client.research({
+          schemaVersion: 2,
+          question: "Which requirements apply?",
+          rfc: null,
+          searchTerms: ["one", "two", "three", "four"],
+        });
+        const trace = result.diagnostics.retrieval;
+        traces.push(trace);
+        passed =
+          trace.datatrackerRequestCount === 8 &&
+          (trace.semanticCandidates ?? 33) <= 32 &&
+          (trace.selectedSources ?? 9) <= 8;
+        break;
+      }
+      case "no_candidate_outcome": {
+        const result = await client.research({
+          schemaVersion: 2,
+          question: "Which requirements apply?",
+          rfc: null,
+          searchTerms: ["none"],
+        });
+        traces.push(result.diagnostics.retrieval);
+        passed =
+          result.status === "needs_review" && result.diagnostics.retrieval.semanticCandidates === 0;
+        break;
+      }
+      case "relationship_bound": {
+        const result = await runKnown();
+        passed =
+          result.status === "needs_review" &&
+          result.diagnostics.retrieval.boundedExits?.includes("relationship_limit") === true;
+        break;
+      }
+      case "source_cache_miss": {
+        const result = await runKnown();
+        passed = result.diagnostics.retrieval.sourceCacheOutcome === "miss";
+        break;
+      }
+      case "source_cache_hit": {
+        await runKnown();
+        const result = await runKnown();
+        passed = result.diagnostics.retrieval.sourceCacheOutcome === "hit";
+        break;
+      }
+      case "source_cache_revalidated":
+      case "source_cache_replaced": {
+        await runKnown();
+        now = 61_000;
+        const result = await runKnown();
+        passed =
+          result.diagnostics.retrieval.sourceCacheOutcome ===
+          (retrievalCase.category === "source_cache_revalidated" ? "revalidated" : "replaced");
+        break;
+      }
+      case "source_cache_repaired": {
+        await runKnown();
+        await writeFile(join(cacheDirectory, "sources", "v2", "RFC9110.json"), "{corrupt");
+        const result = await runKnown();
+        passed = result.diagnostics.retrieval.sourceCacheOutcome === "repaired";
+        break;
+      }
+      case "fail_closed_upstream": {
+        try {
+          await runKnown();
+        } catch (error) {
+          observedErrorKind =
+            typeof error === "object" && error !== null && "_tag" in error
+              ? String(error._tag)
+              : "UnknownError";
+          passed = observedErrorKind === "RfcDiscoveryError";
+        }
+        break;
+      }
+    }
+  } finally {
+    await client.close();
+    await rm(cacheDirectory, { recursive: true, force: true });
+  }
+
+  return {
+    schemaVersion: evaluationSchemaVersion,
+    caseId: retrievalCase.id,
+    category: retrievalCase.category,
+    seam: retrievalCase.seam,
+    passed,
+    traces,
+    errorKind: passed ? observedErrorKind : (observedErrorKind ?? "RetrievalAssertionError"),
+  };
+};
+
 describe("committed evaluation runner", () => {
+  test("executes the shipped deterministic retrieval runner through the public client", async () => {
+    const observations: Array<EvaluationRetrievalObservation> = [];
+    for (const retrievalCase of evaluationCorpus.retrievalCases) {
+      const observation = await evaluateDeterministicRetrievalCase(retrievalCase);
+      const independentControl = await retrievalObservation(retrievalCase);
+      expect(independentControl.passed).toBe(true);
+      expect(independentControl.category).toBe(observation.category);
+      observations.push(observation);
+    }
+
+    expect(observations.map(({ caseId }) => caseId)).toEqual(
+      evaluationCorpus.retrievalCases.map(({ id }) => id),
+    );
+    expect(observations.every(({ passed }) => passed)).toBe(true);
+    expect(
+      observations.find(({ category }) => category === "relationship_bound")?.traces[0]
+        ?.boundedExits,
+    ).toEqual(["depth_limit", "context_limit", "relationship_limit"]);
+  });
+
   test("executes every committed case through public research and citation results", async () => {
     const cacheDirectory = await mkdtemp(join(tmpdir(), "rfc-core-evaluation-runner-test-"));
     const client = await createRfcCalibrationClient(
       clientOptions(cacheDirectory, makeRecordedDecisionModel()),
     );
     const evaluatedCaseIds: Array<string> = [];
+    const evaluatedRetrievalCaseIds: Array<string> = [];
 
     try {
       const report = await runEvaluation(
@@ -406,10 +713,19 @@ describe("committed evaluation runner", () => {
           );
           return observationFromCitationResult(evaluationCase, result);
         },
+        async (retrievalCase) => {
+          evaluatedRetrievalCaseIds.push(retrievalCase.id);
+          return evaluateDeterministicRetrievalCase(retrievalCase);
+        },
       );
 
       expect(evaluatedCaseIds).toEqual(evaluationCorpus.cases.map(({ id }) => id));
+      expect(evaluatedRetrievalCaseIds).toEqual(
+        evaluationCorpus.retrievalCases.map(({ id }) => id),
+      );
       expect(report.observations).toHaveLength(evaluationCorpus.cases.length);
+      expect(report.retrievalObservations).toHaveLength(evaluationCorpus.retrievalCases.length);
+      expect(report.retrievalObservations.every(({ passed }) => passed)).toBe(true);
       expect(report.observations.every(({ retrieval }) => retrieval !== null)).toBe(true);
       expect(
         report.observations
@@ -424,12 +740,14 @@ describe("committed evaluation runner", () => {
         semanticCandidates: 0,
         selectedSources: 0,
       });
+      expect(report.gate.failures).toEqual([]);
       expect(report.gate.passed).toBe(true);
       expect(report.gate.expectedOutcomePassed).toBe(true);
       expect(report.metrics.supportedClaimPrecision).toBe(1);
       expect(report.metrics.unsafeCitationAcceptances).toBe(0);
     } finally {
       await client.close();
+      await rm(cacheDirectory, { recursive: true, force: true });
     }
   });
 });
