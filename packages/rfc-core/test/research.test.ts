@@ -1974,6 +1974,52 @@ describe("known RFC research", () => {
     });
   });
 
+  test("stops a streamed RFC Editor source above the cap without Content-Length", async () => {
+    // The forged-Content-Length case above never reaches the streaming guard.
+    // A chunked response declares no length, so only the running byte count
+    // can stop it.
+    const cacheDirectory = await makeCacheDirectory();
+    const chunk = new TextEncoder().encode("x".repeat(1024 * 1024));
+    const sourceHttpClient = HttpClient.make((request) =>
+      Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                for (let index = 0; index < 9; index += 1) controller.enqueue(chunk);
+                controller.close();
+              },
+            }),
+            { status: 200, headers: { "content-type": "text/plain; charset=utf-8" } },
+          ),
+        ),
+      ),
+    );
+    const client = await createRfcClient({
+      cacheDirectory,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      metadataSource: async () => [rfcDocument],
+      rfcSourceHttpClient: sourceHttpClient,
+      decisionModel: makeDecisionModel([]),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    await expect(
+      client.research({
+        schemaVersion: 2,
+        question: "What must the client send?",
+        rfc: "9110",
+      }),
+    ).rejects.toMatchObject({
+      _tag: "RfcSourceFetchError",
+      reason: expect.stringContaining("8388608 bytes"),
+    });
+  });
+
   test("bounds the complete RFC Editor source operation by one deadline", async () => {
     const cacheDirectory = await makeCacheDirectory();
     const clock = await Effect.runPromise(

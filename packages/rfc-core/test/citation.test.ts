@@ -1031,6 +1031,49 @@ describe("citation verification", () => {
     ).rejects.toMatchObject({ _tag: "DecisionModelError", stage: "citation" });
   });
 
+  test("reports byte offsets that slice a non-ASCII source back to the exact quote", async () => {
+    // Every other fixture in the suite is pure ASCII, where a UTF-8 byte
+    // offset and a JavaScript code-unit index coincide and a confusion between
+    // them cannot show up.
+    const quote = "The client MUST send “é 中文 \u{1F600}” in the target resource.";
+    const nonAsciiSource = ["1. Requirements", "", quote, "", "2. Background", ""].join("\n");
+    const cacheDirectory = await makeCacheDirectory();
+    const client = await createRfcClient({
+      cacheDirectory,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      metadataSource: async () => [rfcDocument],
+      rfcSourceFetcher: makeSourceFetcher(nonAsciiSource),
+      decisionModel: makeDecisionModel([]),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.verifyCitation({
+      schemaVersion: 2,
+      rfc: "RFC9110",
+      claim: "The client sends a request.",
+      quote,
+      offset: null,
+    });
+
+    expect(result.verdict).toBe("verified");
+    expect(result.provenance.offsetUnit).toBe("utf8-byte");
+    const { startOffset, endOffset } = result.provenance;
+    expect(startOffset).not.toBeNull();
+    expect(endOffset).not.toBeNull();
+    if (startOffset === null || endOffset === null) return;
+
+    const bytes = new TextEncoder().encode(nonAsciiSource);
+    expect(
+      new TextDecoder("utf8", { fatal: true }).decode(bytes.slice(startOffset, endOffset)),
+    ).toBe(quote);
+    // The declared unit is bytes, so slicing the string by the same numbers
+    // must land somewhere else once multi-byte characters precede the quote.
+    expect(endOffset - startOffset).toBeGreaterThan(quote.length);
+  });
+
   test("keeps provider payload text out of a citation decode failure", async () => {
     const marker = "provider-internal-detail-7f3a";
     const cacheDirectory = await makeCacheDirectory();
