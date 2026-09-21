@@ -447,7 +447,9 @@ const makeTopicUrl = (baseUrl: string, term: string, field: "title" | "abstract"
   url.searchParams.set("format", "json");
   url.searchParams.set("limit", String(datatrackerTopicResultLimit));
   url.searchParams.set("offset", "0");
-  url.searchParams.set("order_by", "-rfc_number");
+  // Datatracker permits list ordering only by document id; descending ids are
+  // its supported newest-first RFC stream.
+  url.searchParams.set("order_by", "-id");
   url.searchParams.set("type__slug", "rfc");
   url.searchParams.set(`${field}__icontains`, term);
   return url.toString();

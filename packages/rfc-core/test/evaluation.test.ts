@@ -402,6 +402,8 @@ const acceptedFixtureReport = () => {
       policyDigest: report.policyDigest,
       authoritativeSourceHashes: report.authoritativeSourceHashes,
       expiresAt: report.expiresAt,
+      reviewedAt: "2026-01-02T00:00:00.000Z",
+      reviewFailures: [],
     },
   };
 };
@@ -689,6 +691,27 @@ describe("precision evaluation", () => {
     expect(
       Schema.decodeUnknownSync(EvaluationReportSchema)(JSON.parse(JSON.stringify(report))),
     ).toEqual(report);
+  });
+
+  test("reports the exact provider model without mixing providerless controls", () => {
+    const observations = corpusObservations().map((observation) =>
+      observation.observedOutcome === "fabricated"
+        ? {
+            ...observation,
+            resolvedModel: "not_requested",
+            resolvedModels: [],
+            usage: { inputTokens: null, outputTokens: null },
+          }
+        : observation,
+    );
+    const report = makeEvaluationReport(
+      evaluationCorpus,
+      observations,
+      corpusRetrievalObservations(),
+    );
+
+    expect(report.resolvedModel).toBe("jev-1.13.0");
+    expect(report.gate.modelPinPassed).toBe(true);
   });
 
   test("preserves requested and successor RFC identities in bundle provenance", () => {
@@ -1161,31 +1184,40 @@ describe("precision evaluation", () => {
     ).toBe(false);
   });
 
-  test("keeps the precision-v2 release attestation pending", () => {
-    expect(evaluationReleaseAttestation).toEqual({
-      status: "pending_live_calibration",
+  test("records the reviewed precision-v2 rejection without enabling activation", () => {
+    expect(evaluationReleaseAttestation).toMatchObject({
+      status: "rejected",
       buildId: "rfc-evidence-precision-v2",
-      reportDigest: null,
       corpusDigest: evaluationCorpusDigest,
       policyDigest: evaluationPolicyDigest,
-      authoritativeSourceHashes: {},
-      expiresAt: null,
+      reviewFailures: [
+        "observed outcomes fell outside committed allowed outcome sets",
+        "positive-control research cases did not remain answered",
+        "warm-cache research p95 latency exceeded a configured gate",
+      ],
     });
+    expect(evaluationReleaseAttestation.reportDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(evaluationReleaseAttestation.reviewedAt).not.toBeNull();
+    expect(
+      Object.keys(evaluationReleaseAttestation.authoritativeSourceHashes).length,
+    ).toBeGreaterThan(0);
   });
 
-  test("does not activate a pending attestation with a stable release identity", () => {
+  test("does not activate a rejected attestation with a stable release identity", () => {
     const { report, attestation } = acceptedFixtureReport();
 
     expect(evaluationReleaseAttestation).toMatchObject({
-      status: "pending_live_calibration",
+      status: "rejected",
       buildId: "rfc-evidence-precision-v2",
-      reportDigest: null,
-      expiresAt: null,
     });
     expect(
       isAcceptedEvaluationReportForAttestation(
         report,
-        { ...attestation, status: "pending_live_calibration" as const },
+        {
+          ...attestation,
+          status: "rejected" as const,
+          reviewFailures: ["positive-control research cases did not remain answered"],
+        },
         Date.parse("2026-01-15T00:00:00.000Z"),
       ),
     ).toBe(false);
@@ -1201,6 +1233,16 @@ describe("precision evaluation", () => {
       isAcceptedEvaluationReportForAttestation(
         report,
         { ...attestation, status: "pending_live_calibration" },
+        now,
+      ),
+    ).toBe(false);
+    expect(
+      isAcceptedEvaluationReportForAttestation(report, { ...attestation, reviewedAt: null }, now),
+    ).toBe(false);
+    expect(
+      isAcceptedEvaluationReportForAttestation(
+        report,
+        { ...attestation, reviewFailures: ["review rejected the report"] },
         now,
       ),
     ).toBe(false);
@@ -1384,11 +1426,17 @@ describe("precision evaluation", () => {
     ]);
   });
 
-  // The coordinator report remains ignored; validate it when present in a release workspace.
+  // The reviewed report remains ignored; validate it when present in a release workspace.
   if (existsSync(reviewedReleaseReportPath)) {
-    test("accepts the exact coordinator-reviewed report", async () => {
+    test("binds the exact rejected report without enabling activation", async () => {
       const report = await Bun.file(reviewedReleaseReportPath).json();
-      expect(isAcceptedEvaluationReport(report)).toBe(true);
+      expect(report.gate.passed).toBe(false);
+      expect(report.gate.failures).toEqual(evaluationReleaseAttestation.reviewFailures);
+      expect(report.expiresAt).toBe(evaluationReleaseAttestation.expiresAt);
+      expect(report.authoritativeSourceHashes).toEqual(
+        evaluationReleaseAttestation.authoritativeSourceHashes,
+      );
+      expect(isAcceptedEvaluationReport(report)).toBe(false);
       expect(evaluationReportDigest(report)).toBe(
         evaluationReleaseAttestation.reportDigest ?? "missing report digest",
       );

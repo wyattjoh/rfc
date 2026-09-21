@@ -450,7 +450,7 @@ const corpusCases = [
       "The server SHOULD generate a Location header field in the response containing a preferred URI reference for the new permanent URI.",
     quote:
       "The server SHOULD generate a Location header field in the response\n   containing a preferred URI reference for the new permanent URI.",
-    offset: 346_604,
+    offset: 346_601,
     expectedStatus: null,
     expectedVerdict: "verified",
     expectedOutcomeRationale:
@@ -976,27 +976,56 @@ export const evaluationPolicyDigest = sha256(evaluationPolicy);
 /**
  * Release-bound calibration attestation.
  *
- * Live discovery changes the candidate distribution, so precision-v2 remains
- * pending until a new report and authoritative source manifest are reviewed.
+ * Live discovery changed the candidate distribution. The current reviewed
+ * report is rejected, so activation remains disabled until a new passing report
+ * and authoritative source manifest are accepted.
  */
 export type EvaluationReleaseAttestation = {
-  readonly status: "pending_live_calibration" | "accepted";
+  readonly status: "pending_live_calibration" | "accepted" | "rejected";
   readonly buildId: string;
   readonly reportDigest: string | null;
   readonly corpusDigest: string;
   readonly policyDigest: string;
   readonly authoritativeSourceHashes: Readonly<Record<string, ReadonlyArray<string>>>;
   readonly expiresAt: string | null;
+  readonly reviewedAt: string | null;
+  readonly reviewFailures: ReadonlyArray<string>;
 };
 
 export const evaluationReleaseAttestation: EvaluationReleaseAttestation = Object.freeze({
-  status: "pending_live_calibration",
+  status: "rejected",
   buildId: "rfc-evidence-precision-v2",
-  reportDigest: null,
+  reportDigest: "3ce4d88e7ee0450562679342fc3f9e4a27b545ca5a2b0d0dbb9f8955efe400f1",
   corpusDigest: evaluationCorpusDigest,
   policyDigest: evaluationPolicyDigest,
-  authoritativeSourceHashes: Object.freeze({}),
-  expiresAt: null,
+  authoritativeSourceHashes: Object.freeze({
+    RFC1034: ["d6b10a71441df879cc2817d23f2dad120c8a5f87e74eba1e4ed4b743a76a891a"],
+    RFC1101: ["972d509dcb4cb6cc2a41315b8a14a2bc520d4098cd318cb8d170de37017e26d3"],
+    RFC1876: ["d84c37ecb25b0b380f1c5cc8529b0ead60b0e0b447dfb08a45af4d66da452a91"],
+    RFC1982: ["b22fa98e10e66340804f50fe22c7c9299f66dea7ed90cac17800a4bccda7dc15"],
+    RFC2616: ["10211d2885196b97b1c78e1672f3f68ae97c294596ef2b7fd890cbd30a3427bf"],
+    RFC6266: ["2887d464e7a2a15877aba5d54b2e8e0c06c32294c44c9d95eb8940069ab43d33"],
+    RFC6585: ["f6d55d1b491cd515c35827cf9181753b23b2a68c4df14e56d83dc445b3876e58"],
+    RFC6749: ["f204fc8661d6c92d2ec6e0b54808f961a9ad26e792f57f312d9528335519bd71"],
+    RFC7230: ["c7fdc8bebdf1f8195f731592c47f5ea822b489436fd905b01b55ef531fca4120"],
+    RFC8252: ["4233c0650ec7e7918c20e0fde2dc565f85e2aa2d4c18123e3cd834295c2f68d0"],
+    RFC8446: ["47871bc8820a2c3b6ea89f061055577058862cf543686b82d10131239702b3bd"],
+    RFC8615: ["02d45caeb86c00197d30428472102bb558881fa61937804330c1242a0be5b5dc"],
+    RFC8996: ["d1d4d048e3f46101c4cce6288bb7b6ec1c37151088874f87602a812a660805b2"],
+    RFC9110: ["ad3b38b7806783d5066714f7ac9aadcba8cec1605a400c7380173737a8adf902"],
+    RFC9111: ["ef396a9b1199037d796f84e9179afebd5c8430058ddef688db4012f2e55c520c"],
+    RFC9213: ["787db281b8764e71e92ad1efa526f7692c34d8b8376a2e273f7b4b93782238a4"],
+    RFC9700: ["49e663f7e01416619ee49aee0b0c1b6ae9c80f92b9e4d1e65c6aa0a44c8fa4c0"],
+    RFC9846: ["773437ae1a8236757ea6c73cdccecad5d54589b591bbbadec1e48c69c41d694a"],
+    RFC9931: ["07fdef22c7a8c2db5d92d7afde50d4c3478368b7e6d31f3ac7f9d0cb282601b2"],
+  }),
+  expiresAt: "2026-10-21T03:47:47.612Z",
+  reviewedAt: "2026-09-21T03:50:35.000Z",
+  reviewFailures: Object.freeze([
+    "observed outcomes fell outside committed allowed outcome sets",
+    "positive-control research cases did not remain answered",
+    "warm-cache research p95 latency exceeded a configured gate",
+  ]),
 });
 
 /**
@@ -1643,6 +1672,8 @@ export const isAcceptedEvaluationReportForAttestation = (
     const policy = evaluationPolicy;
     const createdAt = Date.parse(report.createdAt);
     const expiresAt = Date.parse(report.expiresAt);
+    const reviewedAt =
+      attestation.reviewedAt === null ? Number.NaN : Date.parse(attestation.reviewedAt);
     const observedSourceManifest = sourceHashManifest(report.observations);
     const sourceManifestComplete =
       Object.keys(observedSourceManifest).length > 0 &&
@@ -1654,6 +1685,10 @@ export const isAcceptedEvaluationReportForAttestation = (
     );
     return (
       attestation.status === "accepted" &&
+      Number.isFinite(reviewedAt) &&
+      createdAt <= reviewedAt &&
+      reviewedAt <= now &&
+      attestation.reviewFailures.length === 0 &&
       sourceManifestComplete &&
       observationsBoundToSources &&
       attestation.reportDigest !== null &&
@@ -2266,7 +2301,9 @@ export const makeEvaluationReport = (
     },
   );
   const resolvedModels = unique(
-    decodedObservations.map((observation) => observation.resolvedModel),
+    decodedObservations
+      .filter((observation) => !isProviderlessObservation(observation))
+      .map((observation) => observation.resolvedModel),
   );
   return Schema.decodeUnknownSync(EvaluationReportSchema)({
     schemaVersion: evaluationSchemaVersion,

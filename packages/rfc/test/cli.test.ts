@@ -576,7 +576,7 @@ describe("rfc process protocol", () => {
   });
 
   if (existsSync(reviewedReleaseReportPath)) {
-    test("activates the exact measured report only with explicit opt-in", () => {
+    test("keeps automatic answers disabled for the reviewed rejected report", () => {
       const config = {
         modelAlias: "jev-1.13.0",
         policyPreset: "precision-v2",
@@ -591,7 +591,7 @@ describe("rfc process protocol", () => {
       expect(
         automaticAnswerActivationFor({ ...config, automaticAnswerEnabled: false }),
       ).toBeUndefined();
-      expect(automaticAnswerActivationFor(config)).toBeDefined();
+      expect(automaticAnswerActivationFor(config)).toBeUndefined();
     });
   }
 

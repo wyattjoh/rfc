@@ -1106,7 +1106,7 @@ describe("createRfcClient", () => {
         return (
           url.searchParams.get("limit") === "20" &&
           url.searchParams.get("offset") === "0" &&
-          url.searchParams.get("order_by") === "-rfc_number" &&
+          url.searchParams.get("order_by") === "-id" &&
           url.searchParams.get("type__slug") === "rfc" &&
           !value.includes("without+disclosing")
         );
