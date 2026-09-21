@@ -2,14 +2,12 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import {
   ConfigurationError,
-  defaultRfcEditorBaseUrl,
   evaluationCorpus,
   evaluationCorpusDigest,
   evaluationModelAlias,
   evaluationPolicy,
   evaluationReleaseAttestation,
   failedEvaluationObservation,
-  makeRfcSourceUrl,
   observationFromCitationResult,
   observationFromEvidenceBundle,
   pinnedJevModel,
@@ -42,104 +40,6 @@ const timedCorpus = {
   ),
 };
 
-const rfcNumberFromIdentifier = (identifier: string): number => {
-  const match = /^RFC([0-9]+)$/i.exec(identifier);
-  const number = match === null ? Number.NaN : Number(match[1]);
-  if (!Number.isSafeInteger(number) || number <= 0) {
-    throw new Error("The evaluation corpus contains an invalid RFC identifier");
-  }
-  return number;
-};
-
-const normalizeSource = (
-  source: string,
-): {
-  readonly text: string;
-  readonly starts: ReadonlyArray<number>;
-  readonly ends: ReadonlyArray<number>;
-} => {
-  const characters: Array<string> = [];
-  const starts: Array<number> = [];
-  const ends: Array<number> = [];
-  let index = 0;
-  while (index < source.length) {
-    const character = source[index];
-    if (character === "-" && source[index + 1] === "\n") {
-      index += 2;
-      while (index < source.length && (source[index] === " " || source[index] === "\t")) {
-        index += 1;
-      }
-      continue;
-    }
-    if (character !== undefined && /\s/.test(character)) {
-      const start = index;
-      while (index < source.length && /\s/.test(source[index] ?? "")) {
-        index += 1;
-      }
-      characters.push(" ");
-      starts.push(start);
-      ends.push(index);
-      continue;
-    }
-    if (character !== undefined) {
-      characters.push(character);
-      starts.push(index);
-      ends.push(index + 1);
-    }
-    index += 1;
-  }
-  return { text: characters.join(""), starts, ends };
-};
-
-const readAuthoritativeSource = async (identifier: string): Promise<string> => {
-  const url = makeRfcSourceUrl(defaultRfcEditorBaseUrl, rfcNumberFromIdentifier(identifier));
-  const response = await fetch(url, { redirect: "error" });
-  if (!response.ok || response.url !== url) {
-    throw new Error("The RFC Editor source could not be loaded exactly");
-  }
-  return response.text();
-};
-
-const exactQuoteFromSource = (evaluationCase: EvaluationCase, source: string): string => {
-  if (evaluationCase.quote === null) {
-    throw new Error(`Citation case ${evaluationCase.id} is incomplete`);
-  }
-  const normalized = normalizeSource(source);
-  const needle = evaluationCase.quote.trim().replace(/\s+/g, " ");
-  const start = normalized.text.indexOf(needle);
-  if (start < 0) {
-    throw new Error("The committed evaluation quote was not found in the RFC Editor source");
-  }
-  const end = start + needle.length - 1;
-  const sourceStart = normalized.starts[start];
-  const sourceEnd = normalized.ends[end];
-  if (sourceStart === undefined || sourceEnd === undefined) {
-    throw new Error("The committed evaluation quote has invalid source bounds");
-  }
-  return source.slice(sourceStart, sourceEnd);
-};
-
-const utf8OffsetFor = (source: string, quote: string): number => {
-  const index = source.indexOf(quote);
-  if (index < 0) {
-    throw new Error("The selected evaluation quote has no exact source occurrence");
-  }
-  return new TextEncoder().encode(source.slice(0, index)).byteLength;
-};
-
-const loadCitationSources = async (): Promise<ReadonlyMap<string, string>> => {
-  const identifiers = new Set(
-    liveCorpus.cases.flatMap((evaluationCase) =>
-      evaluationCase.kind === "citation" && evaluationCase.rfc !== null ? [evaluationCase.rfc] : [],
-    ),
-  );
-  const sources = new Map<string, string>();
-  for (const identifier of identifiers) {
-    sources.set(identifier, await readAuthoritativeSource(identifier));
-  }
-  return sources;
-};
-
 const researchRequestFor = (evaluationCase: EvaluationCase) => {
   if (evaluationCase.question === null) {
     throw new Error(`Research case ${evaluationCase.id} is missing a question`);
@@ -159,10 +59,7 @@ const researchRequestFor = (evaluationCase: EvaluationCase) => {
       };
 };
 
-const citationRequestFor = (
-  evaluationCase: EvaluationCase,
-  sources: ReadonlyMap<string, string>,
-) => {
+const citationRequestFor = (evaluationCase: EvaluationCase) => {
   if (
     evaluationCase.rfc === null ||
     evaluationCase.claim === null ||
@@ -170,26 +67,12 @@ const citationRequestFor = (
   ) {
     throw new Error(`Citation case ${evaluationCase.id} is incomplete`);
   }
-  const source = sources.get(evaluationCase.rfc);
-  if (source === undefined) {
-    throw new Error(`Citation source ${evaluationCase.rfc} is unavailable`);
-  }
-  const quote =
-    evaluationCase.category === "fabricated_quotation"
-      ? evaluationCase.quote
-      : exactQuoteFromSource(evaluationCase, source);
-  if (evaluationCase.category === "duplicate_quotation" && source.split(quote).length - 1 < 2) {
-    throw new Error("The duplicate evaluation quote is not repeated in the RFC Editor source");
-  }
   return {
     schemaVersion: 2 as const,
     rfc: evaluationCase.rfc,
     claim: evaluationCase.claim,
-    quote,
-    offset:
-      evaluationCase.category === "duplicate_quotation"
-        ? utf8OffsetFor(source, quote)
-        : evaluationCase.offset,
+    quote: evaluationCase.quote,
+    offset: evaluationCase.offset,
   };
 };
 
@@ -291,16 +174,13 @@ export const runLiveEvaluation = async (
   });
 
   try {
-    const citationSources = await loadCitationSources();
     const evaluateCase = async (evaluationCase: EvaluationCase) => {
       try {
         if (evaluationCase.kind === "research") {
           const result = await client.research(researchRequestFor(evaluationCase));
           return observationFromEvidenceBundle(evaluationCase, result);
         }
-        const result = await client.verifyCitation(
-          citationRequestFor(evaluationCase, citationSources),
-        );
+        const result = await client.verifyCitation(citationRequestFor(evaluationCase));
         return observationFromCitationResult(evaluationCase, result);
       } catch (error) {
         return failedEvaluationObservation(evaluationCase, reportOptions, errorKind(error));

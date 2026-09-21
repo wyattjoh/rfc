@@ -14,8 +14,30 @@ import {
 import * as AiError from "effect/unstable/ai/AiError";
 import * as Decision from "effect/unstable/ai/Decision";
 import * as DecisionModel from "effect/unstable/ai/DecisionModel";
-import { LiveRetrievalTraceSchema, RfcDocumentSchema } from "./discovery";
-import { LiveRfcSource, RfcSourceRevalidationError } from "./live-source";
+import {
+  LiveRetrievalTraceSchema,
+  RfcDocumentSchema,
+  datatrackerCurrencyContextLimit,
+  datatrackerCurrencyDepthLimit,
+  datatrackerDocumentCandidateLimit,
+  datatrackerMaxAttempts,
+  datatrackerMaximumResponseBytes,
+  datatrackerRequestDeadlineMilliseconds,
+  datatrackerSuccessorLimit,
+  datatrackerTopicConcurrencyLimit,
+  datatrackerTopicRequestLimit,
+  datatrackerTopicResultLimit,
+  datatrackerTopicSearchTermLimit,
+  datatrackerTopicSearchTermMaximumCharacters,
+  datatrackerTopicUpstreamRowLimit,
+} from "./discovery";
+import {
+  LiveRfcSource,
+  RfcSourceRevalidationError,
+  liveRfcSourceCacheVersion,
+  rfcSourceDeadlineMilliseconds,
+  rfcSourceMaximumBytes,
+} from "./live-source";
 import { RfcMetadataSchema, type RfcMetadata } from "./metadata";
 import { makeUtf8OffsetMap, moveToUtf8Boundary, utf8OffsetUnit } from "./offsets";
 import { isAutomaticAnswerActivation, type AutomaticAnswerActivation } from "./activation";
@@ -190,54 +212,116 @@ export const RfcCurrencyReportSchema = Schema.Struct({
  */
 export type RfcCurrencyReport = Schema.Schema.Type<typeof RfcCurrencyReportSchema>;
 
-/**
- * Versioned policy values for known-RFC research.
- */
-export const knownRfcPolicy = {
-  policyVersion: "precision-v2",
-  maxAcceptedDocumentCandidates: 3,
-  // Round-5 calibration showed relevant candidates at or above 0.35; retain
-  // the bounded top-three shortlist and let passage/relation gates decide.
-  documentProbabilityThreshold: 0.35,
+const precisionV2RetrievalLimits = {
+  maxSearchTerms: datatrackerTopicSearchTermLimit,
+  maxSearchTermCharacters: datatrackerTopicSearchTermMaximumCharacters,
+  maxTopicRequests: datatrackerTopicRequestLimit,
+  maxConcurrentDatatrackerRequests: datatrackerTopicConcurrencyLimit,
+  maxRowsPerTopicRequest: datatrackerTopicResultLimit,
+  maxUpstreamTopicRows: datatrackerTopicUpstreamRowLimit,
+  datatrackerMaxAttempts,
+  datatrackerDeadlineMilliseconds: datatrackerRequestDeadlineMilliseconds,
+  datatrackerMaximumResponseBytes,
+  sourceDeadlineMilliseconds: rfcSourceDeadlineMilliseconds,
+  sourceMaximumBytes: rfcSourceMaximumBytes,
+  sourceCacheSchemaVersion: liveRfcSourceCacheVersion,
+} as const;
+
+const precisionV2CandidateLimits = {
+  maxMergedDocumentCandidates: datatrackerDocumentCandidateLimit,
+  maxSourceRetrievalCandidates: 8,
   maxPassageCandidates: 8,
   sourceBlockMaxCharacters: 4_000,
   sourceBlockOverlapCharacters: 200,
-  maxCurrencyTraversalDepth: 16,
-  maxCurrencyContexts: 8,
-  currencyCompatibilityOverlapThreshold: 0.6,
-  // The live model placed relevant source blocks at 0.45–0.49. Including
-  // those blocks is safe because relation acceptance remains independently
-  // gated below; excluding them made valid answers impossible to judge.
+} as const;
+
+const precisionV2TraversalLimits = {
+  maxDepth: datatrackerCurrencyDepthLimit,
+  maxContexts: datatrackerCurrencyContextLimit,
+  maxRelationshipsPerRfc: datatrackerSuccessorLimit,
+} as const;
+
+const precisionV2ProviderRetryLimits = {
+  maxAttempts: 3,
+  maxElapsedMilliseconds: 10_000,
+  defaultRetryDelayMilliseconds: 100,
+} as const;
+
+const precisionV2AcceptanceLimits = {
+  calibrationStatus: "uncalibrated",
+  documentProbabilityThreshold: 0.35,
   selectionProbabilityThreshold: 0.45,
   unsupportedProbabilityThreshold: 0.35,
   relationConfidenceThreshold: 0.65,
-  providerMaxAttempts: 3,
-  providerMaxElapsedMilliseconds: 10_000,
-  providerDefaultRetryDelayMilliseconds: 100,
   directAnswerProbabilityThreshold: 0.65,
   partialAnswerProbabilityThreshold: 0.6,
   contradictoryProbabilityThreshold: 0.65,
-  // Calibration gates are part of the named policy so that a threshold,
-  // retry budget, or latency target cannot drift independently of evaluation.
+  currencyCompatibilityOverlapThreshold: 0.6,
   minimumSupportedClaimPrecision: 0.98,
   maxKnownRfcP95LatencyMilliseconds: 2_000,
   maxTopicP95LatencyMilliseconds: 3_000,
+} as const;
+
+/**
+ * The only schema-version-two research policy.
+ *
+ * Hard retrieval limits are implementation constraints. Semantic and release
+ * thresholds are deliberately marked uncalibrated until a reviewed live
+ * precision-v2 report is accepted; these provisional values do not carry
+ * precision-v1 certification forward.
+ */
+export const precisionV2Policy = {
+  schemaVersion: 2,
+  policyVersion: "precision-v2",
+  calibrationStatus: "uncalibrated",
+  retrievalLimits: precisionV2RetrievalLimits,
+  candidateLimits: precisionV2CandidateLimits,
+  traversalLimits: precisionV2TraversalLimits,
+  providerRetryLimits: precisionV2ProviderRetryLimits,
+  acceptanceLimits: precisionV2AcceptanceLimits,
+  maxAcceptedDocumentCandidates: precisionV2CandidateLimits.maxSourceRetrievalCandidates,
+  documentProbabilityThreshold: precisionV2AcceptanceLimits.documentProbabilityThreshold,
+  maxPassageCandidates: precisionV2CandidateLimits.maxPassageCandidates,
+  sourceBlockMaxCharacters: precisionV2CandidateLimits.sourceBlockMaxCharacters,
+  sourceBlockOverlapCharacters: precisionV2CandidateLimits.sourceBlockOverlapCharacters,
+  maxCurrencyTraversalDepth: precisionV2TraversalLimits.maxDepth,
+  maxCurrencyContexts: precisionV2TraversalLimits.maxContexts,
+  currencyCompatibilityOverlapThreshold:
+    precisionV2AcceptanceLimits.currencyCompatibilityOverlapThreshold,
+  selectionProbabilityThreshold: precisionV2AcceptanceLimits.selectionProbabilityThreshold,
+  unsupportedProbabilityThreshold: precisionV2AcceptanceLimits.unsupportedProbabilityThreshold,
+  relationConfidenceThreshold: precisionV2AcceptanceLimits.relationConfidenceThreshold,
+  providerMaxAttempts: precisionV2ProviderRetryLimits.maxAttempts,
+  providerMaxElapsedMilliseconds: precisionV2ProviderRetryLimits.maxElapsedMilliseconds,
+  providerDefaultRetryDelayMilliseconds:
+    precisionV2ProviderRetryLimits.defaultRetryDelayMilliseconds,
+  directAnswerProbabilityThreshold: precisionV2AcceptanceLimits.directAnswerProbabilityThreshold,
+  partialAnswerProbabilityThreshold: precisionV2AcceptanceLimits.partialAnswerProbabilityThreshold,
+  contradictoryProbabilityThreshold: precisionV2AcceptanceLimits.contradictoryProbabilityThreshold,
+  minimumSupportedClaimPrecision: precisionV2AcceptanceLimits.minimumSupportedClaimPrecision,
+  maxKnownRfcP95LatencyMilliseconds: precisionV2AcceptanceLimits.maxKnownRfcP95LatencyMilliseconds,
+  maxTopicP95LatencyMilliseconds: precisionV2AcceptanceLimits.maxTopicP95LatencyMilliseconds,
   evaluationModelAlias: "jev-latest",
   pinnedModel: "jev-1.13.0",
-  // Release commits must explicitly activate automatic answers only after the
-  // committed evaluation gate has passed; the composition proof is absent by default.
   automaticAnswerActivation: undefined,
 } as const;
 
 /**
- * The calibrated precision-first policy used by research and evaluation.
+ * Backward-compatible name for the sole precision-v2 policy.
+ *
+ * @deprecated Use `precisionV2Policy` for new code.
  */
-export const precisionPolicy = knownRfcPolicy;
+export const knownRfcPolicy = precisionV2Policy;
+
+/**
+ * The pending precision-first policy used by research and evaluation.
+ */
+export const precisionPolicy = precisionV2Policy;
 
 /**
  * The acceptance and uncertainty rules for one research policy preset.
  */
-export type ResearchPolicy = Omit<typeof knownRfcPolicy, "automaticAnswerActivation"> & {
+export type ResearchPolicy = Omit<typeof precisionV2Policy, "automaticAnswerActivation"> & {
   readonly automaticAnswerActivation: AutomaticAnswerActivation | undefined;
 };
 
@@ -245,7 +329,7 @@ export type ResearchPolicy = Omit<typeof knownRfcPolicy, "automaticAnswerActivat
  * Named policy presets available to the research pipeline.
  */
 export const researchPolicyPresets: Readonly<Record<string, ResearchPolicy>> = {
-  "precision-v2": knownRfcPolicy,
+  "precision-v2": precisionV2Policy,
 };
 
 /**
@@ -983,8 +1067,8 @@ const sectionHeading = (line: string): string | undefined => {
  */
 export const parseSourceBlocks = (
   text: string,
-  maxCharacters: number = knownRfcPolicy.sourceBlockMaxCharacters,
-  overlapCharacters: number = knownRfcPolicy.sourceBlockOverlapCharacters,
+  maxCharacters: number = precisionV2Policy.sourceBlockMaxCharacters,
+  overlapCharacters: number = precisionV2Policy.sourceBlockOverlapCharacters,
 ): ReadonlyArray<SourceBlock> => {
   const lines = linesOf(text);
   const headings = lines.flatMap((line) => {
@@ -1063,7 +1147,7 @@ const passageLexicalScore = (block: SourceBlock, terms: ReadonlyArray<string>): 
 export const shortlistPassageCandidates = (
   blocks: ReadonlyArray<SourceBlock>,
   question: string,
-  limit: number = knownRfcPolicy.maxPassageCandidates,
+  limit: number = precisionV2Policy.maxPassageCandidates,
 ): ReadonlyArray<SourceBlock> => {
   if (blocks.length === 0 || question.trim().length === 0 || limit <= 0) return [];
   const terms = lexicalTerms(question);
@@ -1625,8 +1709,8 @@ const successorLookup = (
 const resolveRfcCurrencyFromDocument = (
   documents: ReadonlyArray<RfcMetadata>,
   requested: RfcMetadata,
-  maxDepth: number = knownRfcPolicy.maxCurrencyTraversalDepth,
-  maxContexts: number = knownRfcPolicy.maxCurrencyContexts,
+  maxDepth: number = precisionV2Policy.maxCurrencyTraversalDepth,
+  maxContexts: number = precisionV2Policy.maxCurrencyContexts,
 ): RfcCurrencyResolution => {
   const requestedContext: PlannedRfcContext = {
     role: "requested",

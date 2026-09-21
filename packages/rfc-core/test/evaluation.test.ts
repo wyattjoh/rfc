@@ -11,6 +11,8 @@ import {
   evaluationCitationVerdicts,
   evaluationCorpus,
   evaluationCorpusDigest,
+  evaluationCorpusVersion,
+  evaluationPolicy,
   evaluationPositiveControlCaseIds,
   evaluationPolicyDigest,
   evaluationReleaseAttestation,
@@ -68,6 +70,43 @@ const makeObservation = (
       verificationMs: evaluationCase.kind === "citation" ? 7 : null,
       totalMs: totalLatencyMs,
     },
+    retrieval: {
+      schemaVersion: 2,
+      requestCount: 2,
+      datatrackerRequestCount: 1,
+      sourceRequestCount: 1,
+      metadataMs: 1,
+      sourceMs: 3,
+      sourceCacheOutcome: "miss",
+      ...(evaluationCase.mode === "topic"
+        ? {
+            upstreamRows: 2,
+            uniqueCandidates: 2,
+            mergeLimit: 32,
+            semanticCandidates: 2,
+            selectedSources: 1,
+            topicTruncated: false,
+          }
+        : {}),
+      requests: [
+        {
+          kind: "metadata",
+          url: "https://datatracker.ietf.org/api/v1/doc/document/rfc9110/",
+          attempts: 1,
+          status: 200,
+          statuses: [200],
+          durationMs: 1,
+        },
+        {
+          kind: "source",
+          url: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+          attempts: 1,
+          status: 200,
+          statuses: [200],
+          durationMs: 3,
+        },
+      ],
+    },
     totalLatencyMs,
     probabilities:
       evaluationCase.kind === "research" && observedOutcome === "answered"
@@ -110,7 +149,7 @@ const acceptedFixtureReport = () => {
   );
   const report = makeEvaluationReport(liveEvaluationCorpus, liveCorpusObservations(), {
     origin: "live",
-    releaseBuildId: "rfc-evidence-precision-v4",
+    releaseBuildId: "rfc-evidence-precision-v2",
     corpusDigest: evaluationCorpusDigest,
     createdAt: "2026-01-01T00:00:00.000Z",
     expiresAt: "2026-02-01T00:00:00.000Z",
@@ -137,6 +176,68 @@ const acceptedFixtureReport = () => {
 };
 
 describe("precision evaluation", () => {
+  test("records every schema-v2 limit under an explicitly uncalibrated policy", () => {
+    expect(evaluationCorpusVersion).toBe("precision-v2");
+    expect(evaluationPolicy).toMatchObject({
+      schemaVersion: 2,
+      policyVersion: "precision-v2",
+      calibrationStatus: "uncalibrated",
+      retrievalLimits: {
+        maxSearchTerms: 4,
+        maxTopicRequests: 8,
+        maxConcurrentDatatrackerRequests: 4,
+        maxRowsPerTopicRequest: 20,
+        maxUpstreamTopicRows: 160,
+        datatrackerMaxAttempts: 3,
+        datatrackerDeadlineMilliseconds: 10_000,
+        sourceDeadlineMilliseconds: 10_000,
+        sourceMaximumBytes: 8 * 1024 * 1024,
+      },
+      candidateLimits: {
+        maxMergedDocumentCandidates: 32,
+        maxSourceRetrievalCandidates: 8,
+        maxPassageCandidates: 8,
+      },
+      traversalLimits: {
+        maxDepth: 16,
+        maxContexts: 8,
+        maxRelationshipsPerRfc: 64,
+      },
+      providerRetryLimits: {
+        maxAttempts: 3,
+        maxElapsedMilliseconds: 10_000,
+      },
+      acceptanceLimits: {
+        calibrationStatus: "uncalibrated",
+        documentProbabilityThreshold: 0.35,
+        selectionProbabilityThreshold: 0.45,
+        directAnswerProbabilityThreshold: 0.65,
+        minimumSupportedClaimPrecision: 0.98,
+      },
+    });
+  });
+
+  test("commits deterministic retrieval coverage for every required version-two scenario", () => {
+    expect(new Set(evaluationCorpus.retrievalCases.map(({ category }) => category))).toEqual(
+      new Set([
+        "known_current_rfc",
+        "update_chain",
+        "cycle_safety",
+        "ordered_topic_terms",
+        "candidate_fan_out",
+        "no_candidate_outcome",
+        "relationship_bound",
+        "source_cache_miss",
+        "source_cache_hit",
+        "source_cache_revalidated",
+        "source_cache_replaced",
+        "source_cache_repaired",
+        "fail_closed_upstream",
+      ]),
+    );
+    expect(evaluationCorpus.retrievalCases.every(({ live }) => live === false)).toBe(true);
+  });
+
   test("commits coverage for every required corpus category", () => {
     const categories = new Set(
       evaluationCorpus.cases.map((evaluationCase) => evaluationCase.category),
@@ -166,7 +267,7 @@ describe("precision evaluation", () => {
     }
   });
 
-  test("recertifies stable research mismatches as fail-closed outcomes", () => {
+  test("records conservative research expectations before recertification", () => {
     const expectedStatuses = new Map<string, EvaluationCase["expectedStatus"]>([
       ["older-definition", "needs_review"],
       ["procedure", "needs_review"],
@@ -206,41 +307,16 @@ describe("precision evaluation", () => {
     }
   });
 
-  test("accepts only bounded safe alternatives and keeps automatic outcomes accepted", () => {
-    expect(evaluationAllowedOutcomeSets).toEqual({
-      "negative-answer": ["needs_review", "unsupported"],
-      "updated-document": ["needs_review", "partial"],
-      "partial-answer": ["needs_review", "answered"],
-      "topic-discovery": ["needs_review", "answered"],
-    });
+  test("keeps unreviewed outcomes exact and automatic outcomes evidence-backed", () => {
+    expect(evaluationAllowedOutcomeSets).toEqual({});
 
-    const observations = corpusObservations().map((observation) => {
-      if (observation.caseId === "negative-answer") {
-        return { ...observation, observedOutcome: "unsupported" };
-      }
-      if (observation.caseId === "updated-document") {
-        return { ...observation, observedOutcome: "partial" };
-      }
-      if (observation.caseId === "partial-answer") {
-        return {
-          ...observation,
-          observedOutcome: "answered",
-          acceptedByPolicy: true,
-          probabilities: {
-            accepted: 0.99,
-            "selection.fixture.probability": 0.99,
-            "classification.fixture.direct_answer": 0.99,
-          },
-        };
-      }
-      return observation;
-    });
+    const observations = corpusObservations();
     const report = makeEvaluationReport(evaluationCorpus, observations);
     expect(report.gate.expectedOutcomePassed).toBe(true);
     expect(report.gate.passed).toBe(true);
 
     const unsafeAutomaticOutcome = observations.map((observation) =>
-      observation.caseId === "partial-answer"
+      observation.caseId === "modern-normative-requirement"
         ? { ...observation, acceptedByPolicy: false }
         : observation,
     );
@@ -252,7 +328,7 @@ describe("precision evaluation", () => {
     ).toBe(false);
 
     const incompleteAutomaticEvidence = observations.map((observation) =>
-      observation.caseId === "partial-answer"
+      observation.caseId === "modern-normative-requirement"
         ? { ...observation, probabilities: { accepted: 0.99 } }
         : observation,
     );
@@ -267,7 +343,7 @@ describe("precision evaluation", () => {
       ...evaluationCorpus,
       cases: evaluationCorpus.cases.map((evaluationCase) =>
         evaluationCase.id === "negative-answer"
-          ? { ...evaluationCase, allowedOutcomes: ["needs_review", "unsupported", "answered"] }
+          ? { ...evaluationCase, allowedOutcomes: ["needs_review", "answered"] }
           : evaluationCase,
       ),
     };
@@ -286,7 +362,7 @@ describe("precision evaluation", () => {
     ).toBe(false);
   });
 
-  test("requires a confident document, passage, and direct relation for topic answers", () => {
+  test("keeps topic answers outside the uncalibrated corpus outcome policy", () => {
     const topicCase = evaluationCorpus.cases.find(
       (evaluationCase) => evaluationCase.id === "topic-discovery",
     );
@@ -305,8 +381,9 @@ describe("precision evaluation", () => {
       observation.caseId === topicCase.id ? fullySupportedTopicAnswer : observation,
     );
     expect(
-      evaluateEvaluationGate(calculateEvaluationMetrics(observations), observations).passed,
-    ).toBe(true);
+      evaluateEvaluationGate(calculateEvaluationMetrics(observations), observations)
+        .expectedOutcomePassed,
+    ).toBe(false);
 
     const lowConfidenceDocument = {
       ...fullySupportedTopicAnswer,
@@ -341,7 +418,7 @@ describe("precision evaluation", () => {
     ).toBe(false);
   });
 
-  test("keeps calibrated corpus inputs atomic and preserves qualified duplicate evidence", () => {
+  test("keeps corpus inputs atomic and preserves qualified duplicate evidence", () => {
     const partial = evaluationCorpus.cases.find(
       (evaluationCase) => evaluationCase.id === "partial-answer",
     );
@@ -363,6 +440,8 @@ describe("precision evaluation", () => {
     const report = makeEvaluationReport(evaluationCorpus, observations);
 
     expect(report.gate.passed).toBe(true);
+    expect(report.policy).toEqual(evaluationPolicy);
+    expect(report.observations[0]?.retrieval?.sourceCacheOutcome).toBe("miss");
     expect(report.metrics.supportedClaimPrecision).toBe(1);
     expect(report.metrics.supportedClaimCoverage).toBe(1);
     expect(report.metrics.statusRates.needs_split).toBeGreaterThan(0);
@@ -505,6 +584,26 @@ describe("precision evaluation", () => {
     expect(gate.failures).toContain("a fabricated or contradicted citation was accepted");
   });
 
+  test("rejects retrieval traces that exceed precision-v2 hard limits", () => {
+    const observations = corpusObservations().map((observation) =>
+      observation.mode === "topic" && observation.retrieval !== null
+        ? {
+            ...observation,
+            retrieval: {
+              ...observation.retrieval,
+              semanticCandidates: 33,
+              selectedSources: 9,
+            },
+          }
+        : observation,
+    );
+    const gate = evaluateEvaluationGate(calculateEvaluationMetrics(observations), observations);
+
+    expect(gate.retrievalBoundsPassed).toBe(false);
+    expect(gate.passed).toBe(false);
+    expect(gate.failures).toContain("a retrieval trace exceeded the precision-v2 hard limits");
+  });
+
   test("rejects a model drift and p95 sample at either strict latency limit", () => {
     const observations = corpusObservations().map((observation) =>
       observation.mode === "known_rfc" && observation.kind === "research"
@@ -573,7 +672,7 @@ describe("precision evaluation", () => {
     const deterministicReport = makeEvaluationReport(evaluationCorpus, corpusObservations());
     const report = makeEvaluationReport(liveEvaluationCorpus, liveCorpusObservations(), {
       origin: "live",
-      releaseBuildId: "rfc-evidence-precision-v4",
+      releaseBuildId: "rfc-evidence-precision-v2",
       corpusDigest: "pending",
       createdAt: "2026-01-01T00:00:00.000Z",
       expiresAt: "2026-02-01T00:00:00.000Z",
@@ -689,6 +788,19 @@ describe("precision evaluation", () => {
     expect(
       isAcceptedEvaluationReportForAttestation(
         { ...report, policyDigest: "0".repeat(64) },
+        attestation,
+        now,
+      ),
+    ).toBe(false);
+    expect(
+      isAcceptedEvaluationReportForAttestation(
+        {
+          ...report,
+          policy: {
+            ...report.policy,
+            candidateLimits: { ...report.policy.candidateLimits, maxMergedDocumentCandidates: 31 },
+          },
+        },
         attestation,
         now,
       ),

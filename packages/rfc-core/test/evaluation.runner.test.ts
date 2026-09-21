@@ -72,13 +72,18 @@ const fixtureSources: Readonly<Record<string, string>> = {
     "",
     "The HTTP client MUST send a request containing the target resource.",
     "",
-    "The server SHOULD generate a Location header field in the response containing a preferred URI reference for the new permanent URI.",
+    "The server SHOULD generate a Location header field in the response",
+    "   containing a preferred URI reference for the new permanent URI.",
     "",
-    "The server SHOULD generate a Location header field in the response containing a preferred URI reference for the new permanent URI.",
+    "The server SHOULD generate a Location header field in the response",
+    "   containing a preferred URI reference for the new permanent URI.",
     "",
-    "The representation data associated with an HTTP message is either provided as the content of the message or referred to by the message semantics and the target URI.",
+    "The representation data associated with an HTTP message is either",
+    "   provided as the content of the message or referred to by the message",
+    "   semantics and the target URI.",
     "",
-    "A sender MUST NOT generate protocol elements that do not match the grammar defined by the corresponding ABNF rules.",
+    "A sender MUST NOT generate protocol elements that do not match the",
+    "   grammar defined by the corresponding ABNF rules.",
     "",
     "The server does not have to cache every request.",
   ].join("\n"),
@@ -191,9 +196,7 @@ const makeRecordedDecisionModel = (): DecisionModel.DecisionModel => {
             compound ? { atomic: 0.05, compound: 0.95 } : { atomic: 0.95, compound: 0.05 },
           );
         } else if (decision._tag === "Probability") {
-          const lowConfidenceTopicSelection =
-            input.documents !== undefined &&
-            input.question === "How does an HTTP client send a request message?";
+          const lowConfidenceTopicSelection = input.documents !== undefined;
           answers[key] = { probability: lowConfidenceTopicSelection ? 0.34 : 0.95 };
         } else if (key === "citation_verdict") {
           const verdict = citationVerdictForClaim(input.claim ?? "");
@@ -344,12 +347,16 @@ const datatrackerClient = HttpClient.make((request, url) => {
       ),
     );
   }
+  const noCandidateControl = [...url.searchParams.values()].some((value) =>
+    value.includes("rfc-evidence-no-candidate-7f31"),
+  );
+  const documents = noCandidateControl ? [] : fixtureDocuments;
   return Effect.succeed(
     HttpClientResponse.fromWeb(
       request,
       Response.json({
-        meta: { limit: 20, offset: 0, total_count: fixtureDocuments.length, next: null },
-        objects: fixtureDocuments.map((document) => ({
+        meta: { limit: 20, offset: 0, total_count: documents.length, next: null },
+        objects: documents.map((document) => ({
           name: document.identifier.toLowerCase(),
           rfc_number: document.rfcNumber,
           title: document.title,
@@ -403,6 +410,20 @@ describe("committed evaluation runner", () => {
 
       expect(evaluatedCaseIds).toEqual(evaluationCorpus.cases.map(({ id }) => id));
       expect(report.observations).toHaveLength(evaluationCorpus.cases.length);
+      expect(report.observations.every(({ retrieval }) => retrieval !== null)).toBe(true);
+      expect(
+        report.observations
+          .find(({ caseId }) => caseId === "topic-ordered-search-terms")
+          ?.retrieval?.requests.filter(({ kind }) => kind === "metadata")
+          .map(({ url }) => new URL(url).searchParams.values().next().value),
+      ).toHaveLength(4);
+      expect(
+        report.observations.find(({ caseId }) => caseId === "topic-no-candidates")?.retrieval,
+      ).toMatchObject({
+        sourceCacheOutcome: "not_requested",
+        semanticCandidates: 0,
+        selectedSources: 0,
+      });
       expect(report.gate.passed).toBe(true);
       expect(report.gate.expectedOutcomePassed).toBe(true);
       expect(report.metrics.supportedClaimPrecision).toBe(1);

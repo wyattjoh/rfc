@@ -40,6 +40,8 @@ import {
   datatrackerCurrencyContextLimit,
   datatrackerDocumentCandidateLimit,
   datatrackerSuccessorLimit,
+  datatrackerTopicSearchTermLimit,
+  datatrackerTopicSearchTermMaximumCharacters,
   makeDefaultRfcDiscoveryLayer,
   makeRfcDiscoveryHttpLayer,
   type RfcMetadata,
@@ -116,6 +118,7 @@ export {
   knownRfcPolicy,
   parseSourceBlocks,
   precisionPolicy,
+  precisionV2Policy,
   researchPolicyPresets,
   type AnswerRelation,
   type EvidenceBundle,
@@ -391,7 +394,10 @@ const KnownRfcResearchRequestInputSchema = Schema.Struct({
   searchTerms: Schema.optionalKey(Schema.Undefined),
 });
 
-const TopicSearchTermSchema = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(200));
+const TopicSearchTermSchema = Schema.String.check(
+  Schema.isMinLength(1),
+  Schema.isMaxLength(datatrackerTopicSearchTermMaximumCharacters),
+);
 
 const TopicResearchRequestInputSchema = Schema.Struct({
   schemaVersion: Schema.Literal(schemaVersion),
@@ -399,7 +405,7 @@ const TopicResearchRequestInputSchema = Schema.Struct({
   rfc: Schema.Null,
   searchTerms: Schema.Array(TopicSearchTermSchema).check(
     Schema.isMinLength(1),
-    Schema.isMaxLength(4),
+    Schema.isMaxLength(datatrackerTopicSearchTermLimit),
   ),
 });
 
@@ -460,8 +466,10 @@ export const decodeResearchRequest = (input: unknown): ResearchRequest => {
     const request = Schema.decodeUnknownSync(TopicResearchRequestInputSchema)(input);
     if (
       request.searchTerms.length < 1 ||
-      request.searchTerms.length > 4 ||
-      request.searchTerms.some((term) => term.length === 0 || term.length > 200)
+      request.searchTerms.length > datatrackerTopicSearchTermLimit ||
+      request.searchTerms.some(
+        (term) => term.length === 0 || term.length > datatrackerTopicSearchTermMaximumCharacters,
+      )
     ) {
       throw new Error("invalid search terms");
     }

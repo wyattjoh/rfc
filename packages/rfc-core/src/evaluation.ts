@@ -5,6 +5,7 @@ import {
   type CitationVerificationResult,
   type CitationVerdict,
 } from "./citation";
+import { LiveRetrievalTraceSchema } from "./discovery";
 import {
   precisionPolicy,
   ResearchStatusSchema,
@@ -15,12 +16,12 @@ import {
 /**
  * Version of the evaluation contracts and report format.
  */
-export const evaluationSchemaVersion = 3 as const;
+export const evaluationSchemaVersion = 4 as const;
 
 /**
  * Version of the committed precision evaluation corpus.
  */
-export const evaluationCorpusVersion = "precision-v4" as const;
+export const evaluationCorpusVersion = "precision-v2" as const;
 
 /**
  * Alias used when calibration begins against the TypeSafe provider.
@@ -70,8 +71,8 @@ export const EvaluationCaseSchema = Schema.Struct({
   expectedVerdict: Schema.NullOr(CitationVerdictSchema),
   /**
    * Outcomes that are safe for this case when the evidence is policy-accepted.
-   * Exact cases contain only their canonical expected outcome; recertified
-   * cases may list bounded alternatives that are equally safe.
+   * Exact cases contain only their canonical expected outcome; a future
+   * reviewed recertification may list bounded alternatives that are equally safe.
    */
   allowedOutcomes: Schema.Array(Schema.NonEmptyString),
   /**
@@ -88,6 +89,41 @@ export const EvaluationCaseSchema = Schema.Struct({
 export type EvaluationCase = Schema.Schema.Type<typeof EvaluationCaseSchema>;
 
 /**
+ * Deterministic retrieval behavior represented in the version-two corpus.
+ */
+export const EvaluationRetrievalCategorySchema = Schema.Literals([
+  "known_current_rfc",
+  "update_chain",
+  "cycle_safety",
+  "ordered_topic_terms",
+  "candidate_fan_out",
+  "no_candidate_outcome",
+  "relationship_bound",
+  "source_cache_miss",
+  "source_cache_hit",
+  "source_cache_revalidated",
+  "source_cache_replaced",
+  "source_cache_repaired",
+  "fail_closed_upstream",
+]);
+
+/**
+ * One deterministic public-client scenario bound into the evaluation corpus.
+ */
+export const EvaluationRetrievalCaseSchema = Schema.Struct({
+  id: Schema.NonEmptyString,
+  category: EvaluationRetrievalCategorySchema,
+  seam: Schema.Literal("rfc_client"),
+  live: Schema.Literal(false),
+  assertion: Schema.NonEmptyString,
+});
+
+/**
+ * A deterministic public-client scenario in the evaluation corpus.
+ */
+export type EvaluationRetrievalCase = Schema.Schema.Type<typeof EvaluationRetrievalCaseSchema>;
+
+/**
  * Schema for the committed evaluation corpus.
  */
 export const EvaluationCorpusSchema = Schema.Struct({
@@ -95,6 +131,7 @@ export const EvaluationCorpusSchema = Schema.Struct({
   kind: Schema.Literal("rfc_evaluation_corpus"),
   corpusVersion: Schema.NonEmptyString,
   cases: Schema.Array(EvaluationCaseSchema),
+  retrievalCases: Schema.Array(EvaluationRetrievalCaseSchema),
 });
 
 /**
@@ -241,6 +278,60 @@ const corpusCases = [
     live: true,
   },
   {
+    id: "topic-ordered-search-terms",
+    category: "ordered_topic_terms",
+    kind: "research",
+    mode: "topic",
+    rfc: null,
+    question: "Which RFCs define HTTP caching and cache-control behavior?",
+    searchTerms: ["HTTP caching", "cache control"],
+    claim: null,
+    quote: null,
+    offset: null,
+    expectedStatus: "needs_review",
+    expectedVerdict: null,
+    expectedOutcomeRationale:
+      "Ordered multi-term discovery remains fail closed until precision-v2 candidate ordering is reviewed.",
+    supportedClaim: false,
+    live: true,
+  },
+  {
+    id: "topic-candidate-fan-out",
+    category: "candidate_fan_out",
+    kind: "research",
+    mode: "topic",
+    rfc: null,
+    question: "Which RFCs define HTTP message, caching, authentication, and routing behavior?",
+    searchTerms: ["HTTP message", "HTTP caching", "HTTP authentication", "HTTP routing"],
+    claim: null,
+    quote: null,
+    offset: null,
+    expectedStatus: "needs_review",
+    expectedVerdict: null,
+    expectedOutcomeRationale:
+      "Broad bounded discovery must not become an automatic answer before candidate fan-out is recertified.",
+    supportedClaim: false,
+    live: true,
+  },
+  {
+    id: "topic-no-candidates",
+    category: "no_candidate_outcome",
+    kind: "research",
+    mode: "topic",
+    rfc: null,
+    question: "Which RFC defines the intentionally absent evaluation control?",
+    searchTerms: ["rfc-evidence-no-candidate-7f31"],
+    claim: null,
+    quote: null,
+    offset: null,
+    expectedStatus: "needs_review",
+    expectedVerdict: null,
+    expectedOutcomeRationale:
+      "Successful empty discovery is a bounded miss that requires review and never proves unsupported.",
+    supportedClaim: false,
+    live: true,
+  },
+  {
     id: "obsolete-document",
     category: "obsolete_document",
     kind: "research",
@@ -318,8 +409,8 @@ const corpusCases = [
     claim:
       "The server SHOULD generate a Location header field in the response containing a preferred URI reference for the new permanent URI.",
     quote:
-      "The server SHOULD generate a Location header field in the response containing a preferred URI reference for the new permanent URI.",
-    offset: null,
+      "The server SHOULD generate a Location header field in the response\n   containing a preferred URI reference for the new permanent URI.",
+    offset: 346_604,
     expectedStatus: null,
     expectedVerdict: "verified",
     expectedOutcomeRationale:
@@ -337,7 +428,7 @@ const corpusCases = [
     claim:
       "The representation data associated with an HTTP message is either provided as the content of the message or referred to by the message semantics and the target URI.",
     quote:
-      "The representation data associated with an HTTP message is either provided as the content of the message or referred to by the message semantics and the target URI.",
+      "The representation data associated with an HTTP message is either\n   provided as the content of the message or referred to by the message\n   semantics and the target URI.",
     offset: null,
     expectedStatus: null,
     expectedVerdict: "verified",
@@ -356,7 +447,7 @@ const corpusCases = [
     claim:
       "A sender must not generate protocol elements that do not match the grammar defined by the corresponding ABNF rules.",
     quote:
-      "A sender MUST NOT generate protocol elements that do not match the grammar defined by the corresponding ABNF rules.",
+      "A sender MUST NOT generate protocol elements that do not match the\n   grammar defined by the corresponding ABNF rules.",
     offset: null,
     expectedStatus: null,
     expectedVerdict: "verified",
@@ -391,7 +482,7 @@ const corpusCases = [
     question: null,
     claim: "The server must cache every request.",
     quote:
-      "The representation data associated with an HTTP message is either provided as the content of the message or referred to by the message semantics and the target URI.",
+      "The representation data associated with an HTTP message is either\n   provided as the content of the message or referred to by the message\n   semantics and the target URI.",
     offset: null,
     expectedStatus: null,
     expectedVerdict: "unsupported",
@@ -409,7 +500,7 @@ const corpusCases = [
     question: null,
     claim: "A sender must generate protocol elements that do not match the grammar.",
     quote:
-      "A sender MUST NOT generate protocol elements that do not match the grammar defined by the corresponding ABNF rules.",
+      "A sender MUST NOT generate protocol elements that do not match the\n   grammar defined by the corresponding ABNF rules.",
     offset: null,
     expectedStatus: null,
     expectedVerdict: "contradicted",
@@ -421,18 +512,14 @@ const corpusCases = [
 ] as const;
 
 /**
- * Explicitly bounded outcome alternatives justified by corpus recertification.
+ * Reviewed bounded outcome alternatives for the current corpus.
  *
- * These sets are intentionally keyed to the committed case ids rather than
- * inferred from observed labels. This prevents a report from widening its own
- * acceptance set and keeps positive controls and citation verdicts exact.
+ * Precision-v2 has not been recertified, so this set is empty. It is keyed to
+ * committed case ids rather than inferred from observed labels to prevent a
+ * report from widening its own acceptance policy.
  */
-export const evaluationAllowedOutcomeSets = {
-  "negative-answer": ["needs_review", "unsupported"],
-  "updated-document": ["needs_review", "partial"],
-  "partial-answer": ["needs_review", "answered"],
-  "topic-discovery": ["needs_review", "answered"],
-} as const;
+export const evaluationAllowedOutcomeSets: Readonly<Record<string, ReadonlyArray<string>>> =
+  Object.freeze({});
 
 const baseCaseId = (caseId: string): string =>
   /^(.*):iteration-[1-9][0-9]*$/.exec(caseId)?.[1] ?? caseId;
@@ -446,8 +533,7 @@ const allowedOutcomesForCaseId = (
   caseId: string,
   expectedOutcome: string,
 ): ReadonlyArray<string> => {
-  const explicit =
-    evaluationAllowedOutcomeSets[baseCaseId(caseId) as keyof typeof evaluationAllowedOutcomeSets];
+  const explicit = evaluationAllowedOutcomeSets[baseCaseId(caseId)];
   return explicit ?? [expectedOutcome];
 };
 
@@ -455,6 +541,104 @@ const corpusCasesWithOutcomePolicy = corpusCases.map((evaluationCase) => ({
   ...evaluationCase,
   allowedOutcomes: allowedOutcomesForCaseId(evaluationCase.id, exactCorpusOutcome(evaluationCase)),
 }));
+
+const retrievalCases = [
+  {
+    id: "retrieval-known-current",
+    category: "known_current_rfc",
+    seam: "rfc_client",
+    live: false,
+    assertion: "Exact metadata and canonical source are retrieved for a current RFC.",
+  },
+  {
+    id: "retrieval-update-chain",
+    category: "update_chain",
+    seam: "rfc_client",
+    live: false,
+    assertion:
+      "Successor relationships preserve requested and current contexts across an update chain.",
+  },
+  {
+    id: "retrieval-cycle",
+    category: "cycle_safety",
+    seam: "rfc_client",
+    live: false,
+    assertion: "Cyclic successor relationships terminate and force a fail-closed result.",
+  },
+  {
+    id: "retrieval-ordered-topic-terms",
+    category: "ordered_topic_terms",
+    seam: "rfc_client",
+    live: false,
+    assertion: "Ordered caller terms produce bounded title and abstract request streams.",
+  },
+  {
+    id: "retrieval-candidate-fan-out",
+    category: "candidate_fan_out",
+    seam: "rfc_client",
+    live: false,
+    assertion:
+      "Upstream rows, merged candidates, semantic candidates, and source reads stay bounded.",
+  },
+  {
+    id: "retrieval-no-candidates",
+    category: "no_candidate_outcome",
+    seam: "rfc_client",
+    live: false,
+    assertion:
+      "A successful empty discovery returns needs_review without provider or source calls.",
+  },
+  {
+    id: "retrieval-relationship-bound",
+    category: "relationship_bound",
+    seam: "rfc_client",
+    live: false,
+    assertion: "Relationship, context, and depth bounds are explicit and force review.",
+  },
+  {
+    id: "retrieval-cache-miss",
+    category: "source_cache_miss",
+    seam: "rfc_client",
+    live: false,
+    assertion: "A source-cache miss reads and atomically stores one canonical RFC source.",
+  },
+  {
+    id: "retrieval-cache-hit",
+    category: "source_cache_hit",
+    seam: "rfc_client",
+    live: false,
+    assertion: "A fresh source-cache hit performs no RFC Editor request.",
+  },
+  {
+    id: "retrieval-cache-304",
+    category: "source_cache_revalidated",
+    seam: "rfc_client",
+    live: false,
+    assertion: "A strong conditional validator accepts 304 and preserves exact cached bytes.",
+  },
+  {
+    id: "retrieval-cache-changed",
+    category: "source_cache_replaced",
+    seam: "rfc_client",
+    live: false,
+    assertion: "A changed 200 response atomically replaces source bytes and validators.",
+  },
+  {
+    id: "retrieval-cache-corrupt",
+    category: "source_cache_repaired",
+    seam: "rfc_client",
+    live: false,
+    assertion: "A corrupt source-cache entry is unconditionally refetched and repaired.",
+  },
+  {
+    id: "retrieval-upstream-errors",
+    category: "fail_closed_upstream",
+    seam: "rfc_client",
+    live: false,
+    assertion:
+      "Required Datatracker and stale-source failures return typed errors without fallback.",
+  },
+] as const;
 
 /**
  * The committed corpus used by deterministic tests and opt-in calibration.
@@ -464,6 +648,7 @@ export const evaluationCorpus: EvaluationCorpus = Schema.decodeUnknownSync(Evalu
   kind: "rfc_evaluation_corpus",
   corpusVersion: evaluationCorpusVersion,
   cases: corpusCasesWithOutcomePolicy,
+  retrievalCases,
 });
 
 /**
@@ -572,6 +757,7 @@ export const EvaluationObservationSchema = Schema.Struct({
   policyVersion: Schema.NonEmptyString,
   usage: EvaluationUsageSchema,
   timings: EvaluationTimingsSchema,
+  retrieval: Schema.NullOr(LiveRetrievalTraceSchema),
   totalLatencyMs: Schema.Finite,
   probabilities: Schema.Record(Schema.String, Schema.Finite),
   confidence: Schema.NullOr(Schema.Finite),
@@ -627,22 +813,98 @@ export const EvaluationMetricsSchema = Schema.Struct({
  */
 export type EvaluationMetrics = Schema.Schema.Type<typeof EvaluationMetricsSchema>;
 
+const EvaluationRetrievalLimitsSchema = Schema.Struct({
+  maxSearchTerms: Schema.Natural,
+  maxSearchTermCharacters: Schema.Natural,
+  maxTopicRequests: Schema.Natural,
+  maxConcurrentDatatrackerRequests: Schema.Natural,
+  maxRowsPerTopicRequest: Schema.Natural,
+  maxUpstreamTopicRows: Schema.Natural,
+  datatrackerMaxAttempts: Schema.Natural,
+  datatrackerDeadlineMilliseconds: Schema.Natural,
+  datatrackerMaximumResponseBytes: Schema.Natural,
+  sourceDeadlineMilliseconds: Schema.Natural,
+  sourceMaximumBytes: Schema.Natural,
+  sourceCacheSchemaVersion: Schema.Natural,
+});
+
+const EvaluationCandidateLimitsSchema = Schema.Struct({
+  maxMergedDocumentCandidates: Schema.Natural,
+  maxSourceRetrievalCandidates: Schema.Natural,
+  maxPassageCandidates: Schema.Natural,
+  sourceBlockMaxCharacters: Schema.Natural,
+  sourceBlockOverlapCharacters: Schema.Natural,
+});
+
+const EvaluationTraversalLimitsSchema = Schema.Struct({
+  maxDepth: Schema.Natural,
+  maxContexts: Schema.Natural,
+  maxRelationshipsPerRfc: Schema.Natural,
+});
+
+const EvaluationProviderRetryLimitsSchema = Schema.Struct({
+  maxAttempts: Schema.Natural,
+  maxElapsedMilliseconds: Schema.Natural,
+  defaultRetryDelayMilliseconds: Schema.Natural,
+});
+
+const EvaluationAcceptanceLimitsSchema = Schema.Struct({
+  calibrationStatus: Schema.Literal("uncalibrated"),
+  documentProbabilityThreshold: Schema.Finite,
+  selectionProbabilityThreshold: Schema.Finite,
+  unsupportedProbabilityThreshold: Schema.Finite,
+  relationConfidenceThreshold: Schema.Finite,
+  directAnswerProbabilityThreshold: Schema.Finite,
+  partialAnswerProbabilityThreshold: Schema.Finite,
+  contradictoryProbabilityThreshold: Schema.Finite,
+  currencyCompatibilityOverlapThreshold: Schema.Finite,
+  minimumSupportedClaimPrecision: Schema.Finite,
+  maxKnownRfcP95LatencyMilliseconds: Schema.Finite,
+  maxTopicP95LatencyMilliseconds: Schema.Finite,
+});
+
 /**
- * Calibrated policy and model settings used by the evaluation gates.
+ * Schema for the complete policy identity bound into evaluation artifacts.
  */
-export const evaluationPolicy = {
+export const EvaluationPolicySchema = Schema.Struct({
+  schemaVersion: Schema.Literal(2),
+  policyVersion: Schema.Literal("precision-v2"),
+  calibrationStatus: Schema.Literal("uncalibrated"),
+  retrievalLimits: EvaluationRetrievalLimitsSchema,
+  candidateLimits: EvaluationCandidateLimitsSchema,
+  traversalLimits: EvaluationTraversalLimitsSchema,
+  providerRetryLimits: EvaluationProviderRetryLimitsSchema,
+  acceptanceLimits: EvaluationAcceptanceLimitsSchema,
+  requestedModel: Schema.NonEmptyString,
+  pinnedModel: Schema.NonEmptyString,
+  minimumSupportedClaimPrecision: Schema.Finite,
+  maxKnownRfcP95LatencyMilliseconds: Schema.Finite,
+  maxTopicP95LatencyMilliseconds: Schema.Finite,
+});
+
+/**
+ * Complete pending policy and model settings used by the evaluation gates.
+ */
+export const evaluationPolicy = Schema.decodeUnknownSync(EvaluationPolicySchema)({
+  schemaVersion: precisionPolicy.schemaVersion,
   policyVersion: precisionPolicy.policyVersion,
+  calibrationStatus: precisionPolicy.calibrationStatus,
+  retrievalLimits: precisionPolicy.retrievalLimits,
+  candidateLimits: precisionPolicy.candidateLimits,
+  traversalLimits: precisionPolicy.traversalLimits,
+  providerRetryLimits: precisionPolicy.providerRetryLimits,
+  acceptanceLimits: precisionPolicy.acceptanceLimits,
   requestedModel: evaluationModelAlias,
   pinnedModel: pinnedJevModel,
   minimumSupportedClaimPrecision: precisionPolicy.minimumSupportedClaimPrecision,
   maxKnownRfcP95LatencyMilliseconds: precisionPolicy.maxKnownRfcP95LatencyMilliseconds,
   maxTopicP95LatencyMilliseconds: precisionPolicy.maxTopicP95LatencyMilliseconds,
-} as const;
+});
 
 /**
- * Type of the calibrated evaluation policy.
+ * Type of the complete evaluation policy.
  */
-export type EvaluationPolicy = typeof evaluationPolicy;
+export type EvaluationPolicy = Schema.Schema.Type<typeof EvaluationPolicySchema>;
 
 /**
  * Digest of the committed precision policy used by release attestation.
@@ -729,29 +991,34 @@ export interface EvaluationReportOptions {
   readonly maxTopicP95LatencyMilliseconds: number | undefined;
 }
 
-type ResolvedEvaluationPolicy = {
-  readonly policyVersion: string;
-  readonly requestedModel: string;
-  readonly pinnedModel: string;
-  readonly minimumSupportedClaimPrecision: number;
-  readonly maxKnownRfcP95LatencyMilliseconds: number;
-  readonly maxTopicP95LatencyMilliseconds: number;
-};
+type ResolvedEvaluationPolicy = EvaluationPolicy;
 
 const resolveReportOptions = (
   options: EvaluationReportOptions | undefined,
-): ResolvedEvaluationPolicy => ({
-  policyVersion: options?.policyVersion ?? evaluationPolicy.policyVersion,
-  requestedModel: options?.requestedModel ?? evaluationPolicy.requestedModel,
-  pinnedModel: options?.pinnedModel ?? evaluationPolicy.pinnedModel,
-  minimumSupportedClaimPrecision:
-    options?.minimumSupportedClaimPrecision ?? evaluationPolicy.minimumSupportedClaimPrecision,
-  maxKnownRfcP95LatencyMilliseconds:
+): ResolvedEvaluationPolicy => {
+  const minimumSupportedClaimPrecision =
+    options?.minimumSupportedClaimPrecision ?? evaluationPolicy.minimumSupportedClaimPrecision;
+  const maxKnownRfcP95LatencyMilliseconds =
     options?.maxKnownRfcP95LatencyMilliseconds ??
-    evaluationPolicy.maxKnownRfcP95LatencyMilliseconds,
-  maxTopicP95LatencyMilliseconds:
-    options?.maxTopicP95LatencyMilliseconds ?? evaluationPolicy.maxTopicP95LatencyMilliseconds,
-});
+    evaluationPolicy.maxKnownRfcP95LatencyMilliseconds;
+  const maxTopicP95LatencyMilliseconds =
+    options?.maxTopicP95LatencyMilliseconds ?? evaluationPolicy.maxTopicP95LatencyMilliseconds;
+  return Schema.decodeUnknownSync(EvaluationPolicySchema)({
+    ...evaluationPolicy,
+    policyVersion: options?.policyVersion ?? evaluationPolicy.policyVersion,
+    requestedModel: options?.requestedModel ?? evaluationPolicy.requestedModel,
+    pinnedModel: options?.pinnedModel ?? evaluationPolicy.pinnedModel,
+    minimumSupportedClaimPrecision,
+    maxKnownRfcP95LatencyMilliseconds,
+    maxTopicP95LatencyMilliseconds,
+    acceptanceLimits: {
+      ...evaluationPolicy.acceptanceLimits,
+      minimumSupportedClaimPrecision,
+      maxKnownRfcP95LatencyMilliseconds,
+      maxTopicP95LatencyMilliseconds,
+    },
+  });
+};
 
 /**
  * Schema for the individual checks that determine whether calibration passed.
@@ -763,6 +1030,7 @@ export const EvaluationGateSchema = Schema.Struct({
   positiveControlPassed: Schema.Boolean,
   precisionPassed: Schema.Boolean,
   citationSafetyPassed: Schema.Boolean,
+  retrievalBoundsPassed: Schema.Boolean,
   latencyPassed: Schema.Boolean,
   modelPinPassed: Schema.Boolean,
   precisionThreshold: Schema.Finite,
@@ -789,6 +1057,7 @@ export const EvaluationReportSchema = Schema.Struct({
   expiresAt: Schema.NonEmptyString,
   corpusDigest: Schema.NonEmptyString,
   policyDigest: Schema.NonEmptyString,
+  policy: EvaluationPolicySchema,
   authoritativeSourceHashes: Schema.Record(Schema.String, Schema.Array(Schema.NonEmptyString)),
   corpusVersion: Schema.NonEmptyString,
   policyVersion: Schema.NonEmptyString,
@@ -1009,6 +1278,7 @@ export const observationFromEvidenceBundle = (
     policyVersion: bundle.diagnostics.policyVersion,
     usage: usageFromBundle(bundle),
     timings: timingsFromBundle(bundle),
+    retrieval: bundle.diagnostics.retrieval,
     totalLatencyMs: bundle.diagnostics.timings.totalMs,
     probabilities: probabilitiesFromBundle(bundle),
     confidence: confidenceFromBundle(bundle),
@@ -1064,6 +1334,7 @@ export const observationFromCitationResult = (
     policyVersion: evaluationPolicy.policyVersion,
     usage: result.diagnostics.usage,
     timings: timingsFromCitation(result),
+    retrieval: result.diagnostics.retrieval ?? null,
     totalLatencyMs: result.diagnostics.timings.totalMs,
     probabilities: result.probabilities,
     confidence: result.confidence,
@@ -1112,6 +1383,7 @@ export const failedEvaluationObservation = (
       verificationMs: null,
       totalMs: 0,
     },
+    retrieval: null,
     totalLatencyMs: 0,
     probabilities: {},
     confidence: null,
@@ -1222,6 +1494,14 @@ const isDeterministicFabricatedObservation = (observation: EvaluationObservation
   observation.usage.inputTokens === null &&
   observation.usage.outputTokens === null;
 
+const isProviderlessObservation = (observation: EvaluationObservation): boolean =>
+  isDeterministicFabricatedObservation(observation) ||
+  (observation.kind === "research" &&
+    observation.observedOutcome === "needs_review" &&
+    observation.retrieval?.semanticCandidates === 0 &&
+    observation.usage.inputTokens === null &&
+    observation.usage.outputTokens === null);
+
 const calibrationCases = evaluationCorpus.cases.filter((evaluationCase) => evaluationCase.live);
 
 const calibrationObservationSetPassed = (
@@ -1319,6 +1599,7 @@ export const isAcceptedEvaluationReportForAttestation = (
       report.corpusDigest === evaluationCorpusDigest &&
       report.policyVersion === policy.policyVersion &&
       report.policyDigest === evaluationPolicyDigest &&
+      stableJson(report.policy) === stableJson(policy) &&
       stableJson(report.authoritativeSourceHashes) ===
         stableJson(attestation.authoritativeSourceHashes) &&
       report.requestedModel === policy.requestedModel &&
@@ -1329,6 +1610,7 @@ export const isAcceptedEvaluationReportForAttestation = (
       gate.positiveControlPassed &&
       gate.precisionPassed &&
       gate.citationSafetyPassed &&
+      gate.retrievalBoundsPassed &&
       gate.latencyPassed &&
       gate.modelPinPassed &&
       gate.precisionThreshold === policy.minimumSupportedClaimPrecision &&
@@ -1343,6 +1625,7 @@ export const isAcceptedEvaluationReportForAttestation = (
       report.metrics.knownRfcP95LatencyMs < policy.maxKnownRfcP95LatencyMilliseconds &&
       report.metrics.topicP95LatencyMs < policy.maxTopicP95LatencyMilliseconds &&
       report.metrics.unsafeCitationAcceptances === 0 &&
+      report.observations.every((observation) => retrievalTraceWithinPolicy(observation, policy)) &&
       report.observations.every(
         (observation) =>
           observation.policyVersion === policy.policyVersion &&
@@ -1350,7 +1633,7 @@ export const isAcceptedEvaluationReportForAttestation = (
           observationHasSafeOutcome(observation) &&
           !observation.unsafeCitationAccepted &&
           observation.errorKind === null &&
-          (isDeterministicFabricatedObservation(observation)
+          (isProviderlessObservation(observation)
             ? observation.resolvedModels.length === 0
             : observation.resolvedModels.length > 0 &&
               observation.resolvedModels.every((model) => model === policy.pinnedModel) &&
@@ -1375,16 +1658,61 @@ export const isAcceptedEvaluationReportForAttestation = (
 export const isAcceptedEvaluationReport = (input: unknown): boolean =>
   isAcceptedEvaluationReportForAttestation(input, evaluationReleaseAttestation);
 
+const retrievalTraceWithinPolicy = (
+  observation: EvaluationObservation,
+  policy: EvaluationPolicy,
+): boolean => {
+  const trace = observation.retrieval;
+  if (trace === null) return false;
+  const countedRequests = trace.datatrackerRequestCount + trace.sourceRequestCount;
+  const tracedAttempts = trace.requests.reduce((total, request) => total + request.attempts, 0);
+  const datatrackerAttemptsBounded = trace.requests
+    .filter(({ kind }) => kind !== "source")
+    .every(({ attempts }) => attempts <= policy.retrievalLimits.datatrackerMaxAttempts);
+  if (
+    trace.requestCount !== countedRequests ||
+    trace.requestCount !== tracedAttempts ||
+    !datatrackerAttemptsBounded
+  ) {
+    return false;
+  }
+
+  if (observation.mode === "topic") {
+    return (
+      trace.datatrackerRequestCount <= policy.retrievalLimits.maxTopicRequests &&
+      trace.upstreamRows !== undefined &&
+      trace.upstreamRows <= policy.retrievalLimits.maxUpstreamTopicRows &&
+      trace.uniqueCandidates !== undefined &&
+      trace.mergeLimit === policy.candidateLimits.maxMergedDocumentCandidates &&
+      trace.semanticCandidates !== undefined &&
+      trace.semanticCandidates <= policy.candidateLimits.maxMergedDocumentCandidates &&
+      trace.selectedSources !== undefined &&
+      trace.selectedSources <= policy.candidateLimits.maxSourceRetrievalCandidates
+    );
+  }
+
+  return (
+    (trace.contextLimit === undefined ||
+      trace.contextLimit === policy.traversalLimits.maxContexts) &&
+    (trace.depthLimit === undefined || trace.depthLimit <= policy.traversalLimits.maxDepth) &&
+    (trace.relationshipLimit === undefined ||
+      trace.relationshipLimit === policy.traversalLimits.maxRelationshipsPerRfc) &&
+    (trace.traversalContexts === undefined ||
+      trace.traversalContexts <= policy.traversalLimits.maxContexts) &&
+    trace.sourceRequestCount <= policy.candidateLimits.maxSourceRetrievalCandidates
+  );
+};
+
 /**
- * Evaluate expected outcomes, precision, citation safety, latency, completeness,
- * and model pinning.
+ * Evaluate expected outcomes, precision, citation safety, retrieval bounds,
+ * latency, completeness, and model pinning.
  *
  * p95 gates are strict: a sample at the configured limit does not pass.
  *
  * @param metrics Aggregate evaluation metrics.
  * @param observations Sanitized observations used to check the model pin.
  * @param corpusComplete Whether every committed case produced an observation.
- * @param options Optional calibrated gate overrides.
+ * @param options Optional provisional gate overrides.
  * @returns Individual gate results and a final release decision.
  */
 export const evaluateEvaluationGate = (
@@ -1401,6 +1729,9 @@ export const evaluateEvaluationGate = (
     metrics.supportedClaims > 0 &&
     metrics.supportedClaimPrecision >= policy.minimumSupportedClaimPrecision;
   const citationSafetyPassed = metrics.unsafeCitationAcceptances === 0;
+  const retrievalBoundsPassed =
+    observations.length > 0 &&
+    observations.every((observation) => retrievalTraceWithinPolicy(observation, policy));
   const latencyPassed =
     metrics.knownRfcResearchCases > 0 &&
     metrics.topicResearchCases > 0 &&
@@ -1411,7 +1742,7 @@ export const evaluateEvaluationGate = (
     observations.every(
       (observation) =>
         observation.requestedModel === policy.requestedModel &&
-        (isDeterministicFabricatedObservation(observation)
+        (isProviderlessObservation(observation)
           ? observation.resolvedModels.length === 0
           : observation.resolvedModels.length > 0 &&
             observation.resolvedModels.every((model) => model === policy.pinnedModel) &&
@@ -1431,6 +1762,9 @@ export const evaluateEvaluationGate = (
     );
   }
   if (!citationSafetyPassed) failures.push("a fabricated or contradicted citation was accepted");
+  if (!retrievalBoundsPassed) {
+    failures.push("a retrieval trace exceeded the precision-v2 hard limits");
+  }
   if (!latencyPassed) failures.push("warm-cache research p95 latency exceeded a configured gate");
   if (!modelPinPassed) failures.push(`resolved model is not pinned to ${policy.pinnedModel}`);
 
@@ -1441,6 +1775,7 @@ export const evaluateEvaluationGate = (
       positiveControlPassed &&
       precisionPassed &&
       citationSafetyPassed &&
+      retrievalBoundsPassed &&
       latencyPassed &&
       modelPinPassed,
     corpusComplete,
@@ -1448,6 +1783,7 @@ export const evaluateEvaluationGate = (
     positiveControlPassed,
     precisionPassed,
     citationSafetyPassed,
+    retrievalBoundsPassed,
     latencyPassed,
     modelPinPassed,
     precisionThreshold: policy.minimumSupportedClaimPrecision,
@@ -1576,6 +1912,7 @@ export const makeEvaluationReport = (
     expiresAt: options?.expiresAt ?? "unattested",
     corpusDigest: options?.corpusDigest ?? sha256(decodedCorpus),
     policyDigest: sha256(policy),
+    policy,
     authoritativeSourceHashes:
       options?.authoritativeSourceHashes ?? sourceHashManifest(decodedCorpus, decodedObservations),
     corpusVersion: decodedCorpus.corpusVersion,

@@ -59,6 +59,35 @@ const generatedObservation = (
       verificationMs: evaluationCase.kind === "citation" ? 7 : null,
       totalMs: totalLatencyMs,
     },
+    retrieval: {
+      schemaVersion: 2,
+      requestCount: 1,
+      datatrackerRequestCount: 1,
+      sourceRequestCount: 0,
+      metadataMs: 1,
+      sourceMs: 0,
+      sourceCacheOutcome: "not_requested",
+      ...(evaluationCase.mode === "topic"
+        ? {
+            upstreamRows: 1,
+            uniqueCandidates: 1,
+            mergeLimit: 32,
+            semanticCandidates: 1,
+            selectedSources: 0,
+            topicTruncated: false,
+          }
+        : {}),
+      requests: [
+        {
+          kind: "metadata",
+          url: "https://datatracker.ietf.org/api/v1/doc/document/rfc9110/",
+          attempts: 1,
+          status: 200,
+          statuses: [200],
+          durationMs: 1,
+        },
+      ],
+    },
     totalLatencyMs,
     probabilities:
       evaluationCase.kind === "research" && outcome === "answered"

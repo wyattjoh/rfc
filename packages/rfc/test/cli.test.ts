@@ -125,6 +125,7 @@ const writeUnattestedCalibrationReport = async (path: string): Promise<void> => 
         verificationMs: evaluationCase.kind === "citation" ? 1 : null,
         totalMs: 1,
       },
+      retrieval: null,
       totalLatencyMs: 1,
       probabilities: (expectedOutcome === "answered"
         ? {
@@ -156,7 +157,7 @@ const writeUnattestedCalibrationReport = async (path: string): Promise<void> => 
     `${JSON.stringify(
       makeEvaluationReport(timedCorpus, timedObservations, {
         origin: "live",
-        releaseBuildId: "rfc-evidence-precision-v4",
+        releaseBuildId: "rfc-evidence-precision-v2",
         corpusDigest: "fixture-corpus-digest",
         createdAt: "2026-01-01T00:00:00.000Z",
         expiresAt: "2026-02-01T00:00:00.000Z",

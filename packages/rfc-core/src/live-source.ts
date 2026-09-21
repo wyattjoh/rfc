@@ -36,8 +36,15 @@ export const liveRfcSourceCacheVersion = 2 as const;
  */
 export const liveRfcSourceCacheIdentity = "rfc-source-v2" as const;
 
-const rfcSourceDeadlineMilliseconds = 10_000;
-const rfcSourceMaximumBytes = 8 * 1024 * 1024;
+/**
+ * Maximum elapsed time for one canonical RFC Editor source operation.
+ */
+export const rfcSourceDeadlineMilliseconds = 10_000;
+
+/**
+ * Maximum bytes accepted from one canonical RFC Editor source response.
+ */
+export const rfcSourceMaximumBytes = 8 * 1024 * 1024;
 
 /**
  * Maximum on-disk size of one serialized source-cache entry.

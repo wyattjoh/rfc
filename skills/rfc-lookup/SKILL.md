@@ -80,8 +80,10 @@ cat <<'JSON' | rfc research
 JSON
 ```
 
-The short form uses repeatable `--search-term` flags with `--question`. Do not
-generate hidden terms, rewrite phrases, or infer a broad query from the question.
+The short form uses repeatable `--search-term` flags with `--question`. Preserve
+the caller's order. Do not generate hidden terms, rewrite phrases, infer a broad
+query from the question, or run a catalog preflight: each supplied term appears
+in Datatracker query URLs and can be retained in upstream access logs.
 
 The result is a version-two `evidence_bundle` containing `status`, exact
 `evidence`, optional requested/current `contexts`, and bounded `diagnostics`.

@@ -52,6 +52,32 @@ export const datatrackerSuccessorLimit = 64;
 export const datatrackerTopicResultLimit = 20;
 
 /**
+ * Maximum number of caller-supplied terms in one topic request.
+ */
+export const datatrackerTopicSearchTermLimit = 4;
+
+/**
+ * Maximum length of one caller-supplied topic term.
+ */
+export const datatrackerTopicSearchTermMaximumCharacters = 200;
+
+/**
+ * Maximum Datatracker requests issued by one topic discovery.
+ */
+export const datatrackerTopicRequestLimit = datatrackerTopicSearchTermLimit * 2;
+
+/**
+ * Maximum simultaneous Datatracker requests issued by topic discovery.
+ */
+export const datatrackerTopicConcurrencyLimit = 4;
+
+/**
+ * Maximum upstream rows admitted across one topic discovery.
+ */
+export const datatrackerTopicUpstreamRowLimit =
+  datatrackerTopicRequestLimit * datatrackerTopicResultLimit;
+
+/**
  * Maximum number of merged document candidates returned by live discovery.
  */
 export const datatrackerDocumentCandidateLimit = 32;
@@ -1064,7 +1090,7 @@ const discoverTopic = Effect.fnUntraced(function* (
         }),
         { concurrency: 2 },
       ),
-    { concurrency: 1 },
+    { concurrency: datatrackerTopicConcurrencyLimit / 2 },
   );
   const streams = termStreams.flat();
 
