@@ -1425,8 +1425,11 @@ export const observationFromCitationResult = (
     observedOutcome: result.verdict,
     allowedOutcomes: evaluationCase.allowedOutcomes,
     acceptedByPolicy,
-    unsafeCitationAccepted:
-      acceptedByPolicy && (expectedOutcome === "fabricated" || expectedOutcome === "contradicted"),
+    // Accepting means the engine returned `verified`. Any committed
+    // expectation other than `verified` therefore makes the acceptance unsafe,
+    // including `unsupported`: a claim its own quotation does not support is
+    // the outcome this metric exists to catch.
+    unsafeCitationAccepted: acceptedByPolicy && expectedOutcome !== "verified",
     sourceProvenance: [
       {
         identifier: result.provenance.identifier,
@@ -1557,10 +1560,7 @@ export const calculateEvaluationMetrics = (
     researchAnswerRate: rateFor(research, "answered"),
     supportedClaimCoverage: coverage,
     unsafeCitationAcceptances: citations.filter(
-      (observation) =>
-        observation.acceptedByPolicy &&
-        (observation.expectedOutcome === "fabricated" ||
-          observation.expectedOutcome === "contradicted"),
+      (observation) => observation.acceptedByPolicy && observation.expectedOutcome !== "verified",
     ).length,
     statusRates: {
       answered: rateFor(research, "answered"),
@@ -2067,7 +2067,9 @@ export const evaluateEvaluationGate = (
   metrics: EvaluationMetrics,
   observations: ReadonlyArray<EvaluationObservation>,
   retrievalObservations: ReadonlyArray<EvaluationRetrievalObservation>,
-  corpusComplete: boolean | undefined = true,
+  // Fails closed: an omitted completeness result must not assert that every
+  // committed case produced an observation.
+  corpusComplete: boolean | undefined = false,
   options: EvaluationReportOptions | undefined = undefined,
 ): EvaluationGate => {
   const policy = resolveReportOptions(options);
@@ -2115,7 +2117,8 @@ export const evaluateEvaluationGate = (
       `supported-claim precision ${metrics.supportedClaimPrecision.toFixed(4)} is below ${policy.minimumSupportedClaimPrecision.toFixed(4)}`,
     );
   }
-  if (!citationSafetyPassed) failures.push("a fabricated or contradicted citation was accepted");
+  if (!citationSafetyPassed)
+    failures.push("a citation was accepted against its committed expectation");
   if (!retrievalCasesPassed) {
     failures.push("one or more deterministic retrieval cases did not pass");
   }

@@ -348,7 +348,9 @@ const corpusRetrievalObservations = (): ReadonlyArray<EvaluationRetrievalObserva
 const evaluateEvaluationGate = (
   metrics: Parameters<typeof evaluateGateWithRetrieval>[0],
   observations: ReadonlyArray<EvaluationObservation>,
-) => evaluateGateWithRetrieval(metrics, observations, corpusRetrievalObservations());
+  // These helpers build observations for the whole committed corpus, so
+  // completeness is asserted here rather than left to the parameter default.
+) => evaluateGateWithRetrieval(metrics, observations, corpusRetrievalObservations(), true);
 
 const liveEvaluationCorpus = {
   ...evaluationCorpus,
@@ -991,7 +993,7 @@ describe("precision evaluation", () => {
     expect(metrics.verdictRates.fabricated).toBeGreaterThan(0);
   });
 
-  test("accepts exactly the 98 percent precision boundary", () => {
+  test("accepts the 98 percent precision boundary but still fails on the acceptance", () => {
     const supported = evaluationCorpus.cases.find(
       (evaluationCase) => evaluationCase.id === "duplicate-quotation",
     );
@@ -1018,6 +1020,12 @@ describe("precision evaluation", () => {
 
     expect(metrics.supportedClaimPrecision).toBe(0.98);
     expect(gate.precisionPassed).toBe(true);
+    // Precision alone is sample-size dependent, so a single accepted
+    // `unsupported-claim` can hide behind 49 correct acceptances. Citation
+    // safety is the metric that must still catch it.
+    expect(metrics.unsafeCitationAcceptances).toBe(1);
+    expect(gate.citationSafetyPassed).toBe(false);
+    expect(gate.passed).toBe(false);
   });
 
   test("rejects unsafe citation acceptance and precision below the gate", () => {
@@ -1037,7 +1045,7 @@ describe("precision evaluation", () => {
     expect(metrics.unsafeCitationAcceptances).toBe(1);
     expect(gate.citationSafetyPassed).toBe(false);
     expect(gate.passed).toBe(false);
-    expect(gate.failures).toContain("a fabricated or contradicted citation was accepted");
+    expect(gate.failures).toContain("a citation was accepted against its committed expectation");
   });
 
   test("rejects retrieval traces that exceed precision-v2 hard limits", () => {
