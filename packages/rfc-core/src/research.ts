@@ -1071,7 +1071,12 @@ const linesOf = (text: string): ReadonlyArray<LineRecord> => {
 };
 
 const sectionHeading = (line: string): string | undefined => {
-  const normalized = line.replace(/\f/g, "").trim();
+  const withoutPageBreak = line.replace(/\f/g, "");
+  // RFC plain text starts headings at column 0 and indents everything else, so
+  // the indentation is what separates a real heading from a table-of-contents
+  // entry or from body prose whose first word happens to be a bare capital.
+  if (/^\s/.test(withoutPageBreak)) return undefined;
+  const normalized = withoutPageBreak.trim();
   if (normalized.length === 0 || normalized.length > 240) return undefined;
   const match =
     /^(?:(?:\d+(?:\.\d+)*\.?)|(?:[A-Z](?:\.\d+)*\.?)|(?:Appendix\s+[A-Z](?:\.\d+)*\.?))\s+(.+?)\s*$/.exec(
@@ -2532,11 +2537,19 @@ const combinedCurrencyStatus = (
     (status) => status === "answered" || status === "partial",
   );
   if (statuses.includes("needs_review") && !hasAcceptedContext) return "needs_review";
-  const incomplete = !report.complete || unavailable.length > 0;
-  if (incomplete) return "partial";
-  if (statuses.every((status) => status === "answered")) return "answered";
+  // No context at all cannot support any outcome. Checked before the aggregate
+  // predicates below, which are vacuously true over an empty set.
+  if (statuses.length === 0) return "needs_review";
+  // An incomplete traversal cannot upgrade a result. Contexts that all found
+  // nothing stay unsupported, and an incomplete traversal with nothing accepted
+  // is a review case rather than a bounded partial answer: knowing a successor
+  // exists without being able to identify it is exactly when reporting support
+  // would overstate the evidence.
   if (statuses.every((status) => status === "unsupported")) return "unsupported";
-  if (statuses.some((status) => status === "answered" || status === "partial")) return "partial";
+  const incomplete = !report.complete || unavailable.length > 0;
+  if (incomplete) return hasAcceptedContext ? "partial" : "needs_review";
+  if (statuses.every((status) => status === "answered")) return "answered";
+  if (hasAcceptedContext) return "partial";
   return "needs_review";
 };
 
@@ -2916,6 +2929,19 @@ export const researchTopic = Effect.fnUntraced(function* (
     selection.diagnostics,
     policy,
   );
+  // `statusFromRelations` derives support from the accepted answers, while
+  // `evidenceFromRelations` drops any answer it cannot resolve to an exact
+  // source range. Losing one silently would report support with no quotation
+  // behind it, so the topic path fails closed exactly as the known-RFC path does.
+  const acceptedAnswerCount = relation.answers.filter((answer) =>
+    acceptedRelation(answer.relation, answer.probabilities, answer.confidence, policy),
+  ).length;
+  if (evidence.length !== acceptedAnswerCount) {
+    return yield* new DecisionModelError({
+      stage: "relation",
+      reason: "An accepted passage could not be resolved to its exact source range",
+    });
+  }
   const reviewCandidates =
     evidence.length === 0
       ? reviewCandidatesFromSelection(

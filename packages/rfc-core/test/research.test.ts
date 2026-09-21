@@ -2101,6 +2101,40 @@ describe("known RFC research", () => {
     }
   });
 
+  test("treats only column-zero lines as section headings", () => {
+    // RFC plain text repeats every heading in an indented table of contents,
+    // and indents body prose that can begin with a bare capital. Promoting
+    // either to a heading starts a spurious block and mislabels provenance.
+    const text = [
+      "Table of Contents",
+      "",
+      "   1.  Introduction",
+      "   2.  Conformance",
+      "",
+      "1.  Introduction",
+      "",
+      "   A proxy MUST send an appropriate Via header field, as described",
+      "   below, to every forwarded request.",
+      "",
+      "2.  Conformance",
+      "",
+      "   The client MUST send a Host header field.",
+      "",
+      "B.3.1.  Key Exchange Messages",
+      "",
+      "   An appendix subsection heading still counts.",
+      "",
+    ].join("\n");
+
+    const sections = parseSourceBlocks(text).map((block) => block.section);
+    expect(sections).toEqual([
+      null,
+      "1.  Introduction",
+      "2.  Conformance",
+      "B.3.1.  Key Exchange Messages",
+    ]);
+  });
+
   test("ranks distinctive protocol anchors above repeated generic request terms", () => {
     const genericText = "The server processes a request. ".repeat(40);
     const statusText =
