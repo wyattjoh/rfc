@@ -3054,6 +3054,72 @@ describe("createRfcClient", () => {
     await rm(cacheDirectory, { recursive: true, force: true });
   });
 
+  test("close waits for an in-flight operation instead of disposing under it", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    let release: (() => void) | undefined;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let markStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const base = makeDecisionModel();
+    const datatracker = makeDatatrackerHttpClient((url) =>
+      url.pathname.endsWith("/document/rfc9110/")
+        ? Response.json(datatrackerDocument)
+        : Response.json({
+            meta: { limit: 64, offset: 0, total_count: 0, next: null, previous: null },
+            objects: [],
+          }),
+    );
+    const client = await createRfcClient({
+      cacheDirectory,
+      datatrackerHttpClient: datatracker.client,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      rfcSourceFetcher: async () => ({
+        sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+        text: sourceText,
+      }),
+      decisionModel: {
+        [DecisionModel.TypeId]: DecisionModel.TypeId,
+        decide: (...args: Parameters<typeof base.decide>) =>
+          Effect.gen(function* () {
+            markStarted?.();
+            yield* Effect.promise(() => released);
+            return yield* base.decide(...args);
+          }),
+      } as unknown as DecisionModel.DecisionModel,
+    });
+    clients.push(client);
+
+    const pending = client.research({
+      schemaVersion: 2,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+      searchTerms: undefined,
+    });
+    await started;
+
+    let disposed = false;
+    const closing = client.close().then(() => {
+      disposed = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(disposed).toBe(false);
+
+    release?.();
+    // The operation returns its own result rather than failing against a
+    // runtime that was torn down beneath it.
+    await expect(pending).resolves.toMatchObject({ kind: "evidence_bundle" });
+    await closing;
+    expect(disposed).toBe(true);
+
+    await rm(cacheDirectory, { recursive: true, force: true });
+  });
+
   test("supports async disposal as an explicit lifecycle boundary", async () => {
     const cacheDirectory = await makeCacheDirectory();
     const client = await createRfcClient({

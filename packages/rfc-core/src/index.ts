@@ -1321,12 +1321,18 @@ export const createRfcClient = async (
     }
   };
 
+  let closing: Promise<void> | undefined;
+
   const close = async (): Promise<void> => {
-    if (closed) {
-      return;
-    }
     closed = true;
-    await runtime.dispose();
+    // Disposing the runtime out from under a running operation tears away the
+    // provider layer it is still using, so the caller's pending promise fails
+    // with a runtime error instead of returning its own result. Every model
+    // operation carries an overall budget, so this wait is bounded, and the
+    // tail never rejects. A second close awaits the same completion rather
+    // than returning while disposal is still in flight.
+    closing ??= modelOperationTail.then(() => runtime.dispose());
+    return closing;
   };
 
   const operationBudget = Math.min(
