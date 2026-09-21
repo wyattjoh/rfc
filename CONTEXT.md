@@ -10,11 +10,11 @@ _Avoid_: Compound question, broad prompt
 
 **RFC discovery**:
 The bounded identification of published RFCs relevant to an atomic question from current authoritative metadata.
-_Avoid_: Catalog, index, registry
+_Avoid_: Index, registry
 
 **RFC source cache**:
 The local collection of exact source text retained only for RFCs that have been individually requested.
-_Avoid_: Catalog, corpus mirror
+_Avoid_: Corpus mirror
 
 **RFC currency**:
 The bounded, deterministic traversal from a requested RFC through update and obsoletion relationships to applicable current RFC contexts.

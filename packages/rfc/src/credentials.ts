@@ -13,7 +13,7 @@ export const credentialStoreName = "typesafe-api-key" as const;
 /**
  * The version shared by authentication command responses.
  */
-export const authSchemaVersion = 1 as const;
+export const authSchemaVersion = 2 as const;
 
 /**
  * The operation being performed against the platform credential manager.

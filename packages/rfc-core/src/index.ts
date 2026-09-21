@@ -33,7 +33,6 @@ import {
   makeArtifactActivation,
   type AutomaticAnswerActivation,
 } from "./activation";
-import { catalogStatusFromValue, makeCatalog } from "./catalog";
 import {
   RfcDiscovery,
   RfcDiscoveryError,
@@ -64,7 +63,7 @@ import {
   researchKnownRfc,
   researchTopic,
 } from "./research";
-import type { EvidenceBundle, InternalResearchDiagnostics } from "./research";
+import type { EvidenceBundle } from "./research";
 import {
   RfcSourceCacheError,
   RfcSourceFetchError,
@@ -711,7 +710,7 @@ const sourceCacheRemoveProgram = (options: RfcClientOptions, rfc: string) =>
   });
 
 type LoadedLiveSource = {
-  readonly document: import("./catalog").CatalogDocument;
+  readonly document: RfcMetadata;
   /**
    * Successful load, or undefined when the attempt failed.
    */
@@ -768,18 +767,8 @@ const failedSourceStatus = (error: unknown): number | undefined =>
     ? error.status
     : undefined;
 
-/**
- * Adapt request-local discovery metadata to the research input.
- *
- * `researchKnownRfc` still accepts the version-one catalog value, so this is the
- * single place that bridges the two. Removing the value itself belongs to the
- * catalog contraction, not to live discovery; nothing here is persisted.
- */
-const requestLocalMetadata = (documents: ReadonlyArray<RfcMetadata>, now: number) =>
-  makeCatalog(documents, now);
-
 const makeLiveSourceLoader = (sourceDirectory: string, loads: Array<LoadedLiveSource>) =>
-  Effect.fnUntraced(function* (document: import("./catalog").CatalogDocument) {
+  Effect.fnUntraced(function* (document: RfcMetadata) {
     const startedAt = yield* Clock.currentTimeMillis;
     const outcome = yield* Effect.result(loadLiveRfcSource(document, sourceDirectory));
     const finishedAt = yield* Clock.currentTimeMillis;
@@ -805,37 +794,6 @@ const makeLiveSourceLoader = (sourceDirectory: string, loads: Array<LoadedLiveSo
     return outcome.success.source;
   });
 
-const mapInternalResearchDiagnostics = (
-  diagnostics: InternalResearchDiagnostics,
-  discoveredDocuments: number,
-) => {
-  const {
-    catalog: _catalog,
-    timings,
-    candidates,
-    contexts: contextDiagnostics,
-    ...rest
-  } = diagnostics;
-  const { catalogMs, ...otherTimings } = timings;
-  const { catalogDocuments: _catalogDocuments, ...otherCandidates } = candidates;
-  const contexts = contextDiagnostics?.map((context) => {
-    const { catalogMs: contextCatalogMs, ...contextTimings } = context.timings;
-    const { catalogDocuments: _contextCatalogDocuments, ...contextCandidates } = context.candidates;
-    return {
-      ...context,
-      timings: { ...contextTimings, metadataMs: contextCatalogMs },
-      candidates: { ...contextCandidates, discoveredDocuments: 1 },
-    };
-  });
-
-  return {
-    ...rest,
-    timings: { ...otherTimings, metadataMs: catalogMs },
-    candidates: { ...otherCandidates, discoveredDocuments },
-    contexts,
-  };
-};
-
 const liveKnownResearchProgram = Effect.fnUntraced(function* (
   options: RfcClientOptions,
   request: LiveKnownRfcResearchRequest,
@@ -846,26 +804,18 @@ const liveKnownResearchProgram = Effect.fnUntraced(function* (
   const sourceDirectory = yield* resolveSourceDirectory(options);
   const sourceLoads: Array<LoadedLiveSource> = [];
   const sourceLoader = makeLiveSourceLoader(sourceDirectory, sourceLoads);
-  const now = yield* Clock.currentTimeMillis;
-  const requestLocalDocuments = requestLocalMetadata(lookup.documents, now);
   const result = yield* researchKnownRfc(request.question, request.rfc, {
-    catalog: requestLocalDocuments,
-    catalogStatus: catalogStatusFromValue(
-      "request-local://rfc-discovery",
-      requestLocalDocuments,
-      now,
-    ),
-    sourceDirectory,
+    documents: lookup.documents,
     sourceLoader,
-    policyPreset: options.policyPreset ?? "precision-v1",
-    // Public live discovery is not covered by the precision-v1 release attestation.
+    policyPreset: options.policyPreset ?? "precision-v2",
+    // Public live discovery is not covered by a reviewed precision-v2 release attestation.
     // The private calibration capability can still measure automatic-answer behavior.
     automaticAnswerActivation:
       options.automaticAnswerActivation === calibrationAnswerActivation
         ? calibrationAnswerActivation
         : undefined,
     modelAlias: options.modelAlias ?? precisionPolicy.pinnedModel,
-    catalogMs: lookup.metadataMs,
+    metadataMs: lookup.metadataMs,
     startedAt,
   });
   const sourceRequestCount = sourceLoads.reduce((count, load) => count + load.attempts, 0);
@@ -891,10 +841,6 @@ const liveKnownResearchProgram = Effect.fnUntraced(function* (
     relationshipLimit: datatrackerSuccessorLimit,
     requests: [...lookup.requests, ...sourceRequestTraces(sourceLoads)],
   };
-  const publicDiagnostics = mapInternalResearchDiagnostics(
-    result.diagnostics,
-    lookup.documents.length,
-  );
   const currency =
     lookup.traversalComplete || result.currency === undefined
       ? result.currency
@@ -910,7 +856,7 @@ const liveKnownResearchProgram = Effect.fnUntraced(function* (
     status: lookup.traversalComplete ? result.status : "needs_review",
     currency,
     diagnostics: {
-      ...publicDiagnostics,
+      ...result.diagnostics,
       schemaVersion: 2,
       currency,
       retrieval,
@@ -926,7 +872,7 @@ const liveTopicResearchProgram = Effect.fnUntraced(function* (
   const discovery = yield* RfcDiscovery;
   const discovered = yield* discovery.discoverTopic(request.searchTerms);
   if (discovered.documents.length === 0) {
-    const policyPreset = options.policyPreset ?? "precision-v1";
+    const policyPreset = options.policyPreset ?? "precision-v2";
     const policy = researchPolicyPresets[policyPreset];
     if (policy === undefined) {
       return yield* new ResearchPolicyError({ policyPreset });
@@ -998,25 +944,16 @@ const liveTopicResearchProgram = Effect.fnUntraced(function* (
   const sourceDirectory = yield* resolveSourceDirectory(options);
   const sourceLoads: Array<LoadedLiveSource> = [];
   const sourceLoader = makeLiveSourceLoader(sourceDirectory, sourceLoads);
-  const now = yield* Clock.currentTimeMillis;
-  const requestLocalDocuments = requestLocalMetadata(discovered.documents, now);
   const result = yield* researchTopic(request.question, {
-    catalog: requestLocalDocuments,
-    catalogStatus: catalogStatusFromValue(
-      "request-local://rfc-discovery",
-      requestLocalDocuments,
-      now,
-    ),
-    documentCandidates: discovered.documents,
-    sourceDirectory,
+    documents: discovered.documents,
     sourceLoader,
-    policyPreset: options.policyPreset ?? "precision-v1",
+    policyPreset: options.policyPreset ?? "precision-v2",
     automaticAnswerActivation:
       options.automaticAnswerActivation === calibrationAnswerActivation
         ? calibrationAnswerActivation
         : undefined,
     modelAlias: options.modelAlias ?? precisionPolicy.pinnedModel,
-    catalogMs: discovered.metadataMs,
+    metadataMs: discovered.metadataMs,
     startedAt,
   });
   const sourceRequestCount = sourceLoads.reduce((count, load) => count + load.attempts, 0);
@@ -1040,10 +977,6 @@ const liveTopicResearchProgram = Effect.fnUntraced(function* (
     topicTruncated: discovered.truncated,
     requests: [...discovered.requests, ...sourceRequestTraces(sourceLoads)],
   };
-  const publicDiagnostics = mapInternalResearchDiagnostics(
-    result.diagnostics,
-    discovered.documents.length,
-  );
 
   return Schema.decodeUnknownSync(EvidenceBundleSchema)({
     ...result,
@@ -1053,7 +986,7 @@ const liveTopicResearchProgram = Effect.fnUntraced(function* (
     contexts: result.contexts,
     currency: result.currency,
     diagnostics: {
-      ...publicDiagnostics,
+      ...result.diagnostics,
       schemaVersion: 2,
       currency: result.currency,
       retrieval,
@@ -1076,7 +1009,6 @@ const citationProgram = (options: RfcClientOptions, request: CitationVerificatio
     const loadSource = makeLiveSourceLoader(sourceDirectory, sourceLoads);
     return yield* verifyCitation(request, {
       document: lookup.document,
-      sourceDirectory,
       sourceLoader: (document) =>
         Effect.gen(function* () {
           const source = yield* loadSource(document);

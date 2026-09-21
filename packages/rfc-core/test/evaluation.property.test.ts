@@ -47,10 +47,10 @@ const generatedObservation = (
     requestedModel: "jev-latest",
     resolvedModel: "jev-1.13.0",
     resolvedModels: ["jev-1.13.0"],
-    policyVersion: "precision-v1",
+    policyVersion: "precision-v2",
     usage: { inputTokens: 10 + seed, outputTokens: 4 + seed },
     timings: {
-      catalogMs: 1,
+      metadataMs: 1,
       documentMs: evaluationCase.mode === "topic" ? 2 : null,
       sourceMs: 3,
       lexicalMs: evaluationCase.mode === "topic" ? 4 : null,

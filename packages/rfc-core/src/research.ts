@@ -1,4 +1,3 @@
-import MiniSearch from "minisearch";
 import {
   Cause,
   Clock,
@@ -17,23 +16,10 @@ import * as Decision from "effect/unstable/ai/Decision";
 import * as DecisionModel from "effect/unstable/ai/DecisionModel";
 import { LiveRetrievalTraceSchema, RfcDocumentSchema } from "./discovery";
 import { LiveRfcSource, RfcSourceRevalidationError } from "./live-source";
+import { RfcMetadataSchema, type RfcMetadata } from "./metadata";
 import { makeUtf8OffsetMap, moveToUtf8Boundary, utf8OffsetUnit } from "./offsets";
 import { isAutomaticAnswerActivation, type AutomaticAnswerActivation } from "./activation";
-import {
-  CatalogDocumentSchema,
-  CatalogStatusSchema,
-  type CatalogDocument,
-  type CatalogStatus,
-  type RfcCatalog,
-} from "./catalog";
-import {
-  RfcSourceCacheError,
-  RfcSourceFetchError,
-  RfcSourceServiceTag,
-  RfcSourceStore,
-  loadRfcSource,
-  type RfcSource,
-} from "./source";
+import { RfcSourceCacheError, RfcSourceFetchError, type RfcSource } from "./source";
 
 /**
  * Provider-observed model identifier shared with the research diagnostics layer.
@@ -108,7 +94,7 @@ export const RfcContextRoleSchema = Schema.Literals(["requested", "current"]);
 export type RfcContextRole = Schema.Schema.Type<typeof RfcContextRoleSchema>;
 
 /**
- * One directed catalog relationship followed while resolving RFC currency.
+ * One directed live relationship followed while resolving RFC currency.
  */
 export const RfcRelationshipStepSchema = Schema.Struct({
   from: Schema.NonEmptyString,
@@ -126,7 +112,7 @@ export type RfcRelationshipStep = Schema.Schema.Type<typeof RfcRelationshipStepS
  */
 const InternalRfcResearchContextSchema = Schema.Struct({
   role: RfcContextRoleSchema,
-  document: CatalogDocumentSchema,
+  document: RfcMetadataSchema,
   relationshipPath: Schema.Array(RfcRelationshipStepSchema),
   isCurrent: Schema.Boolean,
   state: Schema.Literals(["researched", "unavailable"]),
@@ -208,8 +194,7 @@ export type RfcCurrencyReport = Schema.Schema.Type<typeof RfcCurrencyReportSchem
  * Versioned policy values for known-RFC research.
  */
 export const knownRfcPolicy = {
-  policyVersion: "precision-v1",
-  maxDocumentCandidates: 8,
+  policyVersion: "precision-v2",
   maxAcceptedDocumentCandidates: 3,
   // Round-5 calibration showed relevant candidates at or above 0.35; retain
   // the bounded top-three shortlist and let passage/relation gates decide.
@@ -260,7 +245,7 @@ export type ResearchPolicy = Omit<typeof knownRfcPolicy, "automaticAnswerActivat
  * Named policy presets available to the research pipeline.
  */
 export const researchPolicyPresets: Readonly<Record<string, ResearchPolicy>> = {
-  "precision-v1": knownRfcPolicy,
+  "precision-v2": knownRfcPolicy,
 };
 
 /**
@@ -345,7 +330,7 @@ const TokenUsageSchema = Schema.Struct({
 });
 
 const TimingSchema = Schema.Struct({
-  catalogMs: Schema.Number,
+  metadataMs: Schema.Number,
   sourceMs: Schema.Number,
   lexicalMs: Schema.Number,
   selectionMs: Schema.Number,
@@ -358,7 +343,7 @@ const CandidateCountsSchema = Schema.Struct({
   sourceBlocks: Schema.Natural,
   passageCandidates: Schema.Natural,
   selectedPassages: Schema.Natural,
-  catalogDocuments: Schema.Union([Schema.Natural, Schema.Undefined]),
+  discoveredDocuments: Schema.Union([Schema.Natural, Schema.Undefined]),
   documentCandidates: Schema.Union([Schema.Natural, Schema.Undefined]),
   acceptedDocuments: Schema.Union([Schema.Natural, Schema.Undefined]),
 });
@@ -413,7 +398,7 @@ const ContextDiagnosticsSchema = Schema.Struct({
  * Bounded diagnostics for one semantic research operation.
  */
 const InternalResearchDiagnosticsSchema = Schema.Struct({
-  schemaVersion: Schema.Literal(1),
+  schemaVersion: Schema.Literal(2),
   policyVersion: Schema.NonEmptyString,
   requestedModel: Schema.NonEmptyString,
   resolvedModel: Schema.NonEmptyString,
@@ -426,7 +411,6 @@ const InternalResearchDiagnosticsSchema = Schema.Struct({
     Schema.Array(ContextSourceDiagnosticSchema),
     Schema.Undefined,
   ]),
-  catalog: Schema.optionalKey(CatalogStatusSchema),
   retrieval: Schema.optionalKey(LiveRetrievalTraceSchema),
   currency: Schema.optionalKey(RfcCurrencyReportSchema),
   candidates: CandidateCountsSchema,
@@ -445,11 +429,11 @@ export type InternalResearchDiagnostics = Schema.Schema.Type<
 >;
 
 const InternalEvidenceBundleSchema = Schema.Struct({
-  schemaVersion: Schema.Literal(1),
+  schemaVersion: Schema.Literal(2),
   kind: Schema.Literal("evidence_bundle"),
   status: ResearchStatusSchema,
   question: Schema.NonEmptyString,
-  rfc: Schema.NullOr(CatalogDocumentSchema),
+  rfc: Schema.NullOr(RfcMetadataSchema),
   contexts: Schema.optionalKey(Schema.Array(InternalRfcResearchContextSchema)),
   currency: Schema.optionalKey(RfcCurrencyReportSchema),
   evidence: Schema.Array(EvidencePassageSchema),
@@ -493,7 +477,7 @@ const DiscoveryContextDiagnosticsSchema = Schema.Struct({
 });
 
 /**
- * Schema for catalog-free version-two research diagnostics.
+ * Schema for version-two research diagnostics backed by live discovery.
  */
 export const ResearchDiagnosticsSchema = Schema.Struct({
   schemaVersion: Schema.Literal(2),
@@ -553,7 +537,7 @@ export const EvidenceBundleSchema = Schema.Struct({
 export type EvidenceBundle = Schema.Schema.Type<typeof EvidenceBundleSchema>;
 
 /**
- * A typed failure when a requested RFC is not an exact published catalog entry.
+ * A typed failure when a requested RFC is not an exact published document.
  */
 export class RfcNotFoundError extends Schema.TaggedError<RfcNotFoundError>()("RfcNotFoundError", {
   rfc: Schema.String,
@@ -574,19 +558,11 @@ export class DecisionModelError extends Schema.TaggedError<DecisionModelError>()
 /**
  * Configuration needed by a semantic RFC research pipeline.
  */
-export interface KnownRfcResearchOptions {
+export interface ResearchPipelineOptions {
   /**
-   * The fresh catalog used to resolve the exact published RFC.
+   * Request-local RFC metadata returned by live discovery.
    */
-  readonly catalog: RfcCatalog;
-  /**
-   * Catalog status captured after freshness validation or refresh.
-   */
-  readonly catalogStatus: CatalogStatus;
-  /**
-   * Source cache directory.
-   */
-  readonly sourceDirectory: string;
+  readonly documents: ReadonlyArray<RfcMetadata>;
   /**
    * Named policy preset recorded in diagnostics.
    */
@@ -600,29 +576,23 @@ export interface KnownRfcResearchOptions {
    */
   readonly modelAlias: string;
   /**
-   * Time spent validating or refreshing the catalog.
+   * Time spent retrieving request-local RFC metadata.
    */
-  readonly catalogMs: number;
+  readonly metadataMs: number;
   /**
    * Start timestamp for the complete operation.
    */
   readonly startedAt: number;
   /**
-   * Optional request-local source loader used by schema-version-two research.
+   * Request-local source loader used by schema-version-two research.
    */
-  readonly sourceLoader?:
-    | ((
-        document: CatalogDocument,
-      ) => Effect.Effect<
-        RfcSource,
-        RfcSourceCacheError | RfcSourceFetchError | RfcSourceRevalidationError,
-        FileSystem.FileSystem | LiveRfcSource | Path.Path
-      >)
-    | undefined;
-  /**
-   * Optional preordered live-discovery candidates for topic research.
-   */
-  readonly documentCandidates?: ReadonlyArray<CatalogDocument> | undefined;
+  readonly sourceLoader: (
+    document: RfcMetadata,
+  ) => Effect.Effect<
+    RfcSource,
+    RfcSourceCacheError | RfcSourceFetchError | RfcSourceRevalidationError,
+    FileSystem.FileSystem | LiveRfcSource | Path.Path
+  >;
 }
 
 interface LineRecord {
@@ -675,13 +645,13 @@ type AtomicityResult = {
 };
 
 type DocumentCandidate = {
-  readonly document: CatalogDocument;
-  readonly lexicalScore: number;
+  readonly document: RfcMetadata;
+  readonly priority: number;
 };
 
 type DocumentSelectionResult = {
   readonly accepted: ReadonlyArray<{
-    readonly document: CatalogDocument;
+    readonly document: RfcMetadata;
     readonly probability: number;
   }>;
   readonly atomicity: AtomicityResult;
@@ -1067,8 +1037,23 @@ export const parseSourceBlocks = (
   return blocks;
 };
 
+const lexicalTerms = (value: string): ReadonlyArray<string> =>
+  [...value.toLowerCase().matchAll(/[a-z0-9]+/g)]
+    .map(([term]) => term)
+    .filter((term) => term.length > 1);
+
+const passageLexicalScore = (block: SourceBlock, terms: ReadonlyArray<string>): number => {
+  const text = block.text.toLowerCase();
+  const section = block.section?.toLowerCase() ?? "";
+  return terms.reduce((score, term) => {
+    const textMatches = text.split(term).length - 1;
+    const sectionMatches = section.split(term).length - 1;
+    return score + textMatches + sectionMatches * 1.5;
+  }, 0);
+};
+
 /**
- * Deterministically shortlist source blocks with MiniSearch before semantic judgment.
+ * Deterministically shortlist request-local source blocks before semantic judgment.
  *
  * @param blocks Parsed source blocks.
  * @param question Atomic research question.
@@ -1081,79 +1066,18 @@ export const shortlistPassageCandidates = (
   limit: number = knownRfcPolicy.maxPassageCandidates,
 ): ReadonlyArray<SourceBlock> => {
   if (blocks.length === 0 || question.trim().length === 0 || limit <= 0) return [];
-  const search = new MiniSearch<SourceBlock>({
-    fields: ["text", "section"],
-    storeFields: ["id", "section", "startOffset", "endOffset", "text"],
-    searchOptions: {
-      boost: { section: 1.5, text: 1 },
-      prefix: true,
-      fuzzy: 0.2,
-    },
-  });
-  search.addAll(blocks);
-  const byId = new Map(blocks.map((block) => [block.id, block]));
-  return search
-    .search(question)
+  const terms = lexicalTerms(question);
+  if (terms.length === 0) return [];
+
+  return blocks
+    .map((block) => ({ block, score: passageLexicalScore(block, terms) }))
+    .filter(({ score }) => score > 0)
     .sort(
-      (left, right) =>
-        right.score - left.score || Number(left.startOffset) - Number(right.startOffset),
+      (left, right) => right.score - left.score || left.block.startOffset - right.block.startOffset,
     )
     .slice(0, limit)
-    .flatMap((result) => {
-      const block = byId.get(String(result.id));
-      return block === undefined ? [] : [block];
-    });
+    .map(({ block }) => block);
 };
-
-const rankDocumentCandidates = (
-  documents: ReadonlyArray<CatalogDocument>,
-  question: string,
-  limit: number = knownRfcPolicy.maxDocumentCandidates,
-): ReadonlyArray<DocumentCandidate> => {
-  if (documents.length === 0 || question.trim().length === 0 || limit <= 0) return [];
-
-  const search = new MiniSearch<CatalogDocument>({
-    fields: ["identifier", "title", "abstract"],
-    storeFields: ["identifier", "title", "abstract"],
-    searchOptions: {
-      boost: { identifier: 3, title: 2, abstract: 1 },
-      combineWith: "OR",
-      prefix: true,
-      fuzzy: 0.2,
-    },
-  });
-  search.addAll(documents.map((document) => ({ ...document, id: document.identifier })));
-  const byIdentifier = new Map(documents.map((document) => [document.identifier, document]));
-
-  return search
-    .search(question)
-    .sort(
-      (left, right) =>
-        right.score - left.score ||
-        Number(byIdentifier.get(String(left.id))?.rfcNumber ?? 0) -
-          Number(byIdentifier.get(String(right.id))?.rfcNumber ?? 0),
-    )
-    .slice(0, limit)
-    .flatMap((result) => {
-      const document = byIdentifier.get(String(result.id));
-      return document === undefined ? [] : [{ document, lexicalScore: result.score }];
-    });
-};
-
-/**
- * Deterministically shortlist published catalog documents for topic discovery.
- *
- * @param documents Published RFC metadata from a fresh catalog.
- * @param question Atomic research question.
- * @param limit Maximum number of document candidates.
- * @returns Ranked, bounded published RFC documents.
- */
-export const shortlistDocumentCandidates = (
-  documents: ReadonlyArray<CatalogDocument>,
-  question: string,
-  limit: number = knownRfcPolicy.maxDocumentCandidates,
-): ReadonlyArray<CatalogDocument> =>
-  rankDocumentCandidates(documents, question, limit).map(({ document }) => document);
 
 const isConfidentAtomic = (atomicity: AtomicityResult, policy: ResearchPolicy): boolean =>
   atomicity.label === "atomic" &&
@@ -1316,14 +1240,14 @@ const documentSelectionStage = Effect.fnUntraced(function* (
     ? candidates
         .map((candidate, index) => ({
           document: candidate.document,
-          lexicalScore: candidate.lexicalScore,
+          priority: candidate.priority,
           probability: diagnostics[index]?.probability ?? 0,
         }))
         .filter(({ probability }) => probability >= policy.documentProbabilityThreshold)
         .sort(
           (left, right) =>
             right.probability - left.probability ||
-            right.lexicalScore - left.lexicalScore ||
+            left.priority - right.priority ||
             left.document.rfcNumber - right.document.rfcNumber,
         )
         .slice(0, policy.maxAcceptedDocumentCandidates)
@@ -1546,19 +1470,22 @@ const resolveRfcNumber = (hint: string): number | undefined => {
 };
 
 /**
- * Resolve a research hint only against exact published catalog metadata.
+ * Resolve a research hint against exact request-local RFC metadata.
  *
- * @param catalog Fresh published RFC catalog.
+ * @param documents Request-local published RFC metadata.
  * @param hint RFC identifier or number supplied by the caller.
- * @returns The exact catalog document.
- * @throws RfcNotFoundError when the hint is invalid or absent from the catalog.
+ * @returns The exact RFC metadata value.
+ * @throws RfcNotFoundError when the hint is invalid or absent from the request metadata.
  */
-export const resolveKnownRfc = (catalog: RfcCatalog, hint: string): CatalogDocument => {
+export const resolveKnownRfc = (
+  documents: ReadonlyArray<RfcMetadata>,
+  hint: string,
+): RfcMetadata => {
   const rfcNumber = resolveRfcNumber(hint);
   const document =
     rfcNumber === undefined
       ? undefined
-      : catalog.documents.find(
+      : documents.find(
           (candidate) =>
             candidate.rfcNumber === rfcNumber &&
             candidate.identifier.toUpperCase() === `RFC${rfcNumber}`,
@@ -1571,7 +1498,7 @@ export const resolveKnownRfc = (catalog: RfcCatalog, hint: string): CatalogDocum
 
 type PlannedRfcContext = {
   readonly role: RfcContextRole;
-  readonly document: CatalogDocument;
+  readonly document: RfcMetadata;
   readonly relationshipPath: ReadonlyArray<RfcRelationshipStep>;
   readonly isCurrent: boolean;
 };
@@ -1591,7 +1518,7 @@ export interface RfcCurrencyResolution {
 }
 
 type SuccessorEdge = {
-  readonly document: CatalogDocument;
+  readonly document: RfcMetadata;
   readonly relationship: RfcRelationshipStep["relationship"];
 };
 
@@ -1609,10 +1536,10 @@ const normalizedRfcIdentifier = (value: string): string | undefined => {
   return Number.isSafeInteger(number) && number > 0 ? `RFC${number}` : undefined;
 };
 
-const currencyIdentifier = (document: CatalogDocument): string =>
+const currencyIdentifier = (document: RfcMetadata): string =>
   normalizedRfcIdentifier(document.identifier) ?? document.identifier.toUpperCase();
 
-const compareRfcDocuments = (left: CatalogDocument, right: CatalogDocument): number =>
+const compareRfcDocuments = (left: RfcMetadata, right: RfcMetadata): number =>
   left.rfcNumber - right.rfcNumber || left.identifier.localeCompare(right.identifier);
 
 const uniqueCurrencyIssues = (
@@ -1623,9 +1550,12 @@ const uniqueIdentifiers = (identifiers: ReadonlyArray<string>): ReadonlyArray<st
   ...new Set(identifiers),
 ];
 
-const successorLookup = (catalog: RfcCatalog, document: CatalogDocument): SuccessorLookup => {
-  const documentsByIdentifier = new Map<string, CatalogDocument>();
-  for (const candidate of catalog.documents) {
+const successorLookup = (
+  documents: ReadonlyArray<RfcMetadata>,
+  document: RfcMetadata,
+): SuccessorLookup => {
+  const documentsByIdentifier = new Map<string, RfcMetadata>();
+  for (const candidate of documents) {
     documentsByIdentifier.set(currencyIdentifier(candidate), candidate);
     documentsByIdentifier.set(candidate.identifier.toUpperCase(), candidate);
   }
@@ -1660,7 +1590,7 @@ const successorLookup = (catalog: RfcCatalog, document: CatalogDocument): Succes
     addEdge(identifier, "obsoletes");
   }
 
-  for (const candidate of catalog.documents) {
+  for (const candidate of documents) {
     for (const identifier of candidate.updates) {
       const normalized = normalizedRfcIdentifier(identifier);
       if (normalized === undefined) continue;
@@ -1693,8 +1623,8 @@ const successorLookup = (catalog: RfcCatalog, document: CatalogDocument): Succes
 };
 
 const resolveRfcCurrencyFromDocument = (
-  catalog: RfcCatalog,
-  requested: CatalogDocument,
+  documents: ReadonlyArray<RfcMetadata>,
+  requested: RfcMetadata,
   maxDepth: number = knownRfcPolicy.maxCurrencyTraversalDepth,
   maxContexts: number = knownRfcPolicy.maxCurrencyContexts,
 ): RfcCurrencyResolution => {
@@ -1714,17 +1644,17 @@ const resolveRfcCurrencyFromDocument = (
   const contextLimit = Math.max(1, maxContexts);
   const depthLimit = Math.max(0, maxDepth);
 
-  const lookupSuccessors = (document: CatalogDocument): SuccessorLookup => {
+  const lookupSuccessors = (document: RfcMetadata): SuccessorLookup => {
     const identifier = currencyIdentifier(document);
     const cached = successorLookups.get(identifier);
     if (cached !== undefined) return cached;
-    const lookup = successorLookup(catalog, document);
+    const lookup = successorLookup(documents, document);
     successorLookups.set(identifier, lookup);
     return lookup;
   };
 
   const visit = (
-    document: CatalogDocument,
+    document: RfcMetadata,
     relationshipPath: ReadonlyArray<RfcRelationshipStep>,
     depth: number,
   ): void => {
@@ -1817,25 +1747,28 @@ const resolveRfcCurrencyFromDocument = (
 /**
  * Resolve the requested RFC and its bounded current RFC contexts.
  *
- * @param catalog Fresh published RFC metadata.
+ * @param documents Request-local published RFC metadata.
  * @param hint RFC identifier or number supplied by the caller.
  * @returns Requested and current contexts plus their relationship report.
- * @throws RfcNotFoundError when the hint is not an exact catalog entry.
+ * @throws RfcNotFoundError when the hint is absent from the request metadata.
  */
-export const resolveRfcCurrency = (catalog: RfcCatalog, hint: string): RfcCurrencyResolution =>
-  resolveRfcCurrencyFromDocument(catalog, resolveKnownRfc(catalog, hint));
+export const resolveRfcCurrency = (
+  documents: ReadonlyArray<RfcMetadata>,
+  hint: string,
+): RfcCurrencyResolution =>
+  resolveRfcCurrencyFromDocument(documents, resolveKnownRfc(documents, hint));
 
 /**
  * Resolve current contexts from an already resolved requested RFC.
  *
- * @param catalog Fresh published RFC metadata.
- * @param requested Requested RFC document from the same catalog.
+ * @param documents Request-local published RFC metadata.
+ * @param requested Requested RFC metadata from the same request.
  * @returns Requested and current contexts plus their relationship report.
  */
 export const resolveRfcContexts = (
-  catalog: RfcCatalog,
-  requested: CatalogDocument,
-): RfcCurrencyResolution => resolveRfcCurrencyFromDocument(catalog, requested);
+  documents: ReadonlyArray<RfcMetadata>,
+  requested: RfcMetadata,
+): RfcCurrencyResolution => resolveRfcCurrencyFromDocument(documents, requested);
 
 const relationIsConfident = (confidence: number | undefined, policy: ResearchPolicy): boolean =>
   confidence !== undefined && confidence >= policy.relationConfidenceThreshold;
@@ -1934,7 +1867,7 @@ type UnavailableContextResult = {
 };
 
 type PassageSource = {
-  readonly document: CatalogDocument;
+  readonly document: RfcMetadata;
   readonly source: RfcSource;
   readonly context: RfcContextRole;
   readonly relationshipPath: ReadonlyArray<RfcRelationshipStep>;
@@ -2000,7 +1933,7 @@ const zeroUsage = (): Schema.Schema.Type<typeof TokenUsageSchema> => ({
 });
 
 const zeroTimings = (): Schema.Schema.Type<typeof TimingSchema> => ({
-  catalogMs: 0,
+  metadataMs: 0,
   sourceMs: 0,
   lexicalMs: 0,
   selectionMs: 0,
@@ -2013,7 +1946,7 @@ const emptyCandidates = (): Schema.Schema.Type<typeof CandidateCountsSchema> => 
   sourceBlocks: 0,
   passageCandidates: 0,
   selectedPassages: 0,
-  catalogDocuments: undefined,
+  discoveredDocuments: 0,
   documentCandidates: undefined,
   acceptedDocuments: undefined,
 });
@@ -2021,22 +1954,15 @@ const emptyCandidates = (): Schema.Schema.Type<typeof CandidateCountsSchema> => 
 const researchContext = Effect.fnUntraced(function* (
   question: string,
   plannedContext: PlannedRfcContext,
-  options: KnownRfcResearchOptions,
+  options: ResearchPipelineOptions,
   policy: ResearchPolicy,
 ): Effect.fn.Return<
   ContextResearchResult,
   RfcSourceCacheError | RfcSourceFetchError | RfcSourceRevalidationError | DecisionModelError,
-  | FileSystem.FileSystem
-  | RfcSourceStore
-  | RfcSourceServiceTag
-  | LiveRfcSource
-  | DecisionModel.DecisionModel
-  | Path.Path
+  FileSystem.FileSystem | LiveRfcSource | DecisionModel.DecisionModel | Path.Path
 > {
   const sourceStarted = yield* Clock.currentTimeMillis;
-  const source = yield* options.sourceLoader === undefined
-    ? loadRfcSource(plannedContext.document, options.sourceDirectory)
-    : options.sourceLoader(plannedContext.document);
+  const source = yield* options.sourceLoader(plannedContext.document);
   const sourceFinished = yield* Clock.currentTimeMillis;
   const lexicalStarted = sourceFinished;
   const blocks = parseSourceBlocks(
@@ -2066,7 +1992,7 @@ const researchContext = Effect.fnUntraced(function* (
   );
   const usage = combineUsage(selection.usage, relation.usage);
   const timings = {
-    catalogMs: 0,
+    metadataMs: 0,
     sourceMs: elapsed(sourceStarted, sourceFinished),
     lexicalMs: elapsed(lexicalStarted, lexicalFinished),
     selectionMs: elapsed(selectionStarted, selectionFinished),
@@ -2132,7 +2058,7 @@ const researchContext = Effect.fnUntraced(function* (
       sourceBlocks: blocks.length,
       passageCandidates: candidates.length,
       selectedPassages: selection.selected.length,
-      catalogDocuments: undefined,
+      discoveredDocuments: 1,
       documentCandidates: undefined,
       acceptedDocuments: undefined,
     },
@@ -2192,7 +2118,7 @@ const sumTimings = (
 ): Schema.Schema.Type<typeof TimingSchema> =>
   results.reduce(
     (timings, result) => ({
-      catalogMs: timings.catalogMs,
+      metadataMs: timings.metadataMs,
       sourceMs: addNumbers(timings.sourceMs, result.timings.sourceMs),
       lexicalMs: addNumbers(timings.lexicalMs, result.timings.lexicalMs),
       selectionMs: addNumbers(timings.selectionMs, result.timings.selectionMs),
@@ -2410,13 +2336,13 @@ const updateCurrencyReport = (
  *
  * @param question Atomic research question.
  * @param hint Exact RFC identifier or number.
- * @param options Fresh catalog, cache, provider, and timing configuration.
+ * @param options Request-local metadata, source cache, provider, and timing configuration.
  * @returns A versioned evidence bundle with exact provenance for requested and current contexts.
  */
 export const researchKnownRfc = Effect.fnUntraced(function* (
   question: string,
   hint: string,
-  options: KnownRfcResearchOptions,
+  options: ResearchPipelineOptions,
 ): Effect.fn.Return<
   InternalEvidenceBundle,
   | RfcNotFoundError
@@ -2424,12 +2350,8 @@ export const researchKnownRfc = Effect.fnUntraced(function* (
   | RfcSourceFetchError
   | RfcSourceRevalidationError
   | DecisionModelError
-  | ResearchPolicyError
-  | import("./catalog").CatalogReadError
-  | import("./catalog").CatalogStaleError,
+  | ResearchPolicyError,
   | FileSystem.FileSystem
-  | RfcSourceStore
-  | RfcSourceServiceTag
   | LiveRfcSource
   | DecisionModel.DecisionModel
   | Path.Path
@@ -2443,8 +2365,8 @@ export const researchKnownRfc = Effect.fnUntraced(function* (
   };
   const resolvedModelRef = yield* ResolvedModelName;
   const resolvedModelsRef = yield* ResolvedModelNames;
-  const requested = resolveKnownRfc(options.catalog, hint);
-  const resolution = resolveRfcCurrencyFromDocument(options.catalog, requested);
+  const requested = resolveKnownRfc(options.documents, hint);
+  const resolution = resolveRfcCurrencyFromDocument(options.documents, requested);
   const plannedContexts: Array<PlannedRfcContext> = resolution.contexts.map((context) => ({
     role: context.role,
     document: context.document,
@@ -2517,7 +2439,7 @@ export const researchKnownRfc = Effect.fnUntraced(function* (
       sourceBlocks: counts.sourceBlocks + result.diagnostics.candidates.sourceBlocks,
       passageCandidates: counts.passageCandidates + result.diagnostics.candidates.passageCandidates,
       selectedPassages: counts.selectedPassages + result.diagnostics.candidates.selectedPassages,
-      catalogDocuments: undefined,
+      discoveredDocuments: options.documents.length,
       documentCandidates: undefined,
       acceptedDocuments: undefined,
     }),
@@ -2553,7 +2475,7 @@ export const researchKnownRfc = Effect.fnUntraced(function* (
   const resolvedModels =
     observedResolvedModels.length === 0 ? [fallbackResolvedModel] : observedResolvedModels;
   const diagnostics = {
-    schemaVersion: 1 as const,
+    schemaVersion: 2 as const,
     policyVersion: policy.policyVersion,
     requestedModel: options.modelAlias,
     resolvedModel,
@@ -2564,12 +2486,11 @@ export const researchKnownRfc = Effect.fnUntraced(function* (
     },
     timings: {
       ...timings,
-      catalogMs: options.catalogMs,
+      metadataMs: options.metadataMs,
       totalMs: elapsed(options.startedAt, finishedAt),
     },
     source: requestedSource,
     sources: sourceDiagnostics,
-    catalog: options.catalogStatus,
     currency: report,
     candidates,
     atomicity: requestedAtomicity,
@@ -2580,7 +2501,7 @@ export const researchKnownRfc = Effect.fnUntraced(function* (
   } satisfies InternalResearchDiagnostics;
 
   return Schema.decodeUnknownSync(InternalEvidenceBundleSchema)({
-    schemaVersion: 1,
+    schemaVersion: 2,
     kind: "evidence_bundle",
     status,
     question,
@@ -2596,24 +2517,20 @@ export const researchKnownRfc = Effect.fnUntraced(function* (
  * Run topic-only RFC discovery, retrieval, and semantic evidence research.
  *
  * @param question Atomic research question without an RFC hint.
- * @param options Fresh catalog, cache, provider, and timing configuration.
+ * @param options Request-local discovery candidates, source cache, provider, and timing configuration.
  * @returns A versioned evidence bundle with exact provenance and discovery diagnostics.
  */
 export const researchTopic = Effect.fnUntraced(function* (
   question: string,
-  options: KnownRfcResearchOptions,
+  options: ResearchPipelineOptions,
 ): Effect.fn.Return<
   InternalEvidenceBundle,
   | RfcSourceCacheError
   | RfcSourceFetchError
   | RfcSourceRevalidationError
   | DecisionModelError
-  | ResearchPolicyError
-  | import("./catalog").CatalogReadError
-  | import("./catalog").CatalogStaleError,
+  | ResearchPolicyError,
   | FileSystem.FileSystem
-  | RfcSourceStore
-  | RfcSourceServiceTag
   | LiveRfcSource
   | DecisionModel.DecisionModel
   | Path.Path
@@ -2627,16 +2544,13 @@ export const researchTopic = Effect.fnUntraced(function* (
   };
   const resolvedModelRef = yield* ResolvedModelName;
   const resolvedModelsRef = yield* ResolvedModelNames;
-  const documentLexicalStarted = yield* Clock.currentTimeMillis;
-  const documentCandidates =
-    options.documentCandidates === undefined
-      ? rankDocumentCandidates(options.catalog.documents, question, policy.maxDocumentCandidates)
-      : options.documentCandidates.map((document, index, documents) => ({
-          document,
-          lexicalScore: documents.length - index,
-        }));
-  const documentLexicalFinished = yield* Clock.currentTimeMillis;
-  const documentStarted = documentLexicalFinished;
+  const documentPreparationStarted = yield* Clock.currentTimeMillis;
+  const documentCandidates = options.documents.map((document, priority) => ({
+    document,
+    priority,
+  }));
+  const documentPreparationFinished = yield* Clock.currentTimeMillis;
+  const documentStarted = documentPreparationFinished;
   const documentSelection = yield* documentSelectionStage(question, documentCandidates, policy);
   const documentFinished = yield* Clock.currentTimeMillis;
 
@@ -2645,7 +2559,7 @@ export const researchTopic = Effect.fnUntraced(function* (
     resolvedModel: string,
     resolvedModels: ReadonlyArray<string>,
   ): InternalResearchDiagnostics => ({
-    schemaVersion: 1,
+    schemaVersion: 2,
     policyVersion: policy.policyVersion,
     requestedModel: options.modelAlias,
     resolvedModel,
@@ -2655,9 +2569,9 @@ export const researchTopic = Effect.fnUntraced(function* (
       outputTokens: documentSelection.usage.outputTokens ?? null,
     },
     timings: {
-      catalogMs: options.catalogMs,
+      metadataMs: options.metadataMs,
       sourceMs: 0,
-      lexicalMs: elapsed(documentLexicalStarted, documentLexicalFinished),
+      lexicalMs: elapsed(documentPreparationStarted, documentPreparationFinished),
       selectionMs: 0,
       relationMs: 0,
       totalMs: elapsed(options.startedAt, finishedAt),
@@ -2665,9 +2579,8 @@ export const researchTopic = Effect.fnUntraced(function* (
     },
     source: null,
     sources: [],
-    catalog: options.catalogStatus,
     candidates: {
-      catalogDocuments: options.catalog.documents.length,
+      discoveredDocuments: options.documents.length,
       documentCandidates: documentCandidates.length,
       acceptedDocuments: 0,
       sourceBlocks: 0,
@@ -2693,7 +2606,7 @@ export const researchTopic = Effect.fnUntraced(function* (
       observedResolvedModels.length === 0 ? [fallbackResolvedModel] : observedResolvedModels;
     const diagnostics = makeEmptyDiagnostics(finishedAt, resolvedModel, resolvedModels);
     return Schema.decodeUnknownSync(InternalEvidenceBundleSchema)({
-      schemaVersion: 1,
+      schemaVersion: 2,
       kind: "evidence_bundle",
       status: "needs_review",
       question,
@@ -2716,9 +2629,7 @@ export const researchTopic = Effect.fnUntraced(function* (
   for (const accepted of documentSelection.accepted) {
     sourceContexts.push({
       document: accepted.document,
-      source: yield* options.sourceLoader === undefined
-        ? loadRfcSource(accepted.document, options.sourceDirectory)
-        : options.sourceLoader(accepted.document),
+      source: yield* options.sourceLoader(accepted.document),
       context: "requested",
       relationshipPath: [],
     });
@@ -2772,7 +2683,7 @@ export const researchTopic = Effect.fnUntraced(function* (
     policy,
   );
   const diagnostics = {
-    schemaVersion: 1 as const,
+    schemaVersion: 2 as const,
     policyVersion: policy.policyVersion,
     requestedModel: options.modelAlias,
     resolvedModel,
@@ -2782,9 +2693,9 @@ export const researchTopic = Effect.fnUntraced(function* (
       outputTokens: usage.outputTokens ?? null,
     },
     timings: {
-      catalogMs: options.catalogMs,
+      metadataMs: options.metadataMs,
       sourceMs: elapsed(sourceStarted, sourceFinished),
-      lexicalMs: elapsed(documentLexicalStarted, lexicalFinished),
+      lexicalMs: elapsed(documentPreparationStarted, lexicalFinished),
       selectionMs: elapsed(selectionStarted, selectionFinished),
       relationMs: elapsed(relationStarted, relationFinished),
       totalMs: elapsed(options.startedAt, finishedAt),
@@ -2792,9 +2703,8 @@ export const researchTopic = Effect.fnUntraced(function* (
     },
     source: sourceDiagnostic(primarySource.source),
     sources: sourceContexts.map((context) => sourceDiagnostic(context.source)),
-    catalog: options.catalogStatus,
     candidates: {
-      catalogDocuments: options.catalog.documents.length,
+      discoveredDocuments: options.documents.length,
       documentCandidates: documentCandidates.length,
       acceptedDocuments: documentSelection.accepted.length,
       sourceBlocks: allBlocks.length,
@@ -2812,7 +2722,7 @@ export const researchTopic = Effect.fnUntraced(function* (
   } satisfies InternalResearchDiagnostics;
 
   return Schema.decodeUnknownSync(InternalEvidenceBundleSchema)({
-    schemaVersion: 1,
+    schemaVersion: 2,
     kind: "evidence_bundle",
     status,
     question,

@@ -12,32 +12,14 @@ import {
   Stream,
 } from "effect";
 import { Headers, HttpClient, HttpClientError, HttpClientResponse } from "effect/unstable/http";
+import type { RfcMetadata } from "./metadata";
+
+export type { RfcMetadata } from "./metadata";
 
 /**
  * Default anonymous Datatracker v1 API root.
  */
 export const defaultDatatrackerApiUrl = "https://datatracker.ietf.org/api/v1/";
-
-/**
- * Request-local RFC metadata produced by live discovery.
- *
- * Values of this type exist only for the duration of one request. Nothing
- * persists them, and no operation assembles them into a corpus; the relationship
- * fields carry only the edges the current traversal retrieved.
- */
-export type RfcMetadata = {
-  readonly identifier: string;
-  readonly rfcNumber: number;
-  readonly title: string;
-  readonly abstract: string;
-  readonly status: string;
-  readonly stream: string;
-  readonly canonicalUrl: string;
-  readonly updates: ReadonlyArray<string>;
-  readonly updatedBy: ReadonlyArray<string>;
-  readonly obsoletes: ReadonlyArray<string>;
-  readonly obsoletedBy: ReadonlyArray<string>;
-};
 
 /**
  * One RFC admitted to semantic document selection for a topic request.

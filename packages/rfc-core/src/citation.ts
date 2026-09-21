@@ -17,14 +17,7 @@ import {
   parseSourceBlocks,
   summarizeResolvedModels,
 } from "./research";
-import {
-  RfcSourceCacheError,
-  RfcSourceFetchError,
-  RfcSourceServiceTag,
-  RfcSourceStore,
-  loadRfcSource,
-  type RfcSource,
-} from "./source";
+import { RfcSourceCacheError, RfcSourceFetchError, type RfcSource } from "./source";
 
 /**
  * The verdicts a present RFC quotation can receive during citation verification.
@@ -235,21 +228,15 @@ export interface CitationVerificationOptions {
    */
   readonly document: RfcMetadata;
   /**
-   * Source cache directory.
+   * Request-local source loader used by live retrieval.
    */
-  readonly sourceDirectory: string;
-  /**
-   * Optional request-local source loader used by live retrieval.
-   */
-  readonly sourceLoader?:
-    | ((
-        document: RfcMetadata,
-      ) => Effect.Effect<
-        RfcSource | { readonly source: RfcSource; readonly retrieval: LiveRetrievalTrace },
-        RfcSourceCacheError | RfcSourceFetchError | RfcSourceRevalidationError,
-        FileSystem.FileSystem | LiveRfcSource | Path.Path
-      >)
-    | undefined;
+  readonly sourceLoader: (
+    document: RfcMetadata,
+  ) => Effect.Effect<
+    RfcSource | { readonly source: RfcSource; readonly retrieval: LiveRetrievalTrace },
+    RfcSourceCacheError | RfcSourceFetchError | RfcSourceRevalidationError,
+    FileSystem.FileSystem | LiveRfcSource | Path.Path
+  >;
   /**
    * Model alias requested from the official provider.
    */
@@ -607,8 +594,6 @@ export const verifyCitation = Effect.fnUntraced(function* (
   | RfcSourceRevalidationError
   | DecisionModelError,
   | FileSystem.FileSystem
-  | RfcSourceStore
-  | RfcSourceServiceTag
   | LiveRfcSource
   | DecisionModel.DecisionModel
   | Path.Path
@@ -619,9 +604,7 @@ export const verifyCitation = Effect.fnUntraced(function* (
   const resolvedModelsRef = yield* ResolvedModelNames;
   const document = options.document;
   const sourceStarted = yield* Clock.currentTimeMillis;
-  const loadedSource = yield* options.sourceLoader === undefined
-    ? loadRfcSource(document, options.sourceDirectory)
-    : options.sourceLoader(document);
+  const loadedSource = yield* options.sourceLoader(document);
   const source = "source" in loadedSource ? loadedSource.source : loadedSource;
   const retrieval = "source" in loadedSource ? loadedSource.retrieval : undefined;
   const sourceFinished = yield* Clock.currentTimeMillis;

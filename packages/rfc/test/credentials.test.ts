@@ -72,7 +72,7 @@ describe("Bun.secrets credential boundary", () => {
     const store = makeCredentialStore(native);
 
     expect(await storedCredentialStatus(store)).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: 2,
       kind: "auth_status",
       configured: false,
       service: credentialStoreService,
@@ -180,7 +180,7 @@ describe("authentication process protocol", () => {
     expect(result.stderr).toBe("");
     expect(result.stdout).not.toContain(secret);
     expect(JSON.parse(result.stdout)).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: 2,
       kind: "auth_add",
       configured: true,
       replaced: false,

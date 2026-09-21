@@ -110,13 +110,13 @@ const writeUnattestedCalibrationReport = async (path: string): Promise<void> => 
       requestedModel: "jev-latest",
       resolvedModel: "jev-1.13.0",
       resolvedModels: evaluationCase.category === "fabricated_quotation" ? [] : ["jev-1.13.0"],
-      policyVersion: "precision-v1",
+      policyVersion: "precision-v2",
       usage:
         evaluationCase.category === "fabricated_quotation"
           ? { inputTokens: null, outputTokens: null }
           : { inputTokens: 1, outputTokens: 1 },
       timings: {
-        catalogMs: 1,
+        metadataMs: 1,
         documentMs: evaluationCase.kind === "research" ? 1 : null,
         sourceMs: 1,
         lexicalMs: evaluationCase.kind === "research" ? 1 : null,
@@ -161,7 +161,7 @@ const writeUnattestedCalibrationReport = async (path: string): Promise<void> => 
         createdAt: "2026-01-01T00:00:00.000Z",
         expiresAt: "2026-02-01T00:00:00.000Z",
         authoritativeSourceHashes: {},
-        policyVersion: "precision-v1",
+        policyVersion: "precision-v2",
         requestedModel: "jev-latest",
         pinnedModel: "jev-1.13.0",
         minimumSupportedClaimPrecision: undefined,
@@ -208,7 +208,7 @@ afterEach(() => {
 });
 
 describe("rfc process protocol", () => {
-  test("does not register the removed catalog command", async () => {
+  test("registers only live retrieval commands", async () => {
     const result = await runCli(["catalog", "status"]);
 
     expect(result.exitCode).not.toBe(0);
@@ -564,7 +564,7 @@ describe("rfc process protocol", () => {
     test("activates the exact measured report only with explicit opt-in", () => {
       const config = {
         modelAlias: "jev-1.13.0",
-        policyPreset: "precision-v1",
+        policyPreset: "precision-v2",
         evaluationModel: "jev-latest",
         pinnedModel: "jev-1.13.0",
         liveEvaluation: false,

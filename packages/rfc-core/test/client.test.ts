@@ -253,7 +253,7 @@ afterEach(async () => {
 });
 
 describe("createRfcClient", () => {
-  test("does not expose catalog or bulk-prefetch operations", async () => {
+  test("exposes only schema-version-two client operations", async () => {
     const cacheDirectory = await makeCacheDirectory();
     const client = await createRfcClient({
       cacheDirectory,

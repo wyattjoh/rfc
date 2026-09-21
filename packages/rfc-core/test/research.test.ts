@@ -23,16 +23,17 @@ import {
 } from "../src/index";
 import type * as Decision from "effect/unstable/ai/Decision";
 import { createRfcCalibrationClient } from "../src/internal-calibration";
-import type { CatalogDocument, CatalogSource } from "../src/catalog";
-import { RfcSourceServiceTag, makeRfcSourceHttpLayer } from "../src/source";
+import type { RfcMetadata } from "../src/metadata";
+
+type RfcMetadataSource = () => Promise<ReadonlyArray<RfcMetadata>>;
 
 type TestClientOptions = Omit<RfcClientOptions, "automaticAnswerActivation"> & {
-  readonly metadataSource: CatalogSource;
+  readonly metadataSource: RfcMetadataSource;
 };
 
 const clients: Array<{ readonly close: () => Promise<void> }> = [];
 
-const makeDatatrackerClient = (documents: ReadonlyArray<CatalogDocument>) =>
+const makeDatatrackerClient = (documents: ReadonlyArray<RfcMetadata>) =>
   HttpClient.make((request, url) => {
     const exactName = url.pathname.match(/\/document\/(rfc\d+)\/$/)?.[1];
     if (exactName !== undefined) {
@@ -149,7 +150,7 @@ const requireContextSources = (result: ResearchResult): ReadonlyArray<ContextSou
 
 const makeCacheDirectory = async () => mkdtemp(join(tmpdir(), "rfc-core-research-test-"));
 
-const catalogDocument = {
+const rfcDocument = {
   identifier: "RFC9110",
   rfcNumber: 9110,
   title: "HTTP Semantics",
@@ -203,11 +204,11 @@ type InspectableDecision = {
   readonly criteria: Readonly<Record<string, string>>;
 };
 
-const makeCatalogDocument = (
+const makeRfcMetadata = (
   number: number,
   relationships: Readonly<Record<string, ReadonlyArray<string> | undefined>> = {},
 ) => ({
-  ...catalogDocument,
+  ...rfcDocument,
   identifier: `RFC${number}`,
   rfcNumber: number,
   canonicalUrl: `https://datatracker.ietf.org/doc/rfc${number}/`,
@@ -513,7 +514,7 @@ describe("known RFC research", () => {
     const client = await createCoreRfcClient({
       cacheDirectory,
       modelAlias: "jev-test",
-      policyPreset: "precision-v1",
+      policyPreset: "precision-v2",
       automaticAnswerActivation: undefined,
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
@@ -539,7 +540,7 @@ describe("known RFC research", () => {
     const client = await createCoreRfcClient({
       cacheDirectory,
       modelAlias: "jev-test",
-      policyPreset: "precision-v1",
+      policyPreset: "precision-v2",
       automaticAnswerActivation: {} as RfcClientOptions["automaticAnswerActivation"],
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
@@ -569,14 +570,14 @@ describe("known RFC research", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       rfcSourceFetcher: async (document) => {
         sourceFetches += 1;
         expect(document.identifier).toBe("RFC9110");
         return makeSourceFetcher(sourceText)(document);
       },
       decisionModel: makeDecisionModel(calls),
-      policyPreset: "precision-v1",
+      policyPreset: "precision-v2",
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
     });
     clients.push(client);
@@ -621,7 +622,7 @@ describe("known RFC research", () => {
     expect(evidence.provenance.section).toBe("1. Requirements");
     expect(result.diagnostics).toMatchObject({
       schemaVersion: 2,
-      policyVersion: "precision-v1",
+      policyVersion: "precision-v2",
       requestedModel: "jev-test",
       resolvedModel: "jev-test",
       usage: { inputTokens: 24, outputTokens: 16 },
@@ -657,7 +658,7 @@ describe("known RFC research", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       rfcSourceFetcher: makeSourceFetcher(source),
       decisionModel: makeMixedRelationDecisionModel(),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
@@ -677,8 +678,8 @@ describe("known RFC research", () => {
 
   test("composes uncertain requested evidence with accepted current evidence as partial", async () => {
     const cacheDirectory = await makeCacheDirectory();
-    const requested = makeCatalogDocument(9110, { updatedBy: ["RFC9111"] });
-    const current = makeCatalogDocument(9111, { updates: ["RFC9110"] });
+    const requested = makeRfcMetadata(9110, { updatedBy: ["RFC9111"] });
+    const current = makeRfcMetadata(9111, { updates: ["RFC9110"] });
     const client = await createRfcClient({
       cacheDirectory,
       modelAlias: "jev-test",
@@ -704,12 +705,12 @@ describe("known RFC research", () => {
   test("researches the requested RFC and terminal current context across an update chain", async () => {
     const cacheDirectory = await makeCacheDirectory();
     const fetched: Array<string> = [];
-    const requested = makeCatalogDocument(9110, { updatedBy: ["RFC9111"] });
-    const intermediate = makeCatalogDocument(9111, {
+    const requested = makeRfcMetadata(9110, { updatedBy: ["RFC9111"] });
+    const intermediate = makeRfcMetadata(9111, {
       updates: ["RFC9110"],
       updatedBy: ["RFC9112"],
     });
-    const current = makeCatalogDocument(9112, { updates: ["RFC9111"] });
+    const current = makeRfcMetadata(9112, { updates: ["RFC9111"] });
     const client = await createRfcClient({
       cacheDirectory,
       modelAlias: "jev-test",
@@ -770,9 +771,9 @@ describe("known RFC research", () => {
   test("follows branching update relationships deterministically", async () => {
     const cacheDirectory = await makeCacheDirectory();
     const fetched: Array<string> = [];
-    const requested = makeCatalogDocument(9110, { updatedBy: ["RFC9112", "RFC9111"] });
-    const firstCurrent = makeCatalogDocument(9111, { updates: ["RFC9110"] });
-    const secondCurrent = makeCatalogDocument(9112, { updates: ["RFC9110"] });
+    const requested = makeRfcMetadata(9110, { updatedBy: ["RFC9112", "RFC9111"] });
+    const firstCurrent = makeRfcMetadata(9111, { updates: ["RFC9110"] });
+    const secondCurrent = makeRfcMetadata(9112, { updates: ["RFC9110"] });
     const client = await createRfcClient({
       cacheDirectory,
       modelAlias: "jev-test",
@@ -817,9 +818,9 @@ describe("known RFC research", () => {
   test("follows obsoletion branches without replacing the requested evidence", async () => {
     const cacheDirectory = await makeCacheDirectory();
     const fetched: Array<string> = [];
-    const requested = makeCatalogDocument(9110, { obsoletedBy: ["RFC9111", "RFC9112"] });
-    const firstCurrent = makeCatalogDocument(9111, { obsoletes: ["RFC9110"] });
-    const secondCurrent = makeCatalogDocument(9112, { obsoletes: ["RFC9110"] });
+    const requested = makeRfcMetadata(9110, { obsoletedBy: ["RFC9111", "RFC9112"] });
+    const firstCurrent = makeRfcMetadata(9111, { obsoletes: ["RFC9110"] });
+    const secondCurrent = makeRfcMetadata(9112, { obsoletes: ["RFC9110"] });
     const client = await createRfcClient({
       cacheDirectory,
       modelAlias: "jev-test",
@@ -874,8 +875,8 @@ describe("known RFC research", () => {
   test("returns partial when a known current successor cannot be fetched", async () => {
     const cacheDirectory = await makeCacheDirectory();
     const fetched: Array<string> = [];
-    const requested = makeCatalogDocument(9110, { updatedBy: ["RFC9111"] });
-    const current = makeCatalogDocument(9111, { updates: ["RFC9110"] });
+    const requested = makeRfcMetadata(9110, { updatedBy: ["RFC9111"] });
+    const current = makeRfcMetadata(9111, { updates: ["RFC9110"] });
     const client = await createRfcClient({
       cacheDirectory,
       modelAlias: "jev-test",
@@ -925,8 +926,8 @@ describe("known RFC research", () => {
   test("fails closed and terminates on cyclic currency relationships", async () => {
     const cacheDirectory = await makeCacheDirectory();
     const fetched: Array<string> = [];
-    const requested = makeCatalogDocument(9110, { updatedBy: ["RFC9111"] });
-    const successor = makeCatalogDocument(9111, {
+    const requested = makeRfcMetadata(9110, { updatedBy: ["RFC9111"] });
+    const successor = makeRfcMetadata(9111, {
       updates: ["RFC9110"],
       updatedBy: ["RFC9110"],
     });
@@ -962,16 +963,16 @@ describe("known RFC research", () => {
   test("detects cycles that cross a previously explored branch", async () => {
     const cacheDirectory = await makeCacheDirectory();
     const fetched: Array<string> = [];
-    const requested = makeCatalogDocument(9110, { updatedBy: ["RFC9111", "RFC9112"] });
-    const firstBranch = makeCatalogDocument(9111, {
+    const requested = makeRfcMetadata(9110, { updatedBy: ["RFC9111", "RFC9112"] });
+    const firstBranch = makeRfcMetadata(9111, {
       updates: ["RFC9110"],
       updatedBy: ["RFC9113"],
     });
-    const secondBranch = makeCatalogDocument(9112, {
+    const secondBranch = makeRfcMetadata(9112, {
       updates: ["RFC9110", "RFC9113"],
       updatedBy: ["RFC9113"],
     });
-    const crossBranch = makeCatalogDocument(9113, {
+    const crossBranch = makeRfcMetadata(9113, {
       updates: ["RFC9112"],
       updatedBy: ["RFC9112"],
     });
@@ -1003,8 +1004,8 @@ describe("known RFC research", () => {
 
   test("fails closed when a current direct requirement changes the requested wording", async () => {
     const cacheDirectory = await makeCacheDirectory();
-    const requested = makeCatalogDocument(9110, { updatedBy: ["RFC9111"] });
-    const current = makeCatalogDocument(9111, { updates: ["RFC9110"] });
+    const requested = makeRfcMetadata(9110, { updatedBy: ["RFC9111"] });
+    const current = makeRfcMetadata(9111, { updates: ["RFC9110"] });
     const changedText = sourceText.replace(
       "The client MUST send a request containing the target resource.",
       "The client MUST NOT send a request containing the target resource.",
@@ -1037,7 +1038,7 @@ describe("known RFC research", () => {
     const cacheDirectory = await makeCacheDirectory();
     const numbers = Array.from({ length: 10 }, (_, index) => 9000 + index);
     const documents = numbers.map((number, index) =>
-      makeCatalogDocument(number, {
+      makeRfcMetadata(number, {
         updatedBy: index === numbers.length - 1 ? [] : [`RFC${number + 1}`],
         updates: index === 0 ? [] : [`RFC${number - 1}`],
       }),
@@ -1068,8 +1069,8 @@ describe("known RFC research", () => {
 
   test("fails closed when a current requirement weakens its normative modality", async () => {
     const cacheDirectory = await makeCacheDirectory();
-    const requested = makeCatalogDocument(9110, { updatedBy: ["RFC9111"] });
-    const current = makeCatalogDocument(9111, { updates: ["RFC9110"] });
+    const requested = makeRfcMetadata(9110, { updatedBy: ["RFC9111"] });
+    const current = makeRfcMetadata(9111, { updates: ["RFC9110"] });
     const weakenedText = sourceText.replace("The client MUST send", "The client MAY send");
     const client = await createRfcClient({
       cacheDirectory,
@@ -1097,8 +1098,8 @@ describe("known RFC research", () => {
 
   test("fails closed when a current requirement changes a substantive parameter", async () => {
     const cacheDirectory = await makeCacheDirectory();
-    const requested = makeCatalogDocument(9110, { updatedBy: ["RFC9111"] });
-    const current = makeCatalogDocument(9111, { updates: ["RFC9110"] });
+    const requested = makeRfcMetadata(9110, { updatedBy: ["RFC9111"] });
+    const current = makeRfcMetadata(9111, { updates: ["RFC9110"] });
     const requestedText = sourceText.replace("a request containing the target resource", "X-Foo");
     const changedText = requestedText.replace("X-Foo", "X-Bar");
     const client = await createRfcClient({
@@ -1127,8 +1128,8 @@ describe("known RFC research", () => {
 
   test("fails closed when a current requirement swaps subject and object roles", async () => {
     const cacheDirectory = await makeCacheDirectory();
-    const requested = makeCatalogDocument(9110, { updatedBy: ["RFC9111"] });
-    const current = makeCatalogDocument(9111, { updates: ["RFC9110"] });
+    const requested = makeRfcMetadata(9110, { updatedBy: ["RFC9111"] });
+    const current = makeRfcMetadata(9111, { updates: ["RFC9110"] });
     const requestedText = sourceText.replace(
       "a request containing the target resource",
       "X-Foo to the server",
@@ -1162,8 +1163,8 @@ describe("known RFC research", () => {
 
   test("returns needs_review when requested and current contexts conflict", async () => {
     const cacheDirectory = await makeCacheDirectory();
-    const requested = makeCatalogDocument(9110, { updatedBy: ["RFC9111"] });
-    const current = makeCatalogDocument(9111, { updates: ["RFC9110"] });
+    const requested = makeRfcMetadata(9110, { updatedBy: ["RFC9111"] });
+    const current = makeRfcMetadata(9111, { updates: ["RFC9110"] });
     const client = await createRfcClient({
       cacheDirectory,
       modelAlias: "jev-test",
@@ -1202,7 +1203,7 @@ describe("known RFC research", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [makeCatalogDocument(9110, { updatedBy: ["RFC9999"] })],
+      metadataSource: async () => [makeRfcMetadata(9110, { updatedBy: ["RFC9999"] })],
       rfcSourceFetcher: makeSourceMapFetcher({ RFC9110: sourceText }, []),
       decisionModel: makeDecisionModel([]),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
@@ -1223,7 +1224,7 @@ describe("known RFC research", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [makeCatalogDocument(9110, { updatedBy: ["not-an-rfc"] })],
+      metadataSource: async () => [makeRfcMetadata(9110, { updatedBy: ["not-an-rfc"] })],
       rfcSourceFetcher: makeSourceMapFetcher({ RFC9110: sourceText }, []),
       decisionModel: makeDecisionModel([]),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
@@ -1258,7 +1259,7 @@ describe("known RFC research", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       decisionModel: providerResponseModel,
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
@@ -1286,7 +1287,7 @@ describe("known RFC research", () => {
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
       typeSafeHttpClient: typeSafe.client,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
     });
@@ -1313,7 +1314,7 @@ describe("known RFC research", () => {
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
       typeSafeHttpClient: typeSafe.client,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
     });
@@ -1345,7 +1346,7 @@ describe("known RFC research", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       decisionModel: makeDecisionModel(calls, "compound"),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
@@ -1371,7 +1372,7 @@ describe("known RFC research", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       decisionModel: makeDecisionModel([], "atomic", "irrelevant", 0.9, 0.95, 0.1),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
@@ -1397,7 +1398,7 @@ describe("known RFC research", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       decisionModel: makeDecisionModel([], "atomic", "irrelevant", 0.9, 0.95, 0.45),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
@@ -1421,7 +1422,7 @@ describe("known RFC research", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       decisionModel: makeDecisionModel([], "atomic", "irrelevant", 0.9, 0.5),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
@@ -1482,7 +1483,7 @@ describe("known RFC research", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       decisionModel: model,
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
@@ -1523,7 +1524,7 @@ describe("known RFC research", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       decisionModel: model,
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
@@ -1559,7 +1560,7 @@ describe("known RFC research", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       decisionModel: nonRetryingModel,
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
@@ -1598,7 +1599,7 @@ describe("known RFC research", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       decisionModel: model,
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
@@ -1642,7 +1643,7 @@ describe("known RFC research", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       decisionModel: model,
       clock,
@@ -1707,7 +1708,7 @@ describe("known RFC research", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       decisionModel: model,
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
@@ -1762,7 +1763,7 @@ describe("known RFC research", () => {
         modelAlias: "jev-test",
         typeSafeApiKey: undefined,
         typeSafeApiUrl: undefined,
-        metadataSource: async () => [catalogDocument],
+        metadataSource: async () => [rfcDocument],
         rfcSourceFetcher: makeSourceFetcher(sourceText),
         decisionModel: makeDecisionModel(
           [],
@@ -1795,7 +1796,7 @@ describe("known RFC research", () => {
       typeSafeApiUrl: undefined,
       metadataSource: async () => {
         refreshes += 1;
-        return [catalogDocument];
+        return [rfcDocument];
       },
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       decisionModel: makeDecisionModel([]),
@@ -1831,7 +1832,7 @@ describe("known RFC research", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       decisionModel: makeDecisionModel([]),
       rfcSourceHttpClient: sourceHttpClient,
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
@@ -1866,7 +1867,7 @@ describe("known RFC research", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       decisionModel: makeDecisionModel([]),
       rfcSourceHttpClient: sourceHttpClient,
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
@@ -1897,7 +1898,7 @@ describe("known RFC research", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       decisionModel: makeDecisionModel([]),
       rfcSourceHttpClient: sourceHttpClient,
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
@@ -1937,7 +1938,7 @@ describe("known RFC research", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       rfcSourceHttpClient: sourceHttpClient,
       decisionModel: makeDecisionModel([]),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
@@ -1985,7 +1986,7 @@ describe("known RFC research", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       rfcSourceHttpClient: sourceHttpClient,
       decisionModel: makeDecisionModel([]),
       clock,
@@ -2010,30 +2011,6 @@ describe("known RFC research", () => {
     });
   });
 
-  test("rejects a noncanonical RFC Editor source path before HTTP", async () => {
-    let requests = 0;
-    const sourceHttpClient = HttpClient.make((request) => {
-      requests += 1;
-      return Effect.succeed(
-        HttpClientResponse.fromWeb(
-          request,
-          new Response(sourceText, { headers: { "content-type": "text/plain" } }),
-        ),
-      );
-    });
-    const program = Effect.gen(function* () {
-      const service = yield* RfcSourceServiceTag;
-      return yield* service.fetch(catalogDocument);
-    }).pipe(
-      Effect.provide(
-        makeRfcSourceHttpLayer(sourceHttpClient, "https://www.rfc-editor.org/rfc/substituted/"),
-      ),
-    );
-
-    await expect(Effect.runPromise(program)).rejects.toBeInstanceOf(RfcSourceFetchError);
-    expect(requests).toBe(0);
-  });
-
   test("rejects a substituted final RFC Editor response URL", async () => {
     const cacheDirectory = await makeCacheDirectory();
     const sourceHttpClient = HttpClient.make((request) => {
@@ -2048,7 +2025,7 @@ describe("known RFC research", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       decisionModel: makeDecisionModel([]),
       rfcSourceHttpClient: sourceHttpClient,
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
@@ -2071,7 +2048,7 @@ describe("known RFC research", () => {
       modelAlias: undefined,
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       decisionModel: makeDecisionModel([]),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
@@ -2115,7 +2092,7 @@ describe("known RFC research", () => {
       modelAlias: undefined,
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       rfcSourceFetcher: makeSourceFetcher(text),
       decisionModel: makeDecisionModel([]),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
@@ -2142,7 +2119,7 @@ describe("known RFC research", () => {
   test("discovers a topic from request-local metadata and uses three semantic stages", async () => {
     const cacheDirectory = await makeCacheDirectory();
     const secondDocument = {
-      ...catalogDocument,
+      ...rfcDocument,
       identifier: "RFC7230",
       rfcNumber: 7230,
       title: "HTTP/1.1 Message Syntax and Routing",
@@ -2200,7 +2177,7 @@ describe("known RFC research", () => {
       modelAlias: "jev-topic-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [catalogDocument, secondDocument],
+      metadataSource: async () => [rfcDocument, secondDocument],
       rfcSourceFetcher: async (document) => {
         fetched.push(document.identifier);
         return {
@@ -2233,7 +2210,7 @@ describe("known RFC research", () => {
     const documentInputs = documentCall?.input.documents ?? {};
     expect(Object.keys(documentInputs)).toEqual(["document_0", "document_1"]);
     for (const [key, inputDocument] of Object.entries(documentInputs)) {
-      const expectedDocument = [catalogDocument, secondDocument].find(
+      const expectedDocument = [rfcDocument, secondDocument].find(
         ({ identifier }) => identifier === inputDocument.identifier,
       );
       const decision = documentCall?.definition.decisions[key] as InspectableDecision | undefined;
@@ -2275,9 +2252,9 @@ describe("known RFC research", () => {
   test("bounds live discovery candidates and rejects irrelevant matches semantically", async () => {
     const cacheDirectory = await makeCacheDirectory();
     const documents = [
-      catalogDocument,
+      rfcDocument,
       ...Array.from({ length: 19 }, (_, index) => ({
-        ...catalogDocument,
+        ...rfcDocument,
         identifier: `RFC${8000 + index}`,
         rfcNumber: 8000 + index,
         title: `HTTP topic ${index}`,
@@ -2413,7 +2390,7 @@ describe("known RFC research", () => {
       modelAlias: "jev-topic-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       rfcSourceFetcher: async () => {
         sourceFetches += 1;
         return sourceText;
@@ -2465,7 +2442,7 @@ describe("known RFC research", () => {
       modelAlias: "jev-topic-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       decisionModel: model,
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
     });

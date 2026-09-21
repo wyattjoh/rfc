@@ -12,6 +12,7 @@ import {
   evaluationCorpus,
   evaluationCorpusDigest,
   evaluationPositiveControlCaseIds,
+  evaluationPolicyDigest,
   evaluationReleaseAttestation,
   evaluationSchemaVersion,
   evaluationResearchStatuses,
@@ -55,10 +56,10 @@ const makeObservation = (
     requestedModel: "jev-latest",
     resolvedModel,
     resolvedModels: [resolvedModel],
-    policyVersion: "precision-v1",
+    policyVersion: "precision-v2",
     usage: { inputTokens: 10, outputTokens: 4 },
     timings: {
-      catalogMs: 1,
+      metadataMs: 1,
       documentMs: evaluationCase.mode === "topic" ? 2 : null,
       sourceMs: 3,
       lexicalMs: 4,
@@ -114,7 +115,7 @@ const acceptedFixtureReport = () => {
     createdAt: "2026-01-01T00:00:00.000Z",
     expiresAt: "2026-02-01T00:00:00.000Z",
     authoritativeSourceHashes,
-    policyVersion: "precision-v1",
+    policyVersion: "precision-v2",
     requestedModel: "jev-latest",
     pinnedModel: "jev-1.13.0",
     minimumSupportedClaimPrecision: undefined,
@@ -577,7 +578,7 @@ describe("precision evaluation", () => {
       createdAt: "2026-01-01T00:00:00.000Z",
       expiresAt: "2026-02-01T00:00:00.000Z",
       authoritativeSourceHashes: {},
-      policyVersion: "precision-v1",
+      policyVersion: "precision-v2",
       requestedModel: "jev-latest",
       pinnedModel: "jev-1.13.0",
       minimumSupportedClaimPrecision: undefined,
@@ -596,7 +597,7 @@ describe("precision evaluation", () => {
     expect(
       isAcceptedEvaluationReport({
         ...report,
-        policyVersion: "precision-v2",
+        policyVersion: "precision-v1",
       }),
     ).toBe(false);
     expect(
@@ -621,45 +622,15 @@ describe("precision evaluation", () => {
     ).toBe(false);
   });
 
-  test("binds the accepted release attestation to the reviewed precision-v4 values", () => {
+  test("keeps the precision-v2 release attestation pending", () => {
     expect(evaluationReleaseAttestation).toEqual({
-      status: "accepted",
-      buildId: "rfc-evidence-precision-v4",
-      reportDigest: "7f2070e5040525f8794d6cee8cc2a4440f00836a2dc079de5c2cb3bcc9ee2f9b",
-      corpusDigest: "911759c0cf7b892f7c833d46414513da38bff32d450f7e527e70fc9f9dece851",
-      policyDigest: "0ea53ba46da204da7cbd0a3789dfaeb127637e394de780966c92a05d85c29d75",
-      authoritativeSourceHashes: {
-        RFC1034: [
-          "972d509dcb4cb6cc2a41315b8a14a2bc520d4098cd318cb8d170de37017e26d3",
-          "99114ac181572371b14d285ed354863514f5ab7a265e89b49ea5604c7e074759",
-          "bd2397e9b08ebc0177971d8623c327190835c7e3625caa7575afe234bcadbf13",
-          "d6b10a71441df879cc2817d23f2dad120c8a5f87e74eba1e4ed4b743a76a891a",
-        ],
-        RFC2616: [
-          "02d45caeb86c00197d30428472102bb558881fa61937804330c1242a0be5b5dc",
-          "07fdef22c7a8c2db5d92d7afde50d4c3478368b7e6d31f3ac7f9d0cb282601b2",
-          "10211d2885196b97b1c78e1672f3f68ae97c294596ef2b7fd890cbd30a3427bf",
-          "ad3b38b7806783d5066714f7ac9aadcba8cec1605a400c7380173737a8adf902",
-        ],
-        RFC6749: [
-          "4233c0650ec7e7918c20e0fde2dc565f85e2aa2d4c18123e3cd834295c2f68d0",
-          "49e663f7e01416619ee49aee0b0c1b6ae9c80f92b9e4d1e65c6aa0a44c8fa4c0",
-          "d1d4d048e3f46101c4cce6288bb7b6ec1c37151088874f87602a812a660805b2",
-          "f204fc8661d6c92d2ec6e0b54808f961a9ad26e792f57f312d9528335519bd71",
-        ],
-        RFC7230: [
-          "02d45caeb86c00197d30428472102bb558881fa61937804330c1242a0be5b5dc",
-          "07fdef22c7a8c2db5d92d7afde50d4c3478368b7e6d31f3ac7f9d0cb282601b2",
-          "ad3b38b7806783d5066714f7ac9aadcba8cec1605a400c7380173737a8adf902",
-          "c7fdc8bebdf1f8195f731592c47f5ea822b489436fd905b01b55ef531fca4120",
-        ],
-        RFC8446: [
-          "47871bc8820a2c3b6ea89f061055577058862cf543686b82d10131239702b3bd",
-          "773437ae1a8236757ea6c73cdccecad5d54589b591bbbadec1e48c69c41d694a",
-        ],
-        RFC9110: ["ad3b38b7806783d5066714f7ac9aadcba8cec1605a400c7380173737a8adf902"],
-      },
-      expiresAt: "2026-10-19T19:20:57.805Z",
+      status: "pending_live_calibration",
+      buildId: "rfc-evidence-precision-v2",
+      reportDigest: null,
+      corpusDigest: evaluationCorpusDigest,
+      policyDigest: evaluationPolicyDigest,
+      authoritativeSourceHashes: {},
+      expiresAt: null,
     });
   });
 
@@ -667,12 +638,11 @@ describe("precision evaluation", () => {
     const { report, attestation } = acceptedFixtureReport();
 
     expect(evaluationReleaseAttestation).toMatchObject({
-      status: "accepted",
-      buildId: "rfc-evidence-precision-v4",
-      reportDigest: "7f2070e5040525f8794d6cee8cc2a4440f00836a2dc079de5c2cb3bcc9ee2f9b",
-      expiresAt: "2026-10-19T19:20:57.805Z",
+      status: "pending_live_calibration",
+      buildId: "rfc-evidence-precision-v2",
+      reportDigest: null,
+      expiresAt: null,
     });
-    expect(report.releaseBuildId).toBe(evaluationReleaseAttestation.buildId);
     expect(
       isAcceptedEvaluationReportForAttestation(
         report,

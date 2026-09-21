@@ -371,7 +371,7 @@ const clientOptions = (cacheDirectory: string, decisionModel: DecisionModel.Deci
   typeSafeApiUrl: undefined,
   rfcSourceFetcher: sourceFetcher,
   decisionModel,
-  policyPreset: "precision-v1",
+  policyPreset: "precision-v2",
   now: () => Date.parse("2026-01-01T00:00:00.000Z"),
 });
 

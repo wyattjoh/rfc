@@ -19,15 +19,17 @@ import {
   type RfcSourceFetcher,
 } from "../src/index";
 import type * as Decision from "effect/unstable/ai/Decision";
-import type { CatalogDocument, CatalogSource } from "../src/catalog";
+import type { RfcMetadata } from "../src/metadata";
+
+type RfcMetadataSource = () => Promise<ReadonlyArray<RfcMetadata>>;
 
 const clients: Array<RfcClient> = [];
 type TestClientOptions = Omit<RfcClientOptions, "automaticAnswerActivation"> & {
   readonly automaticAnswerActivation?: RfcClientOptions["automaticAnswerActivation"];
-  readonly metadataSource: CatalogSource;
+  readonly metadataSource: RfcMetadataSource;
 };
 
-const makeDatatrackerClient = (documents: ReadonlyArray<CatalogDocument>) =>
+const makeDatatrackerClient = (documents: ReadonlyArray<RfcMetadata>) =>
   HttpClient.make((request, url) => {
     const name = url.pathname.match(/\/document\/(rfc\d+)\/$/)?.[1];
     if (name !== undefined) {
@@ -86,7 +88,7 @@ const createRfcClient = async (options: TestClientOptions) => {
 
 const makeCacheDirectory = async () => mkdtemp(join(tmpdir(), "rfc-core-citation-test-"));
 
-const catalogDocument = {
+const rfcDocument = {
   identifier: "RFC9110",
   rfcNumber: 9110,
   title: "HTTP Semantics",
@@ -213,7 +215,7 @@ describe("citation verification", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       decisionModel: makeDecisionModel(calls),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
@@ -242,7 +244,7 @@ describe("citation verification", () => {
     expect(result.provenance.sourceHash).toBe(hashRfcSource(sourceText));
     expect(result.provenance.section).toBe("1. Requirements");
     expect(result.provenance.sourceUrl).toBe("https://www.rfc-editor.org/rfc/rfc9110.txt");
-    expect(result.provenance.canonicalUrl).toBe(catalogDocument.canonicalUrl);
+    expect(result.provenance.canonicalUrl).toBe(rfcDocument.canonicalUrl);
     expect(result.diagnostics).toMatchObject({
       requestedModel: "jev-test",
       resolvedModel: "jev-test",
@@ -272,7 +274,7 @@ describe("citation verification", () => {
       join(cacheDirectory, "sources", "v2", "RFC9110.json"),
     ).text();
     expect(persistedSource).not.toContain(result.claim);
-    expect(persistedSource).not.toContain(catalogDocument.title);
+    expect(persistedSource).not.toContain(rfcDocument.title);
   });
 
   test("keeps resolved model diagnostics local to each citation operation", async () => {
@@ -284,7 +286,7 @@ describe("citation verification", () => {
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
       typeSafeHttpClient: typeSafe.client,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
     });
@@ -340,7 +342,7 @@ describe("citation verification", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       rfcSourceFetcher: makeSourceFetcher(unicodeSourceText),
       decisionModel: makeDecisionModel([]),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
@@ -382,7 +384,7 @@ describe("citation verification", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       decisionModel: makeDecisionModel(calls),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
@@ -420,20 +422,20 @@ describe("citation verification", () => {
 
     for (const [index, response] of metadataResponses.entries()) {
       const cacheDirectory = await makeCacheDirectory();
-      const legacyCatalog = JSON.stringify({ documents: [catalogDocument] });
+      const legacyCatalog = JSON.stringify({ documents: [rfcDocument] });
       await Bun.write(join(cacheDirectory, "catalog.json"), legacyCatalog);
       const client = await createRfcClient({
         cacheDirectory,
         modelAlias: "jev-test",
         typeSafeApiKey: undefined,
         typeSafeApiUrl: undefined,
-        metadataSource: async () => [catalogDocument],
+        metadataSource: async () => [rfcDocument],
         datatrackerHttpClient: HttpClient.make((request) =>
           Effect.succeed(HttpClientResponse.fromWeb(request, response.clone())),
         ),
         rfcSourceFetcher: async () => {
           sourceCalls += 1;
-          return makeSourceFetcher(sourceText)(catalogDocument);
+          return makeSourceFetcher(sourceText)(rfcDocument);
         },
         decisionModel: makeDecisionModel([]),
         now: () => Date.parse("2026-01-01T00:00:00.000Z"),
@@ -466,7 +468,7 @@ describe("citation verification", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       rfcSourceFetcher: makeSourceFetcher(duplicate),
       decisionModel: makeDecisionModel([]),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
@@ -545,7 +547,7 @@ describe("citation verification", () => {
         modelAlias: "jev-test",
         typeSafeApiKey: undefined,
         typeSafeApiUrl: undefined,
-        metadataSource: async () => [catalogDocument],
+        metadataSource: async () => [rfcDocument],
         rfcSourceFetcher: makeSourceFetcher(sourceText),
         decisionModel: makeDecisionModel(calls, testCase.verdict, testCase.confidence),
         now: () => Date.parse("2026-01-01T00:00:00.000Z"),
@@ -585,7 +587,7 @@ describe("citation verification", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       decisionModel: makeDecisionModel(calls, "verified", 0.95, true, () => {
         resolveFirstAttempt?.();
@@ -617,7 +619,7 @@ describe("citation verification", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       decisionModel: {
         [DecisionModel.TypeId]: DecisionModel.TypeId,
@@ -653,7 +655,7 @@ describe("citation verification", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       decisionModel: {
         [DecisionModel.TypeId]: DecisionModel.TypeId,
@@ -700,7 +702,7 @@ describe("citation verification", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       decisionModel: {
         [DecisionModel.TypeId]: DecisionModel.TypeId,
@@ -766,7 +768,7 @@ describe("citation verification", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       decisionModel: {
         [DecisionModel.TypeId]: DecisionModel.TypeId,
@@ -823,7 +825,7 @@ describe("citation verification", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       decisionModel: {
         [DecisionModel.TypeId]: DecisionModel.TypeId,
@@ -861,7 +863,7 @@ describe("citation verification", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [catalogDocument],
+      metadataSource: async () => [rfcDocument],
       rfcSourceFetcher: makeSourceFetcher(sourceText),
       decisionModel: makeDecisionModel([]),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
