@@ -576,8 +576,51 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
   );
 };
 
+/**
+ * Flag names that may carry a secret. Matched against the name only, so both
+ * `--api-token=value` and a separated `--api-token value` are refused, and a
+ * near miss of the documented `--api-key` spelling cannot slip through into
+ * the process argument vector.
+ */
+const forbiddenCredentialFlagPattern =
+  /^--[^=]*(?:key|token|secret|password|passwd|credential)[^=]*(?:=|$)/i;
+
 const hasForbiddenCredentialArgument = (argv: ReadonlyArray<string>): boolean =>
-  argv.some((argument) => /^--(?:api-key|typesafe-api-key)(?:=|$)/i.test(argument));
+  argv.some((argument) => forbiddenCredentialFlagPattern.test(argument));
+
+/**
+ * Describe a CLI parse failure without copying any argument text.
+ *
+ * Effect renders argument values inside its `CliError` messages — `InvalidValue`
+ * embeds the rejected value verbatim — so the envelope reason is derived from
+ * the failure tag alone. Callers who need specifics run the command with
+ * `--help`, which is rendered to the terminal rather than into the envelope.
+ *
+ * @param error A CLI parse or validation failure.
+ * @returns A fixed reason string that contains no argv-derived text.
+ */
+const safeCliErrorReason = (error: CliError.CliError): string => {
+  switch (error._tag) {
+    case "ShowHelp":
+      return error.errors.length > 0 ? safeCliErrorReason(error.errors[0]!) : "Help requested";
+    case "UnrecognizedOption":
+      return "The command received an unrecognized flag";
+    case "DuplicateOption":
+      return "The command received the same flag more than once";
+    case "MissingOption":
+      return "The command is missing a required flag";
+    case "MissingArgument":
+      return "The command is missing a required argument";
+    case "UnexpectedArgument":
+      return "The command received an unexpected positional argument";
+    case "InvalidValue":
+      return "The command received an invalid flag or argument value";
+    case "UnknownSubcommand":
+      return "The command is not a known rfc subcommand";
+    default:
+      return "The command could not be parsed";
+  }
+};
 
 const application = makeApplication(makeDefaultCliDependencies());
 
@@ -637,7 +680,7 @@ export const run = async (
       CliError.isCliError(error) &&
       error._tag !== "UserError" &&
       (error._tag !== "ShowHelp" || error.errors.length > 0)
-        ? new InvalidInputError({ reason: error.message })
+        ? new InvalidInputError({ reason: safeCliErrorReason(error) })
         : error;
     dependencies.writeStderr(`${JSON.stringify(toCliErrorEnvelope(protocolError))}\n`);
     return 1;

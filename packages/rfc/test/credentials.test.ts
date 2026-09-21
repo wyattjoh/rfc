@@ -260,4 +260,52 @@ describe("authentication process protocol", () => {
       error: { code: "credential_access_denied" },
     });
   });
+
+  test("rejects near-miss credential flag names before the CLI parses them", async () => {
+    const secret = "sk-live-near-miss-secret";
+    const store: CredentialStore = {
+      get: async () => null,
+      set: async () => undefined,
+      delete: async () => false,
+    };
+
+    for (const argument of [
+      `--api-token=${secret}`,
+      `--typesafe-token=${secret}`,
+      `--API-KEY=${secret}`,
+      `--client-secret=${secret}`,
+      `--credential=${secret}`,
+      "--api-token",
+    ]) {
+      const result = await runAuth(["auth", "add", argument], undefined, store);
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).not.toContain(secret);
+      expect(JSON.parse(result.stderr)).toEqual({
+        schemaVersion: 2,
+        kind: "error",
+        error: {
+          code: "invalid_input",
+          message: "The TypeSafe API key must be supplied through --stdin or an interactive prompt",
+        },
+      });
+    }
+  });
+
+  test("leaves the engine's own flag names outside the credential deny-list", async () => {
+    const store = makeCredentialStore(makeNativeSecrets("stored-secret"));
+
+    for (const argument of [
+      "--typesafe-api-url=https://example.test",
+      "--datatracker-api-url=https://example.test",
+      "--cache-directory=/tmp/rfc-cache",
+      "--search-term=tokenizer",
+      "--policy-preset=balanced",
+    ]) {
+      const result = await runAuth(["auth", "status", argument], undefined, store);
+      // The flag is not valid for `auth status`, but it must fail as an
+      // ordinary parse error rather than as a rejected credential argument.
+      expect(result.stderr).not.toContain("must be supplied through --stdin");
+    }
+  });
 });

@@ -1078,4 +1078,28 @@ describe("rfc process protocol", () => {
     expect(result.stdout).toBe("");
     expect(envelope.error.code).toBe("invalid_input");
   });
+
+  test("never copies argument text into a parse-failure envelope", async () => {
+    // Effect's CliError messages interpolate the offending value verbatim
+    // (`InvalidValue` renders `Invalid value for flag --x: "<value>"`), so the
+    // envelope must be derived from the failure tag and never from argv.
+    const marker = "sk-live-argv-marker";
+    const invocations: ReadonlyArray<ReadonlyArray<string>> = [
+      ["research", "--question", "--offset", marker],
+      ["verify-citation", "--rfc", "RFC9110", "--offset", marker],
+      ["source-cache", "status", `--unknown-flag=${marker}`],
+      ["source-cache", "status", marker],
+      [marker],
+      ["auth", marker],
+    ];
+
+    for (const argv of invocations) {
+      const result = await runCli([...argv]);
+
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).not.toContain(marker);
+      expect(JSON.parse(result.stderr).error.code).toBe("invalid_input");
+    }
+  });
 });
