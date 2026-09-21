@@ -128,6 +128,13 @@ export const RetrievalRequestTraceSchema = Schema.Struct({
   status: Schema.NullOr(Schema.Natural),
   statuses: Schema.Array(Schema.NullOr(Schema.Natural)),
   durationMs: Schema.Number,
+  /**
+   * Whether the response came from the metadata cache instead of upstream.
+   *
+   * The entry is still recorded so the trace continues to describe the shape
+   * of the traversal, but it made no upstream attempt and so carries none.
+   */
+  cached: Schema.optionalKey(Schema.Boolean),
 });
 
 /**
@@ -780,6 +787,7 @@ const fetchJson = Effect.fnUntraced(function* (
           status: null,
           statuses: [],
           durationMs: Math.max(0, finishedAt - startedAt),
+          cached: true,
         },
       };
     }

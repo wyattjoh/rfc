@@ -1779,8 +1779,12 @@ const requestTraceWithinPolicy = (trace: LiveRetrievalTrace, policy: EvaluationP
     trace.requestCount === trace.requests.length &&
     trace.datatrackerRequestCount === datatrackerRequests.length &&
     trace.sourceRequestCount === sourceRequests.length &&
-    trace.requests.every(
-      ({ attempts, statuses }) => attempts > 0 && attempts === statuses.length,
+    // A cached response is still recorded so the trace describes the shape of
+    // the traversal, but it made no upstream attempt and so carries none.
+    trace.requests.every(({ attempts, statuses, cached }) =>
+      cached === true
+        ? attempts === 0 && statuses.length === 0
+        : attempts > 0 && attempts === statuses.length,
     ) &&
     datatrackerRequests.every(
       ({ attempts }) => attempts <= policy.retrievalLimits.datatrackerMaxAttempts,
