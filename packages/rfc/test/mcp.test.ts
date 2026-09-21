@@ -1,8 +1,13 @@
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import {
+  CitationOffsetMismatchError,
+  CitationQuoteAmbiguousError,
+  CitationVerificationResultSchema,
   EvidenceBundleSchema,
   InvalidInputError,
+  citationOffsetUnit,
+  type CitationVerificationRequest,
   type ResearchRequest,
   type RfcClient,
 } from "@wyattjoh/rfc-core";
@@ -94,6 +99,49 @@ const stubEvidenceBundle = Schema.decodeUnknownSync(EvidenceBundleSchema)({
     atomicity: null,
     selection: [],
     classification: [],
+  },
+});
+
+const stubCitationVerification = Schema.decodeUnknownSync(CitationVerificationResultSchema)({
+  schemaVersion: 2,
+  kind: "citation_verification",
+  verdict: "verified",
+  rfc: {
+    identifier: "RFC9110",
+    rfcNumber: 9110,
+    title: "HTTP Semantics",
+    abstract: "HTTP semantics.",
+    status: "published",
+    stream: "ietf",
+    canonicalUrl: "https://datatracker.ietf.org/doc/rfc9110/",
+  },
+  claim: "The client sends a request.",
+  quote: "The client MUST send a request containing the target resource.",
+  provenance: {
+    identifier: "RFC9110",
+    rfcNumber: 9110,
+    sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+    canonicalUrl: "https://datatracker.ietf.org/doc/rfc9110/",
+    sourceHash: "fixture-source-hash",
+    offsetUnit: citationOffsetUnit,
+    startOffset: 17,
+    endOffset: 79,
+    section: "1. Requirements",
+    fetchedAt: "2026-01-01T00:00:00.000Z",
+  },
+  probabilities: { verified: 0.95, unsupported: 0.025, contradicted: 0.025 },
+  confidence: 0.95,
+  diagnostics: {
+    schemaVersion: 2,
+    policyVersion: "citation-v2",
+    requestedModel: "jev-1.13.0",
+    resolvedModel: "jev-1.13.0",
+    resolvedModels: ["jev-1.13.0"],
+    usage: { inputTokens: 12, outputTokens: 8 },
+    inputCost: { estimatedUsd: 0.0000005, rateUsdPerMillionTokens: 0.042 },
+    timings: { metadataMs: 1, sourceMs: 1, verificationMs: 1, totalMs: 3 },
+    probabilities: { verified: 0.95, unsupported: 0.025, contradicted: 0.025 },
+    confidence: 0.95,
   },
 });
 
@@ -395,6 +443,147 @@ describe("RFC MCP agent surface", () => {
       expect(closes).toBe(2);
     } finally {
       await connection.close();
+    }
+  });
+
+  test("verifies citations through the MCP layer and normalizes the optional offset", async () => {
+    const requests: Array<CitationVerificationRequest> = [];
+    let closes = 0;
+    const createClient = (async () =>
+      ({
+        sourceCacheStatus: async () => {
+          throw new Error("Unexpected cache call");
+        },
+        sourceCacheRemove: async () => {
+          throw new Error("Unexpected cache call");
+        },
+        research: async () => {
+          throw new Error("Unexpected research call");
+        },
+        verifyCitation: async (request: CitationVerificationRequest) => {
+          requests.push(request);
+          return stubCitationVerification;
+        },
+        close: async () => {
+          closes += 1;
+        },
+        [Symbol.asyncDispose]: async () => undefined,
+      }) satisfies RfcClient) as RfcOperationDependencies["createClient"];
+    const connection = await connect(makeDependencies({ createClient }));
+
+    try {
+      const withOffset = await connection.client.callTool({
+        name: "verify_citation",
+        arguments: {
+          rfc: "RFC9110",
+          claim: "The client sends a request.",
+          quote: "The client MUST send a request containing the target resource.",
+          offset: 17,
+        },
+      });
+
+      expect(withOffset.isError).not.toBe(true);
+      expect(withOffset.structuredContent).toMatchObject({
+        schemaVersion: 2,
+        kind: "citation_verification",
+        verdict: "verified",
+        rfc: { identifier: "RFC9110" },
+        provenance: { offsetUnit: citationOffsetUnit, startOffset: 17, endOffset: 79 },
+      });
+      const rendered = textContent(withOffset);
+      expect(rendered).toContain("Verdict: verified");
+      expect(rendered).toContain("Offsets: 17-79");
+      expect(rendered).toContain("Section: 1. Requirements");
+
+      const withoutOffset = await connection.client.callTool({
+        name: "verify_citation",
+        arguments: {
+          rfc: "RFC9110",
+          claim: "The client sends a request.",
+          quote: "The client MUST send a request containing the target resource.",
+        },
+      });
+      expect(withoutOffset.isError).not.toBe(true);
+
+      // An omitted offset reaches the client as an explicit null, not as a
+      // missing key, so the unique-occurrence path is chosen deliberately.
+      expect(requests).toEqual([
+        {
+          schemaVersion: 2,
+          rfc: "RFC9110",
+          claim: "The client sends a request.",
+          quote: "The client MUST send a request containing the target resource.",
+          offset: 17,
+        },
+        {
+          schemaVersion: 2,
+          rfc: "RFC9110",
+          claim: "The client sends a request.",
+          quote: "The client MUST send a request containing the target resource.",
+          offset: null,
+        },
+      ]);
+      expect(closes).toBe(2);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  test("maps citation retrieval failures to their typed MCP error codes", async () => {
+    const failures = [
+      {
+        error: new CitationQuoteAmbiguousError({ rfc: "RFC9110", occurrences: 3 }),
+        code: "citation_quote_ambiguous",
+        message: "The quotation occurs 3 times in RFC RFC9110; provide an exact offset",
+      },
+      {
+        error: new CitationOffsetMismatchError({ rfc: "RFC9110", offset: 17 }),
+        code: "citation_offset_mismatch",
+        message: "The supplied offset does not identify the exact quotation in RFC RFC9110",
+      },
+    ] as const;
+
+    for (const { error, code, message } of failures) {
+      const createClient = (async () =>
+        ({
+          sourceCacheStatus: async () => {
+            throw new Error("Unexpected cache call");
+          },
+          sourceCacheRemove: async () => {
+            throw new Error("Unexpected cache call");
+          },
+          research: async () => {
+            throw new Error("Unexpected research call");
+          },
+          verifyCitation: async () => {
+            throw error;
+          },
+          close: async () => undefined,
+          [Symbol.asyncDispose]: async () => undefined,
+        }) satisfies RfcClient) as RfcOperationDependencies["createClient"];
+      const connection = await connect(makeDependencies({ createClient }));
+
+      try {
+        const result = await connection.client.callTool({
+          name: "verify_citation",
+          arguments: {
+            rfc: "RFC9110",
+            claim: "The client sends a request.",
+            quote: "The client MUST send a request containing the target resource.",
+            offset: 17,
+          },
+        });
+
+        expect(result.isError).toBe(true);
+        expect(result.structuredContent).toBeUndefined();
+        expect(JSON.parse(textContent(result))).toEqual({
+          schemaVersion: 2,
+          kind: "error",
+          error: { code, message },
+        });
+      } finally {
+        await connection.close();
+      }
     }
   });
 
