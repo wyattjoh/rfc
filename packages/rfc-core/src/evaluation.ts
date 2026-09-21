@@ -784,9 +784,6 @@ const EvaluationTimingsSchema = Schema.Struct({
 export type EvaluationTimings = Schema.Schema.Type<typeof EvaluationTimingsSchema>;
 
 /**
- * Schema for one sanitized evaluation observation.
- */
-/**
  * RFC source identity preserved in an evaluation observation.
  */
 export const EvaluationSourceProvenanceSchema = Schema.Struct({
@@ -801,6 +798,9 @@ export type EvaluationSourceProvenance = Schema.Schema.Type<
   typeof EvaluationSourceProvenanceSchema
 >;
 
+/**
+ * Schema for one sanitized evaluation observation.
+ */
 export const EvaluationObservationSchema = Schema.Struct({
   schemaVersion: Schema.Literal(evaluationSchemaVersion),
   caseId: Schema.NonEmptyString,

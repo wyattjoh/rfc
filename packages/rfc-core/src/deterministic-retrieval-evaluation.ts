@@ -301,9 +301,21 @@ export const evaluateDeterministicRetrievalCase = async (
       }
       case "update_chain": {
         const result = await runKnown();
+        const contexts = result.contexts ?? [];
+        const requested = contexts.find(({ role }) => role === "requested");
+        const current = contexts.find(({ role }) => role === "current");
+        const relationship = current?.relationshipPath[0];
         passed =
           result.diagnostics.retrieval.traversalContexts === 2 &&
-          result.diagnostics.retrieval.traversalDepth === 1;
+          result.diagnostics.retrieval.traversalDepth === 1 &&
+          contexts.length === 2 &&
+          requested?.document.identifier === "RFC9110" &&
+          requested.relationshipPath.length === 0 &&
+          current?.document.identifier === "RFC9111" &&
+          current.relationshipPath.length === 1 &&
+          relationship?.from === "RFC9110" &&
+          relationship.to === "RFC9111" &&
+          relationship.relationship === "updates";
         break;
       }
       case "cycle_safety": {
@@ -322,10 +334,22 @@ export const evaluateDeterministicRetrievalCase = async (
         const urls = result.diagnostics.retrieval.requests
           .filter(({ kind }) => kind === "metadata")
           .map(({ url }) => url);
+        const expectedQueries = [
+          ["title__icontains", "first term"],
+          ["abstract__icontains", "first term"],
+          ["title__icontains", "second term"],
+          ["abstract__icontains", "second term"],
+        ] as const;
         passed =
-          urls.length === 4 &&
-          urls.slice(0, 2).every((url) => url.includes("first+term")) &&
-          urls.slice(2).every((url) => url.includes("second+term"));
+          urls.length === expectedQueries.length &&
+          expectedQueries.every(([field, term], index) => {
+            const url = urls[index];
+            if (url === undefined) return false;
+            const searchParams = new URL(url).searchParams;
+            const otherField =
+              field === "title__icontains" ? "abstract__icontains" : "title__icontains";
+            return searchParams.get(field) === term && !searchParams.has(otherField);
+          });
         break;
       }
       case "candidate_fan_out": {
