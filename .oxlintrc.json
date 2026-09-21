@@ -1,4 +1,10 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "ignorePatterns": [".pi/**", ".scratch/**", "**/node_modules/**", "**/dist/**"]
+  "ignorePatterns": [
+    ".pi/**",
+    ".scratch/**",
+    ".claude/worktrees/**",
+    "**/node_modules/**",
+    "**/dist/**"
+  ]
 }
