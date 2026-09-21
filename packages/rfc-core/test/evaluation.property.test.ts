@@ -195,6 +195,59 @@ describe("evaluation invariants", () => {
     }
   });
 
+  test("accepting a citation outcome other than verified always fails the safety gate", () => {
+    // The gate this pins down is the whole point of a precision-first tool:
+    // `verified` is the only citation outcome an answer may rest on, so every
+    // other one, accepted, has to be counted and has to fail the release.
+    const citationCases = evaluationCorpus.cases.filter(
+      (evaluationCase) => evaluationCase.kind === "citation",
+    );
+    expect(citationCases.length).toBeGreaterThan(0);
+
+    const retrievalObservations = evaluationCorpus.retrievalCases.map((retrievalCase) => ({
+      schemaVersion: evaluationSchemaVersion,
+      caseId: retrievalCase.id,
+      category: retrievalCase.category,
+      seam: retrievalCase.seam,
+      passed: true,
+      traces: [],
+      cacheEvidence: null,
+      errorKind: null,
+    }));
+
+    // Without the substitution the same corpus clears the gate, so the
+    // failures below are caused by the unsafe acceptance and nothing else.
+    const baseline = makeEvaluationReport(
+      evaluationCorpus,
+      evaluationCorpus.cases.map((evaluationCase) => generatedObservation(evaluationCase, 0)),
+      retrievalObservations,
+    );
+    expect(baseline.metrics.unsafeCitationAcceptances).toBe(0);
+    expect(baseline.gate.citationSafetyPassed).toBe(true);
+
+    for (const unsafeCase of citationCases) {
+      for (const outcome of ["unsupported", "contradicted", "fabricated"] as const) {
+        const observations = evaluationCorpus.cases.map((evaluationCase) => {
+          const observation = generatedObservation(evaluationCase, 0);
+          if (evaluationCase.id !== unsafeCase.id) return observation;
+          return Schema.decodeUnknownSync(EvaluationObservationSchema)({
+            ...JSON.parse(JSON.stringify(observation)),
+            expectedOutcome: outcome,
+            observedOutcome: outcome,
+            allowedOutcomes: [outcome],
+            acceptedByPolicy: true,
+            unsafeCitationAccepted: true,
+          });
+        });
+        const report = makeEvaluationReport(evaluationCorpus, observations, retrievalObservations);
+
+        expect(report.metrics.unsafeCitationAcceptances).toBeGreaterThan(0);
+        expect(report.gate.citationSafetyPassed).toBe(false);
+        expect(report.gate.passed).toBe(false);
+      }
+    }
+  });
+
   test("generated decision distributions stay valid at every boundary", () => {
     for (let numerator = 0; numerator <= 100; numerator += 1) {
       const yes = numerator / 100;
