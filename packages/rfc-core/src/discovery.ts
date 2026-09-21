@@ -423,7 +423,9 @@ const statusFromDocument = (document: DatatrackerDocument): string => {
   return (
     document.states
       ?.map(lastPathSegment)
-      .find((status) => status.length > 0 && !/^\d+$/.test(status)) ?? "published"
+      // Reporting "published" here would assert a state Datatracker did not
+      // return. "unknown" matches the fallback used for an absent stream.
+      .find((status) => status.length > 0 && !/^\d+$/.test(status)) ?? "unknown"
   );
 };
 

@@ -680,6 +680,10 @@ export const loadLiveRfcSource = Effect.fnUntraced(function* (
   FileSystem.FileSystem | LiveRfcSource | Path.Path
 > {
   const { corrupt, entry } = yield* readEntry(sourceDirectory, document);
+  // A corrupt entry can never serve evidence, so it is discarded before the
+  // refetch that would overwrite it. Leaving it in place means a refetch
+  // failure strands the unusable file and every later request rereads it.
+  if (corrupt) yield* removeEntry(sourceDirectory, document.identifier);
   const now = yield* Clock.currentTimeMillis;
   // A future fetchedAt cannot describe a response this client received, so the
   // entry's freshness window is not trustworthy and must be revalidated.
