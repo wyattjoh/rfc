@@ -1,6 +1,6 @@
 ---
 name: rfc-lookup
-description: Answer questions about published IETF RFCs from exact authoritative source text through the linked typed `rfc` CLI. Use for RFC requirements, definitions, procedures, updates, obsoletions, or citations.
+description: Answer questions about published IETF RFCs from exact authoritative source text through the linked typed `rfc` CLI. Use for RFC requirements, definitions, procedures, updates, obsoletions, or citations. Read this SKILL.md before using the CLI. For one atomic question, never exceed two research calls and two citation calls, never loop by rephrasing a valid result, and preserve the status of qualified review candidates.
 argument-hint: "[RFC number or question]"
 ---
 
@@ -8,8 +8,43 @@ argument-hint: "[RFC number or question]"
 
 Use the linked `rfc` binary as the complete RFC research backend. The CLI owns
 live RFC discovery, source retrieval, evidence selection, RFC currency, and
-citation verification. Compose only a short answer from accepted evidence;
-never answer an RFC question from memory or a second provider.
+citation verification. Compose only a short answer from returned canonical
+passages, preserving whether each passage is accepted evidence or a qualified
+review candidate; never answer from memory or a second provider.
+
+## Bounded agent workflow
+
+Use `rfc` directly. Do not resolve its installation path, invoke its TypeScript
+entrypoint with `bun`, read source-cache internals, or use shell loops to probe
+wording and offsets.
+
+For each simple atomic user question, use this hard budget:
+
+1. Run one `rfc research --format human` call.
+2. Only when that result has no usable evidence, run at most one targeted
+   follow-up research call. Do not repeatedly rephrase a valid result to chase
+   `answered` or a higher confidence.
+3. If the result includes accepted evidence, quote it directly with provenance.
+   If it includes a review candidate, quote it only as qualified, unaccepted
+   evidence. Verify at most two paraphrased claims once each; exact reproduction
+   of a returned passage does not require duplicate verification.
+4. Stop after the budget. Do not say that no source passage was found when the
+   CLI returned a review candidate; report its status and qualification. Keep
+   nearby protocol categories distinct rather than substituting one for another.
+
+A direct quote-verification request starts with one `verify-citation` call and
+needs no research preflight. If the quote is `fabricated`, use at most one
+research call to locate current wording and at most one verification call for
+that replacement. Never guess or brute-force byte offsets: copy an offset from
+research provenance, or omit it when the quote occurs only once. If replacement
+research returns a review candidate, report that exact candidate and its
+qualification instead of re-querying for a higher score.
+
+Use `--format human` for agent-facing calls. It includes status, accepted quotes,
+qualified review candidates, source URLs, byte offsets, input tokens, and
+estimated cost without dumping full model
+diagnostics into the conversation. Use default JSON only when code needs to
+extract a specific field, and summarize it before returning it to model context.
 
 ## Install and link the CLI
 
@@ -18,12 +53,12 @@ From the repository checkout:
 ```sh
 bun install --frozen-lockfile
 bun run build
-(cd packages/rfc && bun link --global)
+(cd packages/rfc && bun link)
 rfc --help
 ```
 
-The skill's automation contract is the `rfc` executable, not a legacy script or
-an embedded library call.
+The skill's automation contract is the `rfc` executable, not a legacy script,
+its resolved installation path, or an embedded library call.
 
 ## Authenticate once with Bun.secrets
 
@@ -43,14 +78,16 @@ a plaintext fallback.
 
 ## Version-two semantic protocol
 
-Use JSON standard input for automation. Non-whitespace standard input is
-authoritative over convenience flags. JSON is the default output. A valid
-research status is a successful process result even when it is not `answered`.
+Use human output for normal agent work and JSON standard input only when a
+multiline quote or programmatic extraction requires it. Non-whitespace standard
+input is authoritative over convenience flags. JSON is the default output. A
+valid research status is a successful process result even when it is not
+`answered`.
 
 ### Research one known RFC
 
 ```sh
-cat <<'JSON' | rfc research
+cat <<'JSON' | rfc research --format human
 {
   "schemaVersion": 2,
   "question": "What does RFC 9110 require a client to send?",
@@ -70,7 +107,7 @@ verbatim in Datatracker query URLs and may appear in upstream access logs. The
 full natural-language question is not sent to Datatracker.
 
 ```sh
-cat <<'JSON' | rfc research
+cat <<'JSON' | rfc research --format human
 {
   "schemaVersion": 2,
   "question": "Which published RFC defines HTTP caching requirements?",
@@ -86,23 +123,41 @@ query from the question, or run a catalog preflight: each supplied term appears
 in Datatracker query URLs and can be retained in upstream access logs.
 
 The result is a version-two `evidence_bundle` containing `status`, exact
-`evidence`, optional requested/current `contexts`, and bounded `diagnostics`.
-Each evidence passage includes an unchanged quote and provenance with RFC
-identity, nullable section, canonical URLs, source hash, `offsetUnit`, and UTF-8
-byte offsets. Metadata, relationships, candidate collections, questions, and
-model responses are request-local and are not persisted.
+`evidence`, optional exact `reviewCandidates`, optional requested/current
+`contexts`, and bounded `diagnostics`. Review candidates are canonical source
+passages surfaced only for bounded review; they are never accepted evidence and
+must be labeled as qualified when quoted. Each human-rendered passage names its
+RFC and whether it came from the requested or a current context. Do not answer a
+question about the requested RFC with a current-context passage unless you
+explicitly explain the distinction.
+`diagnostics.usage.inputTokens` reports the provider-observed input tokens, while
+`diagnostics.inputCost` reports the estimated USD charge and its per-million-token
+rate. Treat a null estimate as unavailable rather than zero cost. Each successful
+research or citation operation atomically updates the per-user running total in
+`~/.config/rfc/usage.json`; its unpriced and missing-usage counters qualify the
+cumulative estimate. Each evidence passage includes an unchanged quote and
+provenance with RFC identity, nullable section, canonical URLs, source hash,
+`offsetUnit`, and UTF-8 byte offsets.
+Metadata, relationships, candidate collections, questions, and model responses
+are request-local and are not persisted.
 
-When the user supplies multiple explicit, independently answerable questions,
-run one `rfc research` process per atomic question. Keep each input and output
-separate. Do not merge questions or invent a split for an ambiguous request.
+When the user supplies up to two explicit, independently answerable questions,
+run one `rfc research` process per atomic question. For example, “Can the server
+issue this?” and “What protections are required?” are two atomic questions even
+when they share a topic. Keep each input and output separate. Do not merge
+questions, split into more than two parts, or invent a split for an ambiguous
+request.
 
-### Verify every claim
+### Verify accepted claims once
 
-Make one citation request for every factual claim in the short answer. Use the
-exact evidence quote and its `provenance.startOffset` when available:
+Keep a simple answer to at most two factual claims. Exact reproduction of a
+returned passage with its status and provenance needs no duplicate citation
+call. For a paraphrased claim, make one citation request, once, using the exact
+returned quote and byte offset. Do not split one claim into multiple paraphrased
+verification attempts:
 
 ```sh
-cat <<'JSON' | rfc verify-citation
+cat <<'JSON' | rfc verify-citation --format human
 {
   "schemaVersion": 2,
   "rfc": "RFC9110",
@@ -113,11 +168,15 @@ cat <<'JSON' | rfc verify-citation
 JSON
 ```
 
-Only `verified` supports an unqualified factual claim. Remove or qualify claims
-whose verdict is `unsupported`, `contradicted`, or `fabricated`. Present each
-accepted normative claim with its unchanged quote, RFC identifier, section when
-available, byte offsets, and canonical source URL. Never repair quote wording or
-replace an evidence gap with recall.
+Only accepted research evidence or a `verified` citation supports an
+unqualified factual claim. A verified citation is an independent acceptance
+path even when discovery was fail-closed. A review candidate may be reproduced
+exactly only when explicitly labeled unaccepted or `needs_review`; do not turn it
+into an unqualified paraphrase. Remove or qualify claims whose verdict is
+`unsupported`, `contradicted`, or `fabricated`. Present each accepted normative
+claim with its unchanged quote, RFC identifier, section when available, byte
+offsets, and canonical source URL. Never repair quote wording, retry with guessed
+offsets, or replace an evidence gap with recall.
 
 ## RFC source-cache operations
 
@@ -161,11 +220,12 @@ and stop. Common recovery actions:
 | `source_cache_failed` / `source_fetch_failed` / `source_revalidation_failed` | Retry the authoritative source operation; do not substitute another representation or stale text. |
 | `rfc_not_found`                                                              | Correct the exact RFC identifier or make a topic request with explicit search terms.              |
 | `decision_model_failed`                                                      | Report provider failure after bounded retries; do not switch providers or models.                 |
-| `citation_quote_ambiguous` / `citation_offset_mismatch`                      | Supply the exact UTF-8 byte offset from provenance.                                               |
+| `citation_quote_ambiguous` / `citation_offset_mismatch`                      | Never guess. Copy the exact UTF-8 byte offset from research provenance, or stop if none exists.   |
 | `internal_error` / `configuration_error`                                     | Report an operational failure instead of asserting an answer.                                     |
 
-Never turn an operational failure into a research status or a fail-closed status
-into an affirmative answer.
+Never turn an operational failure into a research status or unverified
+fail-closed evidence into an affirmative answer. A valid non-answer result is
+not an operational failure and must not trigger a rephrasing loop.
 
 ## Verification boundaries
 

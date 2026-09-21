@@ -13,6 +13,7 @@ import { NodeServices } from "@effect/platform-node";
 import { Console, Effect, Option } from "effect";
 import { CliError, Command, Flag } from "effect/unstable/cli";
 import { automaticAnswerActivationFor, readCliConfig } from "./config";
+import { makeUsageRecorder, type UsageRecorder } from "./usage-store";
 import {
   CredentialInputError,
   CredentialMissingError,
@@ -52,6 +53,10 @@ export interface RfcCliDependencies {
    * Write one already-rendered value to standard error.
    */
   readonly writeStderr: (value: string) => void;
+  /**
+   * Persist one successful operation in the per-user usage totals.
+   */
+  readonly recordUsage: UsageRecorder;
   /**
    * Construct the RFC client for one command invocation.
    *
@@ -123,6 +128,11 @@ const credentialFromStdinAlias = Flag.Boolean("from-stdin").pipe(
   Flag.withDefault(false),
 );
 
+const renderTokenCount = (value: number | null): string => value?.toString() ?? "unavailable";
+
+const renderEstimatedUsd = (value: number | null): string =>
+  value === null ? "unavailable" : `$${value.toFixed(9)}`;
+
 const readProcessStandardInput = async (): Promise<string> => {
   if (process.stdin.isTTY) return "";
   const chunks: Array<string> = [];
@@ -193,6 +203,7 @@ export const makeDefaultCliDependencies = (): RfcCliDependencies => ({
   promptCredential: readMaskedCredential,
   writeStdout: (value) => process.stdout.write(value),
   writeStderr: (value) => process.stderr.write(value),
+  recordUsage: makeUsageRecorder(),
   createClient: createRfcClient,
 });
 
@@ -295,6 +306,27 @@ const parseCitationOffset = (value: string): number => {
 const makeApplication = (dependencies: RfcCliDependencies) => {
   const writeStdout = (value: string): Effect.Effect<void> =>
     Effect.sync(() => dependencies.writeStdout(`${value}\n`));
+
+  const recordUsage = (
+    inputTokens: number | null,
+    estimatedInputCostUsd: number | null,
+  ): Effect.Effect<void> =>
+    Effect.promise(async () => {
+      try {
+        await dependencies.recordUsage({ inputTokens, estimatedInputCostUsd });
+      } catch {
+        dependencies.writeStderr(
+          `${JSON.stringify({
+            schemaVersion,
+            kind: "warning",
+            warning: {
+              code: "usage_accounting_failed",
+              message: "Unable to update the per-user RFC usage totals",
+            },
+          })}\n`,
+        );
+      }
+    });
 
   const withSourceCacheClient = <A>(
     cacheDirectory: string,
@@ -440,6 +472,10 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
         (activeClient) =>
           Effect.tryPromise({ try: () => activeClient.close(), catch: (error) => error }),
       );
+      yield* recordUsage(
+        result.diagnostics.usage.inputTokens,
+        result.diagnostics.inputCost.estimatedUsd,
+      );
 
       if (flags.format === "human") {
         yield* writeStdout(`Verdict: ${result.verdict}`);
@@ -449,6 +485,13 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
           `Offsets: ${result.provenance.startOffset ?? "unknown"}-${result.provenance.endOffset ?? "unknown"}`,
         );
         yield* writeStdout(`Section: ${result.provenance.section ?? "unknown"}`);
+        yield* writeStdout(`Source: ${result.provenance.sourceUrl}`);
+        yield* writeStdout(
+          `Input tokens: ${renderTokenCount(result.diagnostics.usage.inputTokens)}`,
+        );
+        yield* writeStdout(
+          `Estimated input cost (USD): ${renderEstimatedUsd(result.diagnostics.inputCost.estimatedUsd)}`,
+        );
         return;
       }
 
@@ -542,6 +585,10 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
         (activeClient) =>
           Effect.tryPromise({ try: () => activeClient.close(), catch: (error) => error }),
       );
+      yield* recordUsage(
+        result.diagnostics.usage.inputTokens,
+        result.diagnostics.inputCost.estimatedUsd,
+      );
 
       if (flags.format === "human") {
         yield* writeStdout(`Status: ${result.status}`);
@@ -552,9 +599,34 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
           );
         }
         for (const passage of result.evidence) {
+          yield* writeStdout(
+            `Evidence RFC: ${passage.provenance.identifier} (${passage.context} context)`,
+          );
           yield* writeStdout(`Section: ${passage.provenance.section ?? "unknown"}`);
           yield* writeStdout(`Quote: ${passage.quote}`);
+          yield* writeStdout(`Source: ${passage.provenance.sourceUrl}`);
+          yield* writeStdout(
+            `Offsets: ${passage.provenance.startOffset}-${passage.provenance.endOffset} (${passage.provenance.offsetUnit})`,
+          );
         }
+        for (const candidate of result.reviewCandidates ?? []) {
+          yield* writeStdout("Review candidate: not accepted evidence");
+          yield* writeStdout(
+            `Candidate RFC: ${candidate.provenance.identifier} (${candidate.context} context)`,
+          );
+          yield* writeStdout(`Section: ${candidate.provenance.section ?? "unknown"}`);
+          yield* writeStdout(`Quote: ${candidate.quote}`);
+          yield* writeStdout(`Source: ${candidate.provenance.sourceUrl}`);
+          yield* writeStdout(
+            `Offsets: ${candidate.provenance.startOffset}-${candidate.provenance.endOffset} (${candidate.provenance.offsetUnit})`,
+          );
+        }
+        yield* writeStdout(
+          `Input tokens: ${renderTokenCount(result.diagnostics.usage.inputTokens)}`,
+        );
+        yield* writeStdout(
+          `Estimated input cost (USD): ${renderEstimatedUsd(result.diagnostics.inputCost.estimatedUsd)}`,
+        );
         return;
       }
 

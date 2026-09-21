@@ -16,6 +16,7 @@ import {
   DecisionModelError,
   hashRfcSource,
   parseSourceBlocks,
+  shortlistPassageCandidates,
   type EvidenceBundle,
   type RfcClient,
   type RfcClientOptions,
@@ -1387,6 +1388,11 @@ describe("known RFC research", () => {
 
     expect(result.status).toBe("unsupported");
     expect(result.evidence).toEqual([]);
+    expect(result.reviewCandidates).toHaveLength(1);
+    expect(result.reviewCandidates?.[0]).toMatchObject({
+      id: "block-1",
+      selectionProbability: 0.1,
+    });
     expect(result.diagnostics.selection).toEqual([{ candidateId: "block-1", probability: 0.1 }]);
     expect(result.diagnostics.classification).toEqual([]);
   });
@@ -1436,6 +1442,17 @@ describe("known RFC research", () => {
     });
 
     expect(result.status).toBe("needs_review");
+    expect(result.evidence).toEqual([]);
+    expect(result.reviewCandidates).toHaveLength(1);
+    expect(result.reviewCandidates?.[0]).toMatchObject({
+      id: "block-1",
+      selectionProbability: 0.95,
+      provenance: {
+        identifier: "RFC9110",
+        offsetUnit: "utf8-byte",
+      },
+    });
+    expect(result.reviewCandidates?.[0]?.quote).toContain("The client MUST send");
   });
 
   test("rejects invalid provider probability distributions as typed failures", async () => {
@@ -2082,6 +2099,36 @@ describe("known RFC research", () => {
       expect(block.endOffset - block.startOffset).toBeLessThanOrEqual(4_000);
       expect(text.slice(block.startOffset, block.endOffset)).toBe(block.text);
     }
+  });
+
+  test("ranks distinctive protocol anchors above repeated generic request terms", () => {
+    const genericText = "The server processes a request. ".repeat(40);
+    const statusText =
+      "The 421 (Misdirected Request) status code indicates that the request was misdirected.";
+    const blocks = [
+      {
+        id: "generic-request",
+        section: "9.3.4. PUT",
+        startOffset: 0,
+        endOffset: genericText.length,
+        text: genericText,
+      },
+      {
+        id: "status-421",
+        section: "15.5.20. 421 Misdirected Request",
+        startOffset: genericText.length,
+        endOffset: genericText.length + statusText.length,
+        text: statusText,
+      },
+    ];
+
+    expect(
+      shortlistPassageCandidates(
+        blocks,
+        "In RFC 9110, when can a server reject a request with 421?",
+        2,
+      ).map(({ id }) => id),
+    ).toEqual(["status-421", "generic-request"]);
   });
 
   test("keeps exact offsets valid when a source has no recoverable section headings", async () => {

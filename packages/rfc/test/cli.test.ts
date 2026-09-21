@@ -35,17 +35,33 @@ const makeFixtureCredentialStore = (value: string | null = "fixture-key"): Crede
   };
 };
 
+const discardUsage: RfcCliDependencies["recordUsage"] = async () => ({
+  schemaVersion: 1,
+  kind: "rfc_usage_totals",
+  updatedAt: "2026-01-01T00:00:00.000Z",
+  operations: 0,
+  pricedOperations: 0,
+  unpricedOperations: 0,
+  operationsWithoutInputTokens: 0,
+  inputTokens: 0,
+  pricedInputTokens: 0,
+  unpricedInputTokens: 0,
+  estimatedInputCostUsd: 0,
+});
+
 const runCli = async (
   args: Array<string>,
   input: string | undefined = undefined,
   credentialStore: CredentialStore = makeFixtureCredentialStore(),
   createClient: RfcCliDependencies["createClient"] = createRfcClient,
+  recordUsage: RfcCliDependencies["recordUsage"] = discardUsage,
 ): Promise<{ readonly exitCode: number; readonly stdout: string; readonly stderr: string }> => {
   let stdout = "";
   let stderr = "";
   const exitCode = await run(args, {
     credentialStore,
     createClient,
+    recordUsage,
     readStandardInput: async () => input ?? "",
     promptCredential: async () => "fixture-key",
     writeStdout: (value) => {
@@ -196,7 +212,11 @@ const stubEvidenceBundle = {
   evidence: [],
   contexts: [],
   issues: [],
-  diagnostics: { schemaVersion: 2 },
+  diagnostics: {
+    schemaVersion: 2,
+    usage: { inputTokens: 20, outputTokens: 12 },
+    inputCost: { estimatedUsd: 0.00000084, rateUsdPerMillionTokens: 0.042 },
+  },
 };
 
 const makeStubClientFactory = (
@@ -354,6 +374,31 @@ describe("rfc process protocol", () => {
     ).toBe("What must the client send?");
     expect((requests[0] as { readonly schemaVersion: number }).schemaVersion).toBe(2);
     expect(closed).toBe(3);
+  });
+
+  test("preserves a successful result when usage accounting fails", async () => {
+    const requests: Array<unknown> = [];
+    const result = await runCli(
+      ["research", "--question", "What must the client send?", "--rfc", "RFC9110"],
+      undefined,
+      makeFixtureCredentialStore(),
+      makeStubClientFactory(requests, () => undefined),
+      async () => {
+        throw new Error("usage store unavailable");
+      },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ kind: "evidence_bundle" });
+    expect(JSON.parse(result.stderr)).toEqual({
+      schemaVersion: 2,
+      kind: "warning",
+      warning: {
+        code: "usage_accounting_failed",
+        message: "Unable to update the per-user RFC usage totals",
+      },
+    });
+    expect(requests).toHaveLength(1);
   });
 
   test("decodes canonical and repeatable-flag topic requests", async () => {
@@ -529,6 +574,11 @@ describe("rfc process protocol", () => {
       },
     });
     servers.push(server);
+    const usageObservations: Array<Parameters<RfcCliDependencies["recordUsage"]>[0]> = [];
+    const recordUsage: RfcCliDependencies["recordUsage"] = async (observation) => {
+      usageObservations.push(observation);
+      return discardUsage(observation);
+    };
 
     const result = await runCli(
       [
@@ -541,6 +591,9 @@ describe("rfc process protocol", () => {
         `${server.url}api/v1/`,
       ],
       JSON.stringify({ schemaVersion: 2, question: "What must the client send?", rfc: "9110" }),
+      makeFixtureCredentialStore(),
+      createRfcClient,
+      recordUsage,
     );
 
     expect(result.exitCode).toBe(0);
@@ -552,6 +605,11 @@ describe("rfc process protocol", () => {
       "https://www.rfc-editor.org/rfc/rfc9110.txt",
     );
     expect(response.diagnostics.resolvedModel).toBe("jev-1.13.0");
+    expect(response.diagnostics.usage.inputTokens).toBe(20);
+    expect(response.diagnostics.inputCost).toEqual({
+      estimatedUsd: 0.00000084,
+      rateUsdPerMillionTokens: 0.042,
+    });
 
     const human = await runCli(
       [
@@ -566,12 +624,24 @@ describe("rfc process protocol", () => {
         "human",
       ],
       JSON.stringify({ schemaVersion: 2, question: "What must the client send?", rfc: "9110" }),
+      makeFixtureCredentialStore(),
+      createRfcClient,
+      recordUsage,
     );
     expect(human.exitCode).toBe(0);
     expect(human.stderr).toBe("");
     expect(human.stdout).toContain("Status: needs_review");
     expect(human.stdout).toContain("RFC: RFC9110");
+    expect(human.stdout).toContain("Evidence RFC: RFC9110 (requested context)");
     expect(human.stdout).toContain("The client MUST send");
+    expect(human.stdout).toContain("Source: https://www.rfc-editor.org/rfc/rfc9110.txt");
+    expect(human.stdout).toContain("Offsets: 0-80 (utf8-byte)");
+    expect(human.stdout).toContain("Input tokens: 20");
+    expect(human.stdout).toContain("Estimated input cost (USD): $0.000000840");
+    expect(usageObservations).toEqual([
+      { inputTokens: 20, estimatedInputCostUsd: 0.00000084 },
+      { inputTokens: 20, estimatedInputCostUsd: 0.00000084 },
+    ]);
     expect(modelCalls).toBe(4);
   });
 
@@ -819,21 +889,32 @@ describe("rfc process protocol", () => {
       },
     });
     servers.push(server);
-    const convenience = await runCli([
-      "verify-citation",
-      "--cache-directory",
-      cacheDirectory,
-      "--typesafe-api-url",
-      server.url.toString(),
-      "--datatracker-api-url",
-      `${server.url}api/v1/`,
-      "--rfc",
-      "RFC9110",
-      "--claim",
-      "The client sends a request.",
-      "--quote",
-      "The client MUST send a request containing the target resource.",
-    ]);
+    const usageObservations: Array<Parameters<RfcCliDependencies["recordUsage"]>[0]> = [];
+    const recordUsage: RfcCliDependencies["recordUsage"] = async (observation) => {
+      usageObservations.push(observation);
+      return discardUsage(observation);
+    };
+    const convenience = await runCli(
+      [
+        "verify-citation",
+        "--cache-directory",
+        cacheDirectory,
+        "--typesafe-api-url",
+        server.url.toString(),
+        "--datatracker-api-url",
+        `${server.url}api/v1/`,
+        "--rfc",
+        "RFC9110",
+        "--claim",
+        "The client sends a request.",
+        "--quote",
+        "The client MUST send a request containing the target resource.",
+      ],
+      undefined,
+      makeFixtureCredentialStore(),
+      createRfcClient,
+      recordUsage,
+    );
 
     expect(convenience.exitCode).toBe(0);
     expect(convenience.stderr).toBe("");
@@ -845,7 +926,14 @@ describe("rfc process protocol", () => {
         sourceHash,
         sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
       },
-      diagnostics: { resolvedModel: "jev-1.13.0" },
+      diagnostics: {
+        resolvedModel: "jev-1.13.0",
+        usage: { inputTokens: 10 },
+        inputCost: {
+          estimatedUsd: 0.00000042,
+          rateUsdPerMillionTokens: 0.042,
+        },
+      },
     });
 
     const fabricated = await runCli(
@@ -864,10 +952,23 @@ describe("rfc process protocol", () => {
         claim: "The server caches requests.",
         quote: "The server MUST cache requests.",
       }),
+      makeFixtureCredentialStore(),
+      createRfcClient,
+      recordUsage,
     );
 
     expect(fabricated.exitCode).toBe(0);
-    expect(JSON.parse(fabricated.stdout).verdict).toBe("fabricated");
+    const fabricatedResponse = JSON.parse(fabricated.stdout);
+    expect(fabricatedResponse.verdict).toBe("fabricated");
+    expect(fabricatedResponse.diagnostics.usage.inputTokens).toBeNull();
+    expect(fabricatedResponse.diagnostics.inputCost).toEqual({
+      estimatedUsd: null,
+      rateUsdPerMillionTokens: null,
+    });
+    expect(usageObservations).toEqual([
+      { inputTokens: 10, estimatedInputCostUsd: 0.00000042 },
+      { inputTokens: null, estimatedInputCostUsd: null },
+    ]);
     expect(modelCalls).toBe(1);
   });
 

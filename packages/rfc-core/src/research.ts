@@ -40,6 +40,7 @@ import {
 } from "./live-source";
 import { RfcMetadataSchema, type RfcMetadata } from "./metadata";
 import { makeUtf8OffsetMap, moveToUtf8Boundary, utf8OffsetUnit } from "./offsets";
+import { InputTokenCostSchema, estimateInputTokenCost } from "./pricing";
 import { isAutomaticAnswerActivation, type AutomaticAnswerActivation } from "./activation";
 import { RfcSourceCacheError, RfcSourceFetchError, type RfcSource } from "./source";
 
@@ -408,6 +409,25 @@ export const EvidencePassageSchema = Schema.Struct({
  */
 export type EvidencePassage = Schema.Schema.Type<typeof EvidencePassageSchema>;
 
+/**
+ * An exact canonical passage surfaced for bounded human or agent review.
+ *
+ * Review candidates were not accepted as evidence and must never be
+ * represented as accepted evidence.
+ */
+export const ReviewCandidateSchema = Schema.Struct({
+  id: Schema.NonEmptyString,
+  context: RfcContextRoleSchema,
+  quote: Schema.String,
+  selectionProbability: Schema.Number,
+  provenance: EvidenceProvenanceSchema,
+});
+
+/**
+ * A request-local source passage that requires independent review.
+ */
+export type ReviewCandidate = Schema.Schema.Type<typeof ReviewCandidateSchema>;
+
 const TokenUsageSchema = Schema.Struct({
   inputTokens: Schema.NullOr(Schema.Number),
   outputTokens: Schema.NullOr(Schema.Number),
@@ -488,6 +508,7 @@ const InternalResearchDiagnosticsSchema = Schema.Struct({
   resolvedModel: Schema.NonEmptyString,
   resolvedModels: Schema.Array(Schema.NonEmptyString),
   usage: TokenUsageSchema,
+  inputCost: InputTokenCostSchema,
   timings: TimingSchema,
   source: Schema.NullOr(SourceDiagnosticSchema),
   sources: Schema.Union([
@@ -521,6 +542,7 @@ const InternalEvidenceBundleSchema = Schema.Struct({
   contexts: Schema.optionalKey(Schema.Array(InternalRfcResearchContextSchema)),
   currency: Schema.optionalKey(RfcCurrencyReportSchema),
   evidence: Schema.Array(EvidencePassageSchema),
+  reviewCandidates: Schema.optionalKey(Schema.Array(ReviewCandidateSchema)),
   diagnostics: InternalResearchDiagnosticsSchema,
 });
 
@@ -570,6 +592,7 @@ export const ResearchDiagnosticsSchema = Schema.Struct({
   resolvedModel: Schema.NonEmptyString,
   resolvedModels: Schema.Array(Schema.NonEmptyString),
   usage: TokenUsageSchema,
+  inputCost: InputTokenCostSchema,
   timings: DiscoveryTimingSchema,
   source: Schema.NullOr(SourceDiagnosticSchema),
   sources: Schema.optionalKey(
@@ -612,6 +635,9 @@ export const EvidenceBundleSchema = Schema.Struct({
   ),
   currency: Schema.optionalKey(Schema.Union([RfcCurrencyReportSchema, Schema.Undefined])),
   evidence: Schema.Array(EvidencePassageSchema),
+  reviewCandidates: Schema.optionalKey(
+    Schema.Union([Schema.Array(ReviewCandidateSchema), Schema.Undefined]),
+  ),
   diagnostics: ResearchDiagnosticsSchema,
 });
 
@@ -1121,18 +1147,44 @@ export const parseSourceBlocks = (
   return blocks;
 };
 
-const lexicalTerms = (value: string): ReadonlyArray<string> =>
-  [...value.toLowerCase().matchAll(/[a-z0-9]+/g)]
-    .map(([term]) => term)
-    .filter((term) => term.length > 1);
+const lexicalTerms = (value: string): ReadonlyArray<string> => [
+  ...new Set(
+    [
+      ...value
+        .toLowerCase()
+        .replace(/\brfc[\s-]*\d+\b/g, " ")
+        .matchAll(/[a-z0-9]+(?:[./-][a-z0-9]+)*/g),
+    ]
+      .map(([term]) => term)
+      .filter((term) => term.length > 1),
+  ),
+];
 
-const passageLexicalScore = (block: SourceBlock, terms: ReadonlyArray<string>): number => {
+const termMatches = (value: string, term: string): number => value.split(term).length - 1;
+
+const passageLexicalScore = (
+  block: SourceBlock,
+  terms: ReadonlyArray<string>,
+  documentFrequencies: ReadonlyMap<string, number>,
+  documentCount: number,
+): number => {
   const text = block.text.toLowerCase();
   const section = block.section?.toLowerCase() ?? "";
   return terms.reduce((score, term) => {
-    const textMatches = text.split(term).length - 1;
-    const sectionMatches = section.split(term).length - 1;
-    return score + textMatches + sectionMatches * 1.5;
+    const textFrequency = termMatches(text, term);
+    const sectionFrequency = termMatches(section, term);
+    if (textFrequency === 0 && sectionFrequency === 0) return score;
+    const inverseDocumentFrequency = Math.log(
+      1 + documentCount / (1 + (documentFrequencies.get(term) ?? 0)),
+    );
+    const saturatedTextFrequency = 1 + Math.log2(Math.max(1, textFrequency));
+    const anchorWeight = /^\d+$/.test(term) || term.includes("/") ? 4 : 1;
+    return (
+      score +
+      inverseDocumentFrequency *
+        anchorWeight *
+        (saturatedTextFrequency + Math.min(sectionFrequency, 1) * 2)
+    );
   }, 0);
 };
 
@@ -1152,9 +1204,26 @@ export const shortlistPassageCandidates = (
   if (blocks.length === 0 || question.trim().length === 0 || limit <= 0) return [];
   const terms = lexicalTerms(question);
   if (terms.length === 0) return [];
+  const documentFrequencies = new Map(
+    terms.map((term) => [
+      term,
+      blocks.reduce(
+        (count, block) =>
+          count +
+          (termMatches(block.text.toLowerCase(), term) > 0 ||
+          termMatches(block.section?.toLowerCase() ?? "", term) > 0
+            ? 1
+            : 0),
+        0,
+      ),
+    ]),
+  );
 
   return blocks
-    .map((block) => ({ block, score: passageLexicalScore(block, terms) }))
+    .map((block) => ({
+      block,
+      score: passageLexicalScore(block, terms, documentFrequencies, blocks.length),
+    }))
     .filter(({ score }) => score > 0)
     .sort(
       (left, right) => right.score - left.score || left.block.startOffset - right.block.startOffset,
@@ -1937,6 +2006,7 @@ type ContextResearchResult = {
   readonly source: RfcSource;
   readonly status: ResearchStatus;
   readonly evidence: ReadonlyArray<EvidencePassage>;
+  readonly reviewCandidates: ReadonlyArray<ReviewCandidate>;
   readonly diagnostics: Schema.Schema.Type<typeof ContextDiagnosticsSchema>;
   readonly usage: {
     readonly inputTokens: number | undefined;
@@ -1955,6 +2025,58 @@ type PassageSource = {
   readonly source: RfcSource;
   readonly context: RfcContextRole;
   readonly relationshipPath: ReadonlyArray<RfcRelationshipStep>;
+};
+
+const reviewCandidatesFromSelection = (
+  candidates: ReadonlyArray<SourceBlock>,
+  diagnostics: ReadonlyArray<SelectionResult["diagnostics"][number]>,
+  sourceForCandidate: (candidateId: string) => PassageSource | undefined,
+  excludedCandidateIds: ReadonlySet<string>,
+  selectionProbabilityThreshold: number,
+): ReadonlyArray<ReviewCandidate> => {
+  const blocks = new Map(candidates.map((candidate) => [candidate.id, candidate]));
+  const available = diagnostics.filter(
+    (candidate) => !excludedCandidateIds.has(candidate.candidateId),
+  );
+  const strongestSemanticCandidate = [...available].sort(
+    (left, right) => right.probability - left.probability,
+  )[0];
+  const reviewable =
+    strongestSemanticCandidate !== undefined &&
+    strongestSemanticCandidate.probability >= selectionProbabilityThreshold
+      ? [strongestSemanticCandidate]
+      : available.slice(0, 1);
+  return reviewable.flatMap((candidate) => {
+    const block = blocks.get(candidate.candidateId);
+    const context = sourceForCandidate(candidate.candidateId);
+    if (block === undefined || context === undefined) return [];
+    const offsets = makeUtf8OffsetMap(context.source.text);
+    const startOffset = offsets.byteOffsetAtCodeUnit(block.startOffset);
+    const endOffset = offsets.byteOffsetAtCodeUnit(block.endOffset);
+    if (startOffset === undefined || endOffset === undefined) return [];
+    return [
+      {
+        id: block.id,
+        context: context.context,
+        quote: context.source.text.slice(block.startOffset, block.endOffset),
+        selectionProbability: candidate.probability,
+        provenance: {
+          identifier: context.document.identifier,
+          rfcNumber: context.document.rfcNumber,
+          context: context.context,
+          relationshipPath: context.relationshipPath,
+          sourceUrl: context.source.sourceUrl,
+          canonicalUrl: context.document.canonicalUrl,
+          sourceHash: context.source.contentHash,
+          offsetUnit: utf8OffsetUnit,
+          startOffset,
+          endOffset,
+          section: block.section,
+          fetchedAt: context.source.fetchedAt,
+        },
+      } satisfies ReviewCandidate,
+    ];
+  });
 };
 
 const sourceDiagnostic = (
@@ -2126,6 +2248,21 @@ const researchContext = Effect.fnUntraced(function* (
       },
     });
   }
+  const reviewCandidates =
+    evidence.length === 0
+      ? reviewCandidatesFromSelection(
+          candidates,
+          selection.diagnostics,
+          () => ({
+            document: plannedContext.document,
+            source,
+            context: plannedContext.role,
+            relationshipPath: plannedContext.relationshipPath,
+          }),
+          new Set(evidence.map((passage) => passage.id)),
+          policy.selectionProbabilityThreshold,
+        )
+      : [];
   const diagnostics = {
     context: plannedContext.role,
     identifier: plannedContext.document.identifier,
@@ -2154,7 +2291,7 @@ const researchContext = Effect.fnUntraced(function* (
     selection: selection.diagnostics,
     classification: relation.diagnostics,
   } satisfies Schema.Schema.Type<typeof ContextDiagnosticsSchema>;
-  return { context, source, status, evidence, diagnostics, usage, timings };
+  return { context, source, status, evidence, reviewCandidates, diagnostics, usage, timings };
 });
 
 const unavailableContext = (plannedContext: PlannedRfcContext): UnavailableContextResult => {
@@ -2514,6 +2651,15 @@ export const researchKnownRfc = Effect.fnUntraced(function* (
       multiContext ? { ...passage, id: `${passage.provenance.identifier}:${passage.id}` } : passage,
     ),
   );
+  const reviewCandidates = allResults
+    .flatMap(({ reviewCandidates: passages }) =>
+      passages.map((passage) =>
+        multiContext
+          ? { ...passage, id: `${passage.provenance.identifier}:${passage.id}` }
+          : passage,
+      ),
+    )
+    .slice(0, 1);
   const sourceDiagnostics = allResults.map((result) => ({
     context: result.context.role,
     source: sourceDiagnostic(result.source),
@@ -2568,6 +2714,7 @@ export const researchKnownRfc = Effect.fnUntraced(function* (
       inputTokens: usage.inputTokens ?? null,
       outputTokens: usage.outputTokens ?? null,
     },
+    inputCost: estimateInputTokenCost(usage.inputTokens ?? null, resolvedModels),
     timings: {
       ...timings,
       metadataMs: options.metadataMs,
@@ -2593,6 +2740,7 @@ export const researchKnownRfc = Effect.fnUntraced(function* (
     contexts,
     currency: report,
     evidence,
+    reviewCandidates,
     diagnostics,
   });
 });
@@ -2652,6 +2800,7 @@ export const researchTopic = Effect.fnUntraced(function* (
       inputTokens: documentSelection.usage.inputTokens ?? null,
       outputTokens: documentSelection.usage.outputTokens ?? null,
     },
+    inputCost: estimateInputTokenCost(documentSelection.usage.inputTokens ?? null, resolvedModels),
     timings: {
       metadataMs: options.metadataMs,
       sourceMs: 0,
@@ -2696,6 +2845,7 @@ export const researchTopic = Effect.fnUntraced(function* (
       question,
       rfc: null,
       evidence: [],
+      reviewCandidates: [],
       diagnostics,
     });
   }
@@ -2766,6 +2916,16 @@ export const researchTopic = Effect.fnUntraced(function* (
     selection.diagnostics,
     policy,
   );
+  const reviewCandidates =
+    evidence.length === 0
+      ? reviewCandidatesFromSelection(
+          candidates,
+          selection.diagnostics,
+          (candidateId) => blockSources.get(candidateId),
+          new Set(evidence.map((passage) => passage.id)),
+          policy.selectionProbabilityThreshold,
+        )
+      : [];
   const diagnostics = {
     schemaVersion: 2 as const,
     policyVersion: policy.policyVersion,
@@ -2776,6 +2936,7 @@ export const researchTopic = Effect.fnUntraced(function* (
       inputTokens: usage.inputTokens ?? null,
       outputTokens: usage.outputTokens ?? null,
     },
+    inputCost: estimateInputTokenCost(usage.inputTokens ?? null, resolvedModels),
     timings: {
       metadataMs: options.metadataMs,
       sourceMs: elapsed(sourceStarted, sourceFinished),
@@ -2812,6 +2973,7 @@ export const researchTopic = Effect.fnUntraced(function* (
     question,
     rfc: primaryDocument,
     evidence,
+    reviewCandidates,
     diagnostics,
   });
 });

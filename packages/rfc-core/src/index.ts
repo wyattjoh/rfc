@@ -73,6 +73,7 @@ import {
   makeRfcSourceUrl,
 } from "./source";
 import type { RfcSourceFetcher } from "./source";
+import { estimateInputTokenCost } from "./pricing";
 
 export {
   CitationOffsetMismatchError,
@@ -98,6 +99,7 @@ export * from "./evaluation";
 export { RfcSourceRevalidationError } from "./live-source";
 export type { LiveSourceCacheOutcome, LiveRfcSourceResult } from "./live-source";
 export * from "./offsets";
+export { InputTokenCostSchema, estimateInputTokenCost, type InputTokenCost } from "./pricing";
 export {
   AnswerRelationSchema,
   DecisionModelError,
@@ -106,6 +108,7 @@ export {
   EvidenceProvenanceSchema,
   ResearchDiagnosticsSchema,
   ResearchPolicyError,
+  ReviewCandidateSchema,
   ResearchStatusSchema,
   RfcContextRoleSchema,
   RfcCurrencyCompatibilitySchema,
@@ -120,6 +123,7 @@ export {
   precisionPolicy,
   precisionV2Policy,
   researchPolicyPresets,
+  shortlistPassageCandidates,
   type AnswerRelation,
   type EvidenceBundle,
   type EvidencePassage,
@@ -127,6 +131,7 @@ export {
   type ResearchDiagnostics,
   type ResearchPolicy,
   type ResearchStatus,
+  type ReviewCandidate,
   type RfcContextRole,
   type RfcCurrencyCompatibility,
   type RfcCurrencyIssue,
@@ -899,6 +904,7 @@ const liveTopicResearchProgram = Effect.fnUntraced(function* (
         resolvedModel: requestedModel,
         resolvedModels: [],
         usage: { inputTokens: null, outputTokens: null },
+        inputCost: estimateInputTokenCost(null, []),
         timings: {
           metadataMs: discovered.metadataMs,
           sourceMs: 0,

@@ -10,6 +10,7 @@ import {
 } from "./discovery";
 import { LiveRfcSource, RfcSourceRevalidationError } from "./live-source";
 import { makeUtf8OffsetMap, utf8OffsetUnit } from "./offsets";
+import { InputTokenCostSchema, estimateInputTokenCost } from "./pricing";
 import {
   DecisionModelError,
   ResolvedModelName,
@@ -147,6 +148,7 @@ export const CitationVerificationDiagnosticsSchema = Schema.Struct({
   resolvedModel: Schema.NonEmptyString,
   resolvedModels: Schema.Array(Schema.NonEmptyString),
   usage: CitationUsageSchema,
+  inputCost: InputTokenCostSchema,
   timings: CitationTimingsSchema,
   retrieval: Schema.optionalKey(LiveRetrievalTraceSchema),
   probabilities: Schema.Record(Schema.String, Schema.Finite),
@@ -551,6 +553,7 @@ const resultFrom = ({
     resolvedModel,
     resolvedModels,
     usage,
+    inputCost: estimateInputTokenCost(usage.inputTokens, resolvedModels),
     timings,
     retrieval,
     probabilities,
