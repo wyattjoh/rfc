@@ -4,14 +4,21 @@ import {
   Context,
   Duration,
   Effect,
+  FileSystem,
   Layer,
   Option,
+  Path,
   Random,
   Result,
   Schema,
   Stream,
 } from "effect";
 import { Headers, HttpClient, HttpClientError, HttpClientResponse } from "effect/unstable/http";
+import {
+  metadataFreshnessMilliseconds,
+  readFreshMetadata,
+  writeFreshMetadata,
+} from "./metadata-cache";
 import type { RfcMetadata } from "./metadata";
 
 export type { RfcMetadata } from "./metadata";
@@ -316,17 +323,19 @@ export interface RfcDiscoveryService {
    */
   readonly lookupExactRfc: (
     identifier: string,
-  ) => Effect.Effect<LiveExactRfcLookup, RfcDiscoveryError>;
+  ) => Effect.Effect<LiveExactRfcLookup, RfcDiscoveryError, FileSystem.FileSystem | Path.Path>;
   /**
    * Retrieve exact metadata and recursively traverse successor relationships.
    */
-  readonly lookupKnownRfc: (identifier: string) => Effect.Effect<LiveRfcLookup, RfcDiscoveryError>;
+  readonly lookupKnownRfc: (
+    identifier: string,
+  ) => Effect.Effect<LiveRfcLookup, RfcDiscoveryError, FileSystem.FileSystem | Path.Path>;
   /**
    * Discover bounded RFC candidates for ordered caller-supplied terms.
    */
   readonly discoverTopic: (
     searchTerms: ReadonlyArray<string>,
-  ) => Effect.Effect<LiveTopicDiscovery, RfcDiscoveryError>;
+  ) => Effect.Effect<LiveTopicDiscovery, RfcDiscoveryError, FileSystem.FileSystem | Path.Path>;
 }
 
 /**
@@ -499,6 +508,7 @@ const retryDelayMilliseconds = Effect.fnUntraced(function* (
 type FetchedJson = {
   readonly value: unknown;
   readonly trace: RetrievalRequestTrace;
+  readonly headers: Headers.Headers | undefined;
 };
 
 type RequestDeadline = {
@@ -725,6 +735,7 @@ const fetchJsonWithinDeadline = Effect.fnUntraced(function* (
     );
     return {
       value,
+      headers: response.headers,
       trace: {
         kind,
         url,
@@ -748,12 +759,42 @@ const fetchJson = Effect.fnUntraced(function* (
   http: HttpClient.HttpClient,
   url: string,
   kind: "metadata" | "relationships",
-): Effect.fn.Return<FetchedJson, RfcDiscoveryError> {
+  metadataDirectory: string | undefined,
+): Effect.fn.Return<FetchedJson, RfcDiscoveryError, FileSystem.FileSystem | Path.Path> {
   const startedAt = yield* Clock.currentTimeMillis;
-  return yield* fetchJsonWithinDeadline(http, url, kind, {
+  // A response still inside the window Datatracker declared for it is reused
+  // without a request. Currency traversal issues two requests per RFC across
+  // up to eight contexts, all sequential, so this is the difference between a
+  // warm request costing one round trip and costing sixteen.
+  if (metadataDirectory !== undefined) {
+    const cached = yield* readFreshMetadata(metadataDirectory, url);
+    if (cached !== undefined) {
+      const finishedAt = yield* Clock.currentTimeMillis;
+      return {
+        value: cached,
+        headers: undefined,
+        trace: {
+          kind,
+          url,
+          attempts: 0,
+          status: null,
+          statuses: [],
+          durationMs: Math.max(0, finishedAt - startedAt),
+        },
+      };
+    }
+  }
+  const fetched = yield* fetchJsonWithinDeadline(http, url, kind, {
     attempts: 0,
     deadline: { startedAt, elapsedFloor: 0 },
   });
+  if (metadataDirectory !== undefined && fetched.headers !== undefined) {
+    const freshness = metadataFreshnessMilliseconds(fetched.headers);
+    if (freshness !== undefined) {
+      yield* writeFreshMetadata(metadataDirectory, url, fetched.value, freshness);
+    }
+  }
+  return fetched;
 });
 
 const decodeDocument = (
@@ -889,7 +930,8 @@ const fetchExactDocument = Effect.fnUntraced(function* (
   http: HttpClient.HttpClient,
   baseUrl: string,
   name: string,
-): Effect.fn.Return<FetchedExactDocument, RfcDiscoveryError> {
+  metadataDirectory: string | undefined,
+): Effect.fn.Return<FetchedExactDocument, RfcDiscoveryError, FileSystem.FileSystem | Path.Path> {
   const url = yield* Effect.try({
     try: () => makeExactDocumentUrl(baseUrl, name),
     catch: (error) =>
@@ -900,7 +942,7 @@ const fetchExactDocument = Effect.fnUntraced(function* (
         attempts: 0,
       }),
   });
-  const response = yield* fetchJson(http, url, "metadata");
+  const response = yield* fetchJson(http, url, "metadata", metadataDirectory);
   const document = yield* decodeDocument(response.value, url, response.trace.attempts);
   if (document.name.toLowerCase() !== name || document.rfc_number !== Number(name.slice(3))) {
     return yield* new RfcDiscoveryError({
@@ -925,10 +967,16 @@ const lookupOneRfc = Effect.fnUntraced(function* (
   http: HttpClient.HttpClient,
   baseUrl: string,
   name: string,
-): Effect.fn.Return<ExactLookup, RfcDiscoveryError> {
-  const exact = yield* fetchExactDocument(http, baseUrl, name);
+  metadataDirectory: string | undefined,
+): Effect.fn.Return<ExactLookup, RfcDiscoveryError, FileSystem.FileSystem | Path.Path> {
+  const exact = yield* fetchExactDocument(http, baseUrl, name, metadataDirectory);
   const relationshipUrl = makeSuccessorUrl(baseUrl, name);
-  const relationshipResponse = yield* fetchJson(http, relationshipUrl, "relationships");
+  const relationshipResponse = yield* fetchJson(
+    http,
+    relationshipUrl,
+    "relationships",
+    metadataDirectory,
+  );
   const relationshipPage = yield* decodeRelationships(
     relationshipResponse.value,
     relationshipUrl,
@@ -958,7 +1006,8 @@ const lookupExactRfc = Effect.fnUntraced(function* (
   http: HttpClient.HttpClient,
   baseUrl: string,
   identifier: string,
-): Effect.fn.Return<LiveExactRfcLookup, RfcDiscoveryError> {
+  metadataDirectory: string | undefined,
+): Effect.fn.Return<LiveExactRfcLookup, RfcDiscoveryError, FileSystem.FileSystem | Path.Path> {
   const startedAt = yield* Clock.currentTimeMillis;
   const name = normalizeRfcName(identifier);
   if (name === undefined) {
@@ -969,7 +1018,7 @@ const lookupExactRfc = Effect.fnUntraced(function* (
       attempts: 0,
     });
   }
-  const exact = yield* fetchExactDocument(http, baseUrl, name);
+  const exact = yield* fetchExactDocument(http, baseUrl, name, metadataDirectory);
   const document = yield* normalizeDocument(exact.document, [], exact.url, exact.trace.attempts);
   const finishedAt = yield* Clock.currentTimeMillis;
   return {
@@ -984,7 +1033,8 @@ const lookupKnownRfc = Effect.fnUntraced(function* (
   baseUrl: string,
   identifier: string,
   configuredDepthLimit: number | undefined,
-): Effect.fn.Return<LiveRfcLookup, RfcDiscoveryError> {
+  metadataDirectory: string | undefined,
+): Effect.fn.Return<LiveRfcLookup, RfcDiscoveryError, FileSystem.FileSystem | Path.Path> {
   const startedAt = yield* Clock.currentTimeMillis;
   const depthLimit = boundedCurrencyDepthLimit(configuredDepthLimit);
   const requestedName = normalizeRfcName(identifier);
@@ -1018,7 +1068,7 @@ const lookupKnownRfc = Effect.fnUntraced(function* (
       break;
     }
     visited.add(current.name);
-    const lookup = yield* lookupOneRfc(http, baseUrl, current.name);
+    const lookup = yield* lookupOneRfc(http, baseUrl, current.name, metadataDirectory);
     documents.push(lookup.document);
     requests.push(...lookup.requests);
     traversalDepth = Math.max(traversalDepth, current.depth);
@@ -1075,7 +1125,8 @@ const discoverTopic = Effect.fnUntraced(function* (
   http: HttpClient.HttpClient,
   baseUrl: string,
   searchTerms: ReadonlyArray<string>,
-): Effect.fn.Return<LiveTopicDiscovery, RfcDiscoveryError> {
+  metadataDirectory: string | undefined,
+): Effect.fn.Return<LiveTopicDiscovery, RfcDiscoveryError, FileSystem.FileSystem | Path.Path> {
   const startedAt = yield* Clock.currentTimeMillis;
   const termStreams = yield* Effect.forEach(
     searchTerms,
@@ -1084,7 +1135,7 @@ const discoverTopic = Effect.fnUntraced(function* (
         ["title", "abstract"] as const,
         Effect.fnUntraced(function* (field) {
           const url = makeTopicUrl(baseUrl, term, field);
-          const response = yield* fetchJson(http, url, "metadata");
+          const response = yield* fetchJson(http, url, "metadata", metadataDirectory);
           const page = yield* decodeDocumentPage(response.value, url, response.trace.attempts);
           const documents = yield* Effect.forEach(page.objects, (document) =>
             normalizeDocument(document, [], url, response.trace.attempts),
@@ -1140,13 +1191,15 @@ export const makeRfcDiscoveryHttpLayer = (
   http: HttpClient.HttpClient,
   baseUrl: string,
   currencyDepthLimit: number | undefined = undefined,
+  metadataDirectory: string | undefined = undefined,
 ): Layer.Layer<RfcDiscovery> =>
   Layer.succeed(
     RfcDiscovery,
     RfcDiscovery.of({
-      lookupExactRfc: (identifier) => lookupExactRfc(http, baseUrl, identifier),
-      lookupKnownRfc: (identifier) => lookupKnownRfc(http, baseUrl, identifier, currencyDepthLimit),
-      discoverTopic: (searchTerms) => discoverTopic(http, baseUrl, searchTerms),
+      lookupExactRfc: (identifier) => lookupExactRfc(http, baseUrl, identifier, metadataDirectory),
+      lookupKnownRfc: (identifier) =>
+        lookupKnownRfc(http, baseUrl, identifier, currencyDepthLimit, metadataDirectory),
+      discoverTopic: (searchTerms) => discoverTopic(http, baseUrl, searchTerms, metadataDirectory),
     }),
   );
 
@@ -1158,15 +1211,19 @@ export const makeRfcDiscoveryHttpLayer = (
  */
 export const makeDefaultRfcDiscoveryLayer = (
   baseUrl: string = defaultDatatrackerApiUrl,
+  metadataDirectory: string | undefined = undefined,
 ): Layer.Layer<RfcDiscovery, never, HttpClient.HttpClient> =>
   Layer.effect(
     RfcDiscovery,
     Effect.gen(function* () {
       const http = yield* HttpClient.HttpClient;
       return RfcDiscovery.of({
-        lookupExactRfc: (identifier) => lookupExactRfc(http, baseUrl, identifier),
-        lookupKnownRfc: (identifier) => lookupKnownRfc(http, baseUrl, identifier, undefined),
-        discoverTopic: (searchTerms) => discoverTopic(http, baseUrl, searchTerms),
+        lookupExactRfc: (identifier) =>
+          lookupExactRfc(http, baseUrl, identifier, metadataDirectory),
+        lookupKnownRfc: (identifier) =>
+          lookupKnownRfc(http, baseUrl, identifier, undefined, metadataDirectory),
+        discoverTopic: (searchTerms) =>
+          discoverTopic(http, baseUrl, searchTerms, metadataDirectory),
       });
     }),
   );

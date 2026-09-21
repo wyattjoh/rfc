@@ -201,7 +201,18 @@ const noStoreDirective = (headers: Headers.Headers): boolean => {
   return cacheControl !== undefined && /(?:^|,)\s*no-store\s*(?:,|$)/i.test(cacheControl);
 };
 
-const maxAgeMilliseconds = (headers: Headers.Headers): number => {
+/**
+ * The freshness a response declares for itself, net of any reported age.
+ *
+ * Shared with the Datatracker metadata cache so both caches read HTTP
+ * freshness the same way. Callers apply their own upper bound: source text is
+ * immutable once published, while metadata drives currency decisions and is
+ * clamped far more tightly.
+ *
+ * @param headers Response headers.
+ * @returns Remaining freshness in milliseconds, or zero when not cacheable.
+ */
+export const maxAgeMilliseconds = (headers: Headers.Headers): number => {
   const cacheControl = Option.getOrUndefined(Headers.get("cache-control")(headers));
   if (
     cacheControl === undefined ||

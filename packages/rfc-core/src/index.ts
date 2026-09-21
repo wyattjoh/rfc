@@ -680,13 +680,17 @@ const platformLayer = (options: RfcClientOptions) => {
 
 const clientLayer = (options: RfcClientOptions) => {
   const datatrackerBaseUrl = options.datatrackerApiUrl ?? defaultDatatrackerApiUrl;
+  // Sits beside the source cache under the same root so one cache directory
+  // still describes everything this client retains.
+  const metadataDirectory = join(options.cacheDirectory ?? defaultCacheDirectory, "metadata");
   const discoveryLayer =
     options.datatrackerHttpClient === undefined
-      ? makeDefaultRfcDiscoveryLayer(datatrackerBaseUrl)
+      ? makeDefaultRfcDiscoveryLayer(datatrackerBaseUrl, metadataDirectory)
       : makeRfcDiscoveryHttpLayer(
           options.datatrackerHttpClient,
           datatrackerBaseUrl,
           options.currencyTraversalDepthLimit,
+          metadataDirectory,
         );
   const liveRfcSourceLayer =
     options.rfcSourceFetcher !== undefined
