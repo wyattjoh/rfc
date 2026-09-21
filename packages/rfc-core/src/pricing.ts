@@ -33,7 +33,13 @@ export const estimateInputTokenCost = (
   resolvedModels: ReadonlyArray<string>,
 ): InputTokenCost => {
   const models = [...new Set(resolvedModels)];
-  const rates = models.map((model) => inputPriceUsdPerMillionTokensByModel[model]);
+  // The model name is provider-reported, so an inherited `Object.prototype`
+  // member must not read as a known rate and produce a non-finite estimate.
+  const rates = models.map((model) =>
+    Object.hasOwn(inputPriceUsdPerMillionTokensByModel, model)
+      ? inputPriceUsdPerMillionTokensByModel[model]
+      : undefined,
+  );
   const priced = rates.length > 0 && rates.every((rate) => rate !== undefined);
   const uniqueRates = priced ? [...new Set(rates)] : [];
   const rateUsdPerMillionTokens = uniqueRates.length === 1 ? (uniqueRates[0] ?? null) : null;

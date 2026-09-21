@@ -16,6 +16,17 @@ describe("input-token cost estimates", () => {
     });
   });
 
+  test("fails closed for a model name inherited from Object.prototype", () => {
+    // `resolvedModels` carries provider-reported names, so a name colliding
+    // with a prototype member must not read as a priced model.
+    for (const model of ["toString", "constructor", "valueOf", "__proto__"]) {
+      expect(estimateInputTokenCost(1_000_000, [model])).toEqual({
+        estimatedUsd: null,
+        rateUsdPerMillionTokens: null,
+      });
+    }
+  });
+
   test("fails closed when any resolved model has no known price", () => {
     expect(estimateInputTokenCost(1_000_000, ["jev-1.13.0", "jev-future"])).toEqual({
       estimatedUsd: null,
