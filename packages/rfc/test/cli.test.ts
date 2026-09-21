@@ -1079,6 +1079,73 @@ describe("rfc process protocol", () => {
     expect(envelope.error.code).toBe("invalid_input");
   });
 
+  test("refuses cleartext endpoint overrides outside loopback", async () => {
+    const refuseClient: RfcCliDependencies["createClient"] = () => {
+      throw new Error("a rejected endpoint override must not construct a client");
+    };
+
+    for (const [flag, value] of [
+      ["--typesafe-api-url", "http://provider.example/api"],
+      ["--datatracker-api-url", "http://datatracker.example/api/v1"],
+    ] as const) {
+      const result = await runCli(
+        ["research", "--question", "What must the client send?", "--rfc", "RFC9110", flag, value],
+        undefined,
+        makeFixtureCredentialStore(),
+        refuseClient,
+      );
+
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(JSON.parse(result.stderr)).toEqual({
+        schemaVersion: 2,
+        kind: "error",
+        error: {
+          code: "invalid_input",
+          message: `${flag} must use https, or http on a loopback host`,
+        },
+      });
+    }
+  });
+
+  test("allows loopback and https endpoint overrides", async () => {
+    let constructed = 0;
+    const countingClient: RfcCliDependencies["createClient"] = () => {
+      constructed += 1;
+      throw new RfcDiscoveryError({
+        stage: "request",
+        url: "https://example.test",
+        reason: "stop here",
+        attempts: 1,
+      });
+    };
+
+    for (const value of [
+      "http://localhost:4000/api",
+      "http://127.0.0.1:4000/api",
+      "http://[::1]:4000/api",
+      "https://provider.example/api",
+    ]) {
+      const result = await runCli(
+        [
+          "research",
+          "--question",
+          "What must the client send?",
+          "--rfc",
+          "RFC9110",
+          "--typesafe-api-url",
+          value,
+        ],
+        undefined,
+        makeFixtureCredentialStore(),
+        countingClient,
+      );
+
+      expect(JSON.parse(result.stderr).error.message).not.toContain("loopback");
+    }
+    expect(constructed).toBe(4);
+  });
+
   test("never copies argument text into a parse-failure envelope", async () => {
     // Effect's CliError messages interpolate the offending value verbatim
     // (`InvalidValue` renders `Invalid value for flag --x: "<value>"`), so the

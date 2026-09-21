@@ -218,6 +218,36 @@ export const makeDefaultCliDependencies = (): RfcCliDependencies => ({
  */
 export const toCliErrorEnvelope = (error: unknown): object => toRfcOperationErrorEnvelope(error);
 
+/**
+ * Hosts for which cleartext is not a downgrade, so a local test double works.
+ */
+const loopbackHosts = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/**
+ * Require an operator-supplied endpoint override to be encrypted in transit.
+ *
+ * `--typesafe-api-url http://…` sends the stored key as a bearer credential
+ * over cleartext on every call, and a cleartext Datatracker endpoint lets a
+ * network position rewrite the metadata that currency decisions rest on.
+ * Neither flag is reachable by the model, so this closes an operator footgun
+ * rather than a model escape.
+ *
+ * @param flag Flag name as the operator spelled it, used in the refusal.
+ * @param value Operator-supplied URL, or undefined when the flag is absent.
+ * @returns The value unchanged when it is safe to use.
+ * @throws InvalidInputError when the URL is malformed or cleartext off-host.
+ */
+const secureEndpointOverride = (flag: string, value: string | undefined): string | undefined => {
+  if (value === undefined) return undefined;
+  const url = URL.parse(value);
+  if (url === null) throw new InvalidInputError({ reason: `${flag} must be an absolute URL` });
+  if (url.protocol === "https:") return value;
+  if (url.protocol === "http:" && loopbackHosts.has(url.hostname)) return value;
+  throw new InvalidInputError({
+    reason: `${flag} must use https, or http on a loopback host`,
+  });
+};
+
 const decodeResearchInput = (input: string) => {
   let parsed: unknown;
   try {
@@ -273,8 +303,14 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
     selectedTypeSafeApiUrl: Option.Option<string>,
   ): RfcOperationOptions => ({
     cacheDirectory: selectedCacheDirectory,
-    datatrackerApiUrl: Option.getOrUndefined(selectedDatatrackerApiUrl),
-    typeSafeApiUrl: Option.getOrUndefined(selectedTypeSafeApiUrl),
+    datatrackerApiUrl: secureEndpointOverride(
+      "--datatracker-api-url",
+      Option.getOrUndefined(selectedDatatrackerApiUrl),
+    ),
+    typeSafeApiUrl: secureEndpointOverride(
+      "--typesafe-api-url",
+      Option.getOrUndefined(selectedTypeSafeApiUrl),
+    ),
   });
 
   const sourceCacheStatusCommand = Command.make(
