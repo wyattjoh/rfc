@@ -26,34 +26,36 @@ rfc auth status
 
 ## Quickstart
 
-Ask about a known RFC:
+Human invocations accept positional arguments and print readable output by default:
+
+```sh
+rfc research "What must a client send in a request?" RFC9110
+rfc research "Which RFC defines HTTP caching?" \
+  --search-term "HTTP caching" \
+  --search-term "cache control"
+rfc verify-citation RFC9110 \
+  "A client must send a target resource." \
+  "The client MUST send a request containing the target resource."
+rfc cache status RFC9110
+rfc costs
+```
+
+The equivalent long flags remain available, including `--question`, `--rfc`, `--claim`, and `--quote`. Pass `--format json` when a human-style invocation needs machine-readable output.
+
+Agents and programs can continue sending the unchanged version-two JSON protocol on standard input. Structured standard input selects JSON output by default:
 
 ```sh
 echo '{"schemaVersion":2,"question":"What must a client send in a request?","rfc":"RFC9110"}' \
   | rfc research
-```
 
-Find the RFC first when you do not know it:
-
-```sh
 echo '{"schemaVersion":2,"question":"Which RFC defines HTTP caching?","rfc":null,"searchTerms":["HTTP caching","cache control"]}' \
   | rfc research
-```
 
-Check a quotation you already have:
-
-```sh
 echo '{"schemaVersion":2,"rfc":"RFC9110","claim":"A client must send a target resource.","quote":"The client MUST send a request containing the target resource.","offset":null}' \
   | rfc verify-citation
 ```
 
-Inspect cumulative global usage and estimated input cost:
-
-```sh
-rfc costs
-```
-
-Every command emits versioned JSON on stdout and a versioned error envelope on stderr. Add `--format human` for readable output.
+Errors remain versioned JSON envelopes on standard error for both input styles.
 
 ## Use it from an MCP host
 

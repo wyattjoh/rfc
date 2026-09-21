@@ -108,9 +108,10 @@ a plaintext fallback.
 
 Use human output for normal agent work and JSON standard input only when a
 multiline quote or programmatic extraction requires it. Non-whitespace standard
-input is authoritative over convenience flags. JSON is the default output. A
-valid research status is a successful process result even when it is not
-`answered`.
+input is authoritative over convenience flags and positional arguments, and it
+defaults to JSON output. Argument-based invocations default to human output;
+pass `--format json` only for programmatic extraction. A valid research status
+is a successful process result even when it is not `answered`.
 
 ### Research one known RFC
 
@@ -145,8 +146,8 @@ cat <<'JSON' | rfc research --format human
 JSON
 ```
 
-The short form uses repeatable `--search-term` flags with `--question`. Preserve
-the caller's order. Do not generate hidden terms, rewrite phrases, infer a broad
+The short form accepts the question positionally or through `--question`, then
+uses repeatable `--search-term` flags. Preserve the caller's order. Do not generate hidden terms, rewrite phrases, infer a broad
 query from the question, or run a catalog preflight: each supplied term appears
 in Datatracker query URLs and can be retained in upstream access logs.
 
@@ -212,8 +213,8 @@ Canonical RFC Editor text is cached only after that RFC is requested. Inspect or
 remove one named entry without network access:
 
 ```sh
-rfc cache status --rfc RFC9110
-rfc cache remove --rfc RFC9110
+rfc cache status RFC9110
+rfc cache remove RFC9110
 ```
 
 There is no list-all, refresh-all, download-all, prefetch, or bulk-clear

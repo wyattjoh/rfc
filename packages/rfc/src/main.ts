@@ -8,7 +8,7 @@ import {
 } from "@wyattjoh/rfc-core";
 import { NodeServices } from "@effect/platform-node";
 import { Console, Effect, Option } from "effect";
-import { CliError, Command, Flag } from "effect/unstable/cli";
+import { Argument, CliError, Command, Flag } from "effect/unstable/cli";
 import { runRfcMcpServer } from "./mcp";
 import {
   executeAuthStatus,
@@ -86,8 +86,10 @@ export interface RfcCliDependencies {
 }
 
 const format = Flag.Literals("format", ["json", "human"] as const).pipe(
-  Flag.withDescription("Output format; JSON is the automation default"),
-  Flag.withDefault("json" as const),
+  Flag.withDescription(
+    "Output format; defaults to human for arguments and JSON for structured standard input",
+  ),
+  Flag.optional,
 );
 
 const cacheDirectory = Flag.String("cache-directory").pipe(
@@ -101,16 +103,32 @@ const datatrackerApiUrl = Flag.String("datatracker-api-url").pipe(
 );
 
 const question = Flag.String("question").pipe(
+  Flag.withAlias("q"),
   Flag.withDescription("Short question used when standard input is not supplied"),
   Flag.optional,
 );
 
+const questionArgument = Argument.String("question").pipe(
+  Argument.withDescription("Question to research when standard input is not supplied"),
+  Argument.optional,
+);
+
 const rfc = Flag.String("rfc").pipe(
+  Flag.withAlias("r"),
   Flag.withDescription("Known RFC identifier for a short interactive request"),
   Flag.optional,
 );
 
-const cacheRfc = Flag.String("rfc").pipe(Flag.withDescription("Named RFC source cache entry"));
+const cacheRfc = Flag.String("rfc").pipe(
+  Flag.withAlias("r"),
+  Flag.withDescription("Named RFC source cache entry"),
+  Flag.optional,
+);
+
+const rfcArgument = Argument.String("rfc").pipe(
+  Argument.withDescription("Named RFC identifier"),
+  Argument.optional,
+);
 
 const searchTerms = Flag.String("search-term").pipe(
   Flag.withDescription("Ordered topic-discovery term; repeat one to four times"),
@@ -127,9 +145,19 @@ const claim = Flag.String("claim").pipe(
   Flag.optional,
 );
 
+const claimArgument = Argument.String("claim").pipe(
+  Argument.withDescription("Factual claim to verify when standard input is not supplied"),
+  Argument.optional,
+);
+
 const quote = Flag.String("quote").pipe(
   Flag.withDescription("Exact RFC quotation to verify when standard input is not supplied"),
   Flag.optional,
+);
+
+const quoteArgument = Argument.String("quote").pipe(
+  Argument.withDescription("Exact RFC quotation to verify when standard input is not supplied"),
+  Argument.optional,
 );
 
 const offset = Flag.String("offset").pipe(
@@ -314,6 +342,37 @@ const parseCitationOffset = (value: string): number => {
   return parsed;
 };
 
+const resolveArgumentInput = (
+  flagName: string,
+  flagValue: Option.Option<string>,
+  argumentValue: Option.Option<string>,
+): string | undefined => {
+  if (Option.isSome(flagValue) && Option.isSome(argumentValue)) {
+    throw new InvalidInputError({
+      reason: `${flagName} cannot be combined with its positional argument`,
+    });
+  }
+  return Option.getOrUndefined(flagValue) ?? Option.getOrUndefined(argumentValue);
+};
+
+const resolveRequiredArgumentInput = (
+  flagName: string,
+  flagValue: Option.Option<string>,
+  argumentValue: Option.Option<string>,
+): string => {
+  const value = resolveArgumentInput(flagName, flagValue, argumentValue);
+  if (value === undefined) {
+    throw new InvalidInputError({ reason: `${flagName} or its positional argument is required` });
+  }
+  return value;
+};
+
+const resolveOutputFormat = (
+  selected: Option.Option<"json" | "human">,
+  structuredStandardInput = false,
+): "json" | "human" =>
+  Option.getOrElse(selected, () => (structuredStandardInput ? "json" : "human"));
+
 const renderUsageTotals = (totals: UsageTotals): string =>
   [
     `Updated: ${totals.updatedAt}`,
@@ -360,19 +419,23 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
       cacheDirectory,
       format,
       rfc: cacheRfc,
+      rfcArgument,
     },
-    Effect.fn(function* ({ cacheDirectory, format, rfc }) {
+    Effect.fn(function* ({ cacheDirectory, format, rfc, rfcArgument }) {
+      const selectedRfc = resolveRequiredArgumentInput("--rfc", rfc, rfcArgument);
       const status = yield* Effect.tryPromise({
         try: () =>
           executeSourceCacheStatus(
-            rfc,
+            selectedRfc,
             operationOptions(cacheDirectory, Option.none(), Option.none()),
             dependencies,
           ),
         catch: (error) => error,
       });
       yield* writeStdout(
-        format === "human" ? renderSourceCacheStatus(status) : JSON.stringify(status),
+        resolveOutputFormat(format) === "human"
+          ? renderSourceCacheStatus(status)
+          : JSON.stringify(status),
       );
     }),
   ).pipe(Command.withDescription("Inspect one RFC source cache entry without network access"));
@@ -383,19 +446,23 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
       cacheDirectory,
       format,
       rfc: cacheRfc,
+      rfcArgument,
     },
-    Effect.fn(function* ({ cacheDirectory, format, rfc }) {
+    Effect.fn(function* ({ cacheDirectory, format, rfc, rfcArgument }) {
+      const selectedRfc = resolveRequiredArgumentInput("--rfc", rfc, rfcArgument);
       const result = yield* Effect.tryPromise({
         try: () =>
           executeSourceCacheRemove(
-            rfc,
+            selectedRfc,
             operationOptions(cacheDirectory, Option.none(), Option.none()),
             dependencies,
           ),
         catch: (error) => error,
       });
       yield* writeStdout(
-        format === "human" ? renderSourceCacheRemove(result) : JSON.stringify(result),
+        resolveOutputFormat(format) === "human"
+          ? renderSourceCacheRemove(result)
+          : JSON.stringify(result),
       );
     }),
   ).pipe(Command.withDescription("Remove one RFC source cache entry without network access"));
@@ -412,8 +479,11 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
       datatrackerApiUrl,
       format,
       rfc,
+      rfcArgument,
       claim,
+      claimArgument,
       quote,
+      quoteArgument,
       offset,
       typeSafeApiUrl,
     },
@@ -427,21 +497,26 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
         standardInput.trim().length > 0
           ? decodeCitationInput(standardInput)
           : (() => {
-              if (
-                Option.isNone(flags.rfc) ||
-                Option.isNone(flags.claim) ||
-                Option.isNone(flags.quote)
-              ) {
-                throw new InvalidInputError({
-                  reason:
-                    "Citation verification requires JSON standard input or --rfc, --claim, and --quote",
-                });
-              }
+              const selectedRfc = resolveRequiredArgumentInput(
+                "--rfc",
+                flags.rfc,
+                flags.rfcArgument,
+              );
+              const selectedClaim = resolveRequiredArgumentInput(
+                "--claim",
+                flags.claim,
+                flags.claimArgument,
+              );
+              const selectedQuote = resolveRequiredArgumentInput(
+                "--quote",
+                flags.quote,
+                flags.quoteArgument,
+              );
               return decodeCitationRequest({
                 schemaVersion: 2,
-                rfc: flags.rfc.value,
-                claim: flags.claim.value,
-                quote: flags.quote.value,
+                rfc: selectedRfc,
+                claim: selectedClaim,
+                quote: selectedQuote,
                 offset: Option.isSome(flags.offset)
                   ? parseCitationOffset(flags.offset.value)
                   : null,
@@ -459,7 +534,7 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
       });
       yield* writeWarnings(result.warnings);
       yield* writeStdout(
-        flags.format === "human"
+        resolveOutputFormat(flags.format, standardInput.trim().length > 0) === "human"
           ? renderCitationVerification(result.value)
           : JSON.stringify(result.value),
       );
@@ -473,8 +548,8 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
       },
       {
         command:
-          'rfc verify-citation --rfc RFC9110 --claim "The client sends a request" --quote "The client MUST send a request"',
-        description: "Verify a short interactive citation",
+          'rfc verify-citation RFC9110 "The client sends a request" "The client MUST send a request"',
+        description: "Verify a short interactive citation with positional arguments",
       },
     ]),
   );
@@ -486,7 +561,9 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
       datatrackerApiUrl,
       format,
       question,
+      questionArgument,
       rfc,
+      rfcArgument,
       searchTerms,
       typeSafeApiUrl,
     },
@@ -499,25 +576,27 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
       const request =
         standardInput.trim().length > 0
           ? decodeResearchInput(standardInput)
-          : Option.isSome(flags.question)
-            ? Option.isSome(flags.rfc)
-              ? decodeResearchRequest({
-                  schemaVersion,
-                  question: flags.question.value,
-                  rfc: flags.rfc.value,
-                  searchTerms: flags.searchTerms.length === 0 ? undefined : flags.searchTerms,
-                })
-              : decodeResearchRequest({
-                  schemaVersion,
-                  question: flags.question.value,
-                  rfc: null,
-                  searchTerms: flags.searchTerms,
-                })
-            : (() => {
-                throw new InvalidInputError({
-                  reason: "Research requires JSON standard input or --question",
-                });
-              })();
+          : (() => {
+              const selectedQuestion = resolveRequiredArgumentInput(
+                "--question",
+                flags.question,
+                flags.questionArgument,
+              );
+              const selectedRfc = resolveArgumentInput("--rfc", flags.rfc, flags.rfcArgument);
+              return selectedRfc === undefined
+                ? decodeResearchRequest({
+                    schemaVersion,
+                    question: selectedQuestion,
+                    rfc: null,
+                    searchTerms: flags.searchTerms,
+                  })
+                : decodeResearchRequest({
+                    schemaVersion,
+                    question: selectedQuestion,
+                    rfc: selectedRfc,
+                    searchTerms: flags.searchTerms.length === 0 ? undefined : flags.searchTerms,
+                  });
+            })();
 
       const result = yield* Effect.tryPromise({
         try: () =>
@@ -530,7 +609,7 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
       });
       yield* writeWarnings(result.warnings);
       yield* writeStdout(
-        flags.format === "human"
+        resolveOutputFormat(flags.format, standardInput.trim().length > 0) === "human"
           ? renderEvidenceBundle(result.value)
           : JSON.stringify(result.value),
       );
@@ -543,8 +622,8 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
         description: "Use canonical JSON from standard input",
       },
       {
-        command: 'rfc research --question "What does RFC 9110 require?" --rfc RFC9110',
-        description: "Use convenience flags when standard input is empty",
+        command: 'rfc research "What does RFC 9110 require?" RFC9110',
+        description: "Use human-friendly positional arguments when standard input is empty",
       },
     ]),
   );
@@ -566,7 +645,7 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
         catch: (error) => error,
       });
 
-      if (format === "human") {
+      if (resolveOutputFormat(format) === "human") {
         yield* writeStdout(
           result.replaced
             ? "TypeSafe API key replaced in the platform credential store"
@@ -589,7 +668,9 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
         try: () => executeAuthStatus(dependencies),
         catch: (error) => error,
       });
-      yield* writeStdout(format === "human" ? renderAuthStatus(result) : JSON.stringify(result));
+      yield* writeStdout(
+        resolveOutputFormat(format) === "human" ? renderAuthStatus(result) : JSON.stringify(result),
+      );
     }),
   ).pipe(Command.withDescription("Inspect TypeSafe credential configuration without revealing it"));
 
@@ -601,7 +682,7 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
         try: () => removeStoredCredential(dependencies.credentialStore),
         catch: (error) => error,
       });
-      if (format === "human") {
+      if (resolveOutputFormat(format) === "human") {
         yield* writeStdout(
           result.removed
             ? "TypeSafe API key removed from the platform credential store"
@@ -628,7 +709,11 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
         try: dependencies.readUsage,
         catch: (error) => error,
       });
-      yield* writeStdout(format === "human" ? renderUsageTotals(totals) : JSON.stringify(totals));
+      yield* writeStdout(
+        resolveOutputFormat(format) === "human"
+          ? renderUsageTotals(totals)
+          : JSON.stringify(totals),
+      );
     }),
   ).pipe(Command.withDescription("Print cumulative per-user RFC usage costs"));
 

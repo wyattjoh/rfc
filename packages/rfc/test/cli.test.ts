@@ -273,7 +273,7 @@ describe("rfc process protocol", () => {
     const readUsage: RfcCliDependencies["readUsage"] = async () => totals;
 
     const json = await runCli(
-      ["costs"],
+      ["costs", "--format", "json"],
       undefined,
       makeFixtureCredentialStore(),
       createRfcClient,
@@ -281,7 +281,7 @@ describe("rfc process protocol", () => {
       readUsage,
     );
     const human = await runCli(
-      ["costs", "--format", "human"],
+      ["costs"],
       undefined,
       makeFixtureCredentialStore(),
       createRfcClient,
@@ -340,13 +340,13 @@ describe("rfc process protocol", () => {
     })) as unknown as RfcCliDependencies["createClient"];
 
     const status = await runCli(
-      ["cache", "status", "--rfc", "RFC9110"],
+      ["cache", "status", "RFC9110", "--format", "json"],
       undefined,
       makeFixtureCredentialStore(),
       createClient,
     );
     const removed = await runCli(
-      ["cache", "remove", "--rfc", "RFC9110", "--format", "human"],
+      ["cache", "remove", "RFC9110"],
       undefined,
       makeFixtureCredentialStore(),
       createClient,
@@ -385,12 +385,6 @@ describe("rfc process protocol", () => {
       createClient,
     );
     const convenience = await runCli(
-      ["research", "--question", "What must the client send?", "--rfc", "RFC9110"],
-      undefined,
-      makeFixtureCredentialStore(),
-      createClient,
-    );
-    const human = await runCli(
       [
         "research",
         "--question",
@@ -398,8 +392,14 @@ describe("rfc process protocol", () => {
         "--rfc",
         "RFC9110",
         "--format",
-        "human",
+        "json",
       ],
+      undefined,
+      makeFixtureCredentialStore(),
+      createClient,
+    );
+    const human = await runCli(
+      ["research", "What must the client send?", "RFC9110"],
       undefined,
       makeFixtureCredentialStore(),
       createClient,
@@ -437,7 +437,15 @@ describe("rfc process protocol", () => {
   test("preserves a successful result when usage accounting fails", async () => {
     const requests: Array<unknown> = [];
     const result = await runCli(
-      ["research", "--question", "What must the client send?", "--rfc", "RFC9110"],
+      [
+        "research",
+        "--question",
+        "What must the client send?",
+        "--rfc",
+        "RFC9110",
+        "--format",
+        "json",
+      ],
       undefined,
       makeFixtureCredentialStore(),
       makeStubClientFactory(requests, () => undefined),
@@ -961,11 +969,10 @@ describe("rfc process protocol", () => {
         server.url.toString(),
         "--datatracker-api-url",
         `${server.url}api/v1/`,
-        "--rfc",
+        "--format",
+        "json",
         "RFC9110",
-        "--claim",
         "The client sends a request.",
-        "--quote",
         "The client MUST send a request containing the target resource.",
       ],
       undefined,

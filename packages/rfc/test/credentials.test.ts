@@ -200,7 +200,11 @@ describe("authentication process protocol", () => {
       },
     };
     const secret = "stdin-secret-value";
-    const result = await runAuth(["auth", "add", "--stdin"], `${secret}\n`, store);
+    const result = await runAuth(
+      ["auth", "add", "--stdin", "--format", "json"],
+      `${secret}\n`,
+      store,
+    );
 
     expect(result.exitCode).toBe(0);
     expect(result.stderr).toBe("");
@@ -237,14 +241,14 @@ describe("authentication process protocol", () => {
 
   test("status and remove expose only safe metadata and deterministic absence", async () => {
     const store = makeCredentialStore(makeNativeSecrets("hidden-secret"));
-    const status = await runAuth(["auth", "status"], undefined, store);
+    const status = await runAuth(["auth", "status", "--format", "json"], undefined, store);
     expect(status.exitCode).toBe(0);
     expect(status.stdout).not.toContain("hidden-secret");
     expect(JSON.parse(status.stdout)).toMatchObject({ configured: true });
 
-    const removed = await runAuth(["auth", "remove"], undefined, store);
+    const removed = await runAuth(["auth", "remove", "--format", "json"], undefined, store);
     expect(JSON.parse(removed.stdout)).toMatchObject({ removed: true, configured: false });
-    const absent = await runAuth(["auth", "remove"], undefined, store);
+    const absent = await runAuth(["auth", "remove", "--format", "json"], undefined, store);
     expect(JSON.parse(absent.stdout)).toMatchObject({ removed: false, configured: false });
   });
 
