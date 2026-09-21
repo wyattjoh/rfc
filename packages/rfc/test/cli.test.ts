@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   evaluationCorpus,
@@ -13,7 +14,7 @@ import {
 } from "@wyattjoh/rfc-core";
 import { automaticAnswerActivationFor, type RfcCliConfig } from "../src/config";
 import type { CredentialStore } from "../src/credentials";
-import { run, type RfcCliDependencies } from "../src/main";
+import { makeDefaultCliDependencies, run, type RfcCliDependencies } from "../src/main";
 
 const servers: Array<ReturnType<typeof Bun.serve>> = [];
 
@@ -1077,6 +1078,75 @@ describe("rfc process protocol", () => {
     expect(result.exitCode).toBe(1);
     expect(result.stdout).toBe("");
     expect(envelope.error.code).toBe("invalid_input");
+  });
+
+  test("bounds the process standard-input reader", async () => {
+    const withFakeStdin = async <A>(stdin: unknown, body: () => Promise<A>): Promise<A> => {
+      const original = Object.getOwnPropertyDescriptor(process, "stdin");
+      Object.defineProperty(process, "stdin", { value: stdin, configurable: true });
+      try {
+        return await body();
+      } finally {
+        if (original === undefined) delete (process as { stdin?: unknown }).stdin;
+        else Object.defineProperty(process, "stdin", original);
+      }
+    };
+    const { readStandardInput } = makeDefaultCliDependencies();
+
+    const accepted = await withFakeStdin(Readable.from(["{", '"schemaVersion": 2', "}"]), () =>
+      readStandardInput(),
+    );
+    expect(accepted).toBe('{"schemaVersion": 2}');
+
+    const chunk = "x".repeat(600_000);
+    const refused = await withFakeStdin(Readable.from([chunk, chunk]), () =>
+      readStandardInput().then(
+        () => undefined,
+        (error: unknown) => error,
+      ),
+    );
+    expect(refused).toMatchObject({
+      _tag: "InvalidInputError",
+      reason: "Standard input exceeds 1048576 bytes",
+    });
+  });
+
+  test("echoes nothing while reading an interactive credential", async () => {
+    const handlers: Array<(chunk: string) => void> = [];
+    const stdin = {
+      isTTY: true,
+      setRawMode: () => undefined,
+      resume: () => undefined,
+      pause: () => undefined,
+      on: (event: string, handler: (chunk: string) => void) => {
+        if (event === "data") handlers.push(handler);
+      },
+      off: () => undefined,
+    };
+    const originalStdin = Object.getOwnPropertyDescriptor(process, "stdin");
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    let written = "";
+    Object.defineProperty(process, "stdin", { value: stdin, configurable: true });
+    process.stderr.write = ((value: string | Uint8Array) => {
+      written += typeof value === "string" ? value : Buffer.from(value).toString("utf8");
+      return true;
+    }) as typeof process.stderr.write;
+
+    try {
+      const pending = makeDefaultCliDependencies().promptCredential();
+      // The handler is registered synchronously by the prompt.
+      for (const character of "sk-live-typed\u007f\n") {
+        for (const handler of handlers) handler(character);
+      }
+      await expect(pending).resolves.toBe("sk-live-type");
+    } finally {
+      process.stderr.write = originalWrite;
+      if (originalStdin !== undefined) Object.defineProperty(process, "stdin", originalStdin);
+    }
+
+    // Exactly the prompt and its terminating newline: no per-keystroke mask,
+    // so the key's length never reaches the screen.
+    expect(written).toBe("TypeSafe API key: \n");
   });
 
   test("refuses cleartext endpoint overrides outside loopback", async () => {

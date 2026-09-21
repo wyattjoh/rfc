@@ -410,10 +410,12 @@ const citationStage = Effect.fnUntraced(function* (
   );
   const answer = yield* Effect.try({
     try: () => Schema.decodeUnknownSync(citationAnswerSchema)(response.answers.citation_verdict),
-    catch: (error) =>
+    // The decode failure quotes the offending provider payload, so forwarding
+    // its message would carry raw third-party text into the error envelope.
+    catch: () =>
       new DecisionModelError({
         stage: "citation",
-        reason: errorMessage(error),
+        reason: "The citation DecisionModel returned an unreadable verdict",
       }),
   });
   const probabilities = normalizeProbabilities(answer.probabilities);

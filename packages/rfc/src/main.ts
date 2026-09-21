@@ -136,11 +136,28 @@ const credentialFromStdinAlias = Flag.Boolean("from-stdin").pipe(
   Flag.withDefault(false),
 );
 
+/**
+ * Maximum bytes accepted from standard input for one request.
+ *
+ * Every other reader in the CLI is bounded; leaving this one open let a piped
+ * stream grow the process heap without limit. A request carries a question or
+ * a claim and one quotation, so a megabyte is far above any real input.
+ */
+const standardInputMaximumBytes = 1024 * 1024;
+
 const readProcessStandardInput = async (): Promise<string> => {
   if (process.stdin.isTTY) return "";
   const chunks: Array<string> = [];
+  let bytes = 0;
   for await (const chunk of process.stdin) {
-    chunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+    const text = typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+    bytes += Buffer.byteLength(text, "utf8");
+    if (bytes > standardInputMaximumBytes) {
+      throw new InvalidInputError({
+        reason: `Standard input exceeds ${standardInputMaximumBytes} bytes`,
+      });
+    }
+    chunks.push(text);
   }
   return chunks.join("");
 };
@@ -178,15 +195,14 @@ const readMaskedCredential = async (): Promise<string> => {
           return;
         }
         if (character === "\u007f" || character === "\b") {
-          if (value.length > 0) {
-            value = value.slice(0, -1);
-            process.stderr.write("\b \b");
-          }
+          if (value.length > 0) value = value.slice(0, -1);
           continue;
         }
         if (character < " ") continue;
+        // Nothing is echoed. Writing one mask character per keystroke put the
+        // exact key length on screen, which a recording or a shared screen
+        // then carries off the machine.
         value += character;
-        process.stderr.write("*");
       }
     };
     process.stdin.setRawMode(true);

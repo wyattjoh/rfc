@@ -1,6 +1,7 @@
 import {
   CitationVerificationResultSchema,
   EvidenceBundleSchema,
+  InvalidInputError,
   RfcSourceCacheRemoveResultSchema,
   RfcSourceCacheStatusSchema,
   datatrackerTopicSearchTermLimit,
@@ -405,8 +406,16 @@ export const createRfcMcpServer = (
         openWorldHint: false,
       },
     },
-    async ({ rfc }) => {
+    async ({ rfc, confirm }) => {
       try {
+        // The schema already requires `confirm: true`, but this is the only
+        // destructive operation on the surface and its enforcement must not
+        // rest entirely on the SDK validating before dispatch.
+        if (confirm !== true) {
+          throw new InvalidInputError({
+            reason: "Removing a source-cache entry requires confirm: true",
+          });
+        }
         return plainSuccess(
           await executeSourceCacheRemove(rfc, options, dependencies),
           renderSourceCacheRemove,

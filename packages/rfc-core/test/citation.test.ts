@@ -1031,6 +1031,55 @@ describe("citation verification", () => {
     ).rejects.toMatchObject({ _tag: "DecisionModelError", stage: "citation" });
   });
 
+  test("keeps provider payload text out of a citation decode failure", async () => {
+    const marker = "provider-internal-detail-7f3a";
+    const cacheDirectory = await makeCacheDirectory();
+    const client = await createRfcClient({
+      cacheDirectory,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      metadataSource: async () => [rfcDocument],
+      rfcSourceFetcher: makeSourceFetcher(sourceText),
+      decisionModel: {
+        [DecisionModel.TypeId]: DecisionModel.TypeId,
+        decide: () =>
+          Effect.succeed({
+            answers: {
+              citation_verdict: {
+                label: marker,
+                probabilities: { [marker]: 1 },
+                confidence: 1,
+              },
+            },
+            usage: { inputTokens: 1, outputTokens: 1 },
+          }),
+      } as unknown as DecisionModel.DecisionModel,
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const error = await client
+      .verifyCitation({
+        schemaVersion: 2,
+        rfc: "RFC9110",
+        claim: "The client sends a request.",
+        quote: "The client MUST send a request containing the target resource.",
+        offset: null,
+      })
+      .then(
+        () => undefined,
+        (failure: unknown) => failure,
+      );
+
+    expect(error).toMatchObject({
+      _tag: "DecisionModelError",
+      stage: "citation",
+      reason: "The citation DecisionModel returned an unreadable verdict",
+    });
+    expect(JSON.stringify(error)).not.toContain(marker);
+  });
+
   test("repairs malformed cached source data from the live source", async () => {
     const cacheDirectory = await makeCacheDirectory();
     const client = await createRfcClient({
