@@ -7,6 +7,8 @@ import {
   EvidenceBundleSchema,
   InvalidInputError,
   citationOffsetUnit,
+  datatrackerTopicSearchTermLimit,
+  datatrackerTopicSearchTermMaximumCharacters,
   type CitationVerificationRequest,
   type ResearchRequest,
   type RfcClient,
@@ -16,7 +18,9 @@ import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { Schema } from "effect";
 import type { CredentialStore } from "../src/credentials";
+import { CredentialInputError, CredentialStoreError } from "../src/credentials";
 import { createRfcMcpServer, rfcMcpAgentReferenceUri, rfcMcpInstructions } from "../src/mcp";
+import { toRfcOperationErrorEnvelope } from "../src/operations";
 import type { RfcOperationDependencies, RfcOperationOptions } from "../src/operations";
 
 const operationOptions: RfcOperationOptions = {
@@ -198,6 +202,14 @@ const textContent = (result: Awaited<ReturnType<Client["callTool"]>>): string =>
     .join("\n");
 
 describe("RFC MCP agent surface", () => {
+  // The only test in this file that runs against real production
+  // dependencies: spawning `rfc mcp` reaches makeDefaultCliDependencies(), so
+  // the server behind this transport holds the real Bun.secrets store, a real
+  // ~/.config/rfc/usage.json recorder with no injected path, and live network
+  // access. Handlers are lazy, so listTools/listResources touch none of them.
+  // Keep it to handshake assertions: one callTool here would hit the operator's
+  // keychain, write their config, and go to the network. Everything else in
+  // this file goes through `connect`, which injects fakes.
   test("serves the registered surface through the rfc mcp stdio subcommand", async () => {
     const client = new Client({ name: "rfc-mcp-process-test", version: "1.0.0" });
     const transport = new StdioClientTransport({
@@ -584,6 +596,105 @@ describe("RFC MCP agent surface", () => {
       } finally {
         await connection.close();
       }
+    }
+  });
+
+  test("enforces the topic search-term bounds before dispatching a call", async () => {
+    const createClient = (async () => {
+      throw new Error("A rejected topic request must not construct a client");
+    }) as RfcOperationDependencies["createClient"];
+    const connection = await connect(makeDependencies({ createClient }));
+
+    try {
+      const rejected: ReadonlyArray<ReadonlyArray<string>> = [
+        [],
+        Array.from({ length: datatrackerTopicSearchTermLimit + 1 }, (_, index) => `term-${index}`),
+        ["x".repeat(datatrackerTopicSearchTermMaximumCharacters + 1)],
+        [""],
+      ];
+      for (const searchTerms of rejected) {
+        const result = await connection.client.callTool({
+          name: "research_topic",
+          arguments: { question: "Which RFC defines HTTP caching?", searchTerms },
+        });
+        expect(result.isError).toBe(true);
+        expect(result.structuredContent).toBeUndefined();
+      }
+
+      // The upper bounds themselves are accepted, so the guard rejects only
+      // what is past them.
+      const accepted = await connection.client.callTool({
+        name: "research_topic",
+        arguments: {
+          question: "Which RFC defines HTTP caching?",
+          searchTerms: Array.from({ length: datatrackerTopicSearchTermLimit }, () =>
+            "x".repeat(datatrackerTopicSearchTermMaximumCharacters),
+          ),
+        },
+      });
+      // The client construction above is what fails, which proves the request
+      // passed schema validation and was dispatched.
+      expect(JSON.parse(textContent(accepted)).error.code).toBe("internal_error");
+    } finally {
+      await connection.close();
+    }
+  });
+
+  test("reports an absent credential and an unconfirmed removal with their exact envelopes", async () => {
+    const createClient = (async () => {
+      throw new Error("Neither call may construct a client");
+    }) as RfcOperationDependencies["createClient"];
+    const connection = await connect(
+      makeDependencies({ credentialStore: makeCredentialStore(null), createClient }),
+    );
+
+    try {
+      const auth = await connection.client.callTool({ name: "auth_status", arguments: {} });
+      expect(auth.isError).not.toBe(true);
+      expect(auth.structuredContent).toMatchObject({
+        schemaVersion: 2,
+        kind: "auth_status",
+        configured: false,
+      });
+      expect(JSON.stringify(auth)).not.toContain("fixture-key");
+
+      const unconfirmed = await connection.client.callTool({
+        name: "source_cache_remove",
+        arguments: { rfc: "RFC9110" },
+      });
+      expect(unconfirmed.isError).toBe(true);
+      expect(unconfirmed.structuredContent).toBeUndefined();
+      // The refusal names the missing confirmation rather than failing
+      // opaquely, and never reaches the client.
+      expect(textContent(unconfirmed)).toContain("confirm");
+    } finally {
+      await connection.close();
+    }
+  });
+
+  test("maps credential input and store failures to their typed envelopes", async () => {
+    expect(
+      toRfcOperationErrorEnvelope(new CredentialInputError({ reason: "multiline secret" })),
+    ).toEqual({
+      schemaVersion: 2,
+      kind: "error",
+      error: { code: "invalid_input", message: "The TypeSafe API key input is invalid" },
+    });
+
+    const storeFailures = [
+      [
+        "unavailable",
+        "credential_store_unavailable",
+        "The platform credential store is unavailable",
+      ],
+      ["denied", "credential_access_denied", "Access to the platform credential store was denied"],
+      ["storage", "credential_storage_failed", "Unable to store the TypeSafe API key"],
+      ["deletion", "credential_deletion_failed", "Unable to remove the TypeSafe API key"],
+    ] as const;
+    for (const [kind, code, message] of storeFailures) {
+      expect(
+        toRfcOperationErrorEnvelope(new CredentialStoreError({ kind, operation: "get" })),
+      ).toEqual({ schemaVersion: 2, kind: "error", error: { code, message } });
     }
   });
 
