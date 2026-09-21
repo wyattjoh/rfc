@@ -1,14 +1,13 @@
 # rfc — an evidence engine for IETF RFCs
 
-`rfc` answers questions about published IETF RFCs from the actual specification text. It discovers the right RFC through the IETF Datatracker, follows `updates` and `obsoletes` relationships so an obsoleted document is never quoted as current, retrieves the canonical RFC Editor source, and returns exact quotations with their UTF-8 byte offsets and a hash of the source they came from. It runs as a CLI and as a local [Model Context Protocol](https://modelcontextprotocol.io) server, so a coding agent can cite a specification instead of recalling one.
+`rfc` answers questions about published IETF RFCs from the actual specification text. It discovers the right RFC through the IETF Datatracker, follows `updates` and `obsoletes` relationships, retrieves the canonical RFC Editor source, and returns exact quotations with their UTF-8 byte offsets and source hash. It runs as a CLI and as a local [Model Context Protocol](https://modelcontextprotocol.io) server, so a coding agent can cite a specification instead of recalling one.
 
-It is precision-first by construction: when the evidence does not support an answer it says so — `partial`, `unsupported`, `needs_review`, `needs_split` — rather than producing a confident paraphrase. Nothing it returns is generated prose; every quotation is a byte range in a hashed source you can re-slice yourself.
+It is precision-first: when the evidence does not support an answer, it returns `partial`, `unsupported`, `needs_review`, or `needs_split` rather than a confident paraphrase. Every quotation is a byte range in a hashed source you can re-slice yourself.
 
-## Status: research preview
-
-**Automatic answering is switched off in every configuration a published user can reach.** Reaching the `answered` status requires a reviewed precision calibration, and the most recent one was **rejected** — the durable decision is committed in [`packages/rfc-core/src/precision-v2-release-decision.ts`](packages/rfc-core/src/precision-v2-release-decision.ts). Until a calibration passes review, the engine returns evidence, provenance and a non-answer status, and leaves the judgment to you.
-
-That is the honest shape of this 0.1.0: the retrieval, provenance and citation machinery is real and tested; the headline "here is your answer" step is deliberately fail-closed. Read [`docs/adr/`](docs/adr) for why the boundaries are drawn where they are.
+> [!IMPORTANT]
+> **Status: research preview**
+>
+> Automatic answering is disabled in published configurations because the latest precision calibration was rejected. The retrieval, provenance, and citation machinery is tested, but the engine returns evidence and a non-answer status until a calibration passes review. See [ADR 0004](docs/adr/0004-gate-automatic-answers-on-a-reviewed-calibration.md) and the [recorded release decision](packages/rfc-core/src/precision-v2-release-decision.ts).
 
 ## Install
 
@@ -85,7 +84,7 @@ The server describes its own bounded workflow in its initialization instructions
 
 Using this tool sends data to third parties. Specifically:
 
-- **To [TypeSafe](https://typesafe.ai)**, on every research or citation call: your question or claim, the quotation under review, and the passages of RFC text selected as candidate evidence. This is how the semantic judgments are made. Your API key is sent as a bearer credential.
+- **To [TypeSafe](https://typesafe.ai)**, when semantic evaluation is required: research sends your question and selected candidate passages; citation verification sends your claim and quotation. Some fail-closed results, such as empty discovery or an absent quotation, return without contacting TypeSafe. Your API key is sent as a bearer credential.
 - **To the [IETF Datatracker](https://datatracker.ietf.org)**, for discovery: RFC identifiers, and — for topic search — **your search terms verbatim in the query URL**, where they may appear in upstream request logs. The tool never derives search terms on its own and never sends your full question as one unless you write it that way.
 - **To the [RFC Editor](https://www.rfc-editor.org)**, for source text: RFC numbers only.
 
@@ -112,7 +111,7 @@ bun run lint
 bun test packages
 ```
 
-The test suite injects Datatracker, RFC Editor, provider, clock, and credential boundaries: it needs no API key, no credential manager, and no network. `bun run evaluate:live` is the only command that calls the provider for real; it costs money and requires a stored credential.
+The test suite injects Datatracker, RFC Editor, provider, clock, and credential boundaries: it needs no API key, no credential manager, and no network. Live calibration is opt-in through `bun run evaluate:live`; unlike the test suite, it calls the provider, costs money, and requires a stored credential.
 
 ## License
 
