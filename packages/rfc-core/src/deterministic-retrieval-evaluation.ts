@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Effect } from "effect";
@@ -7,18 +7,22 @@ import * as DecisionModel from "effect/unstable/ai/DecisionModel";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 import {
   createRfcClient,
+  type EvaluationCacheEvidence,
   type EvaluationRetrievalCase,
   type EvaluationRetrievalObservation,
   type LiveRetrievalTrace,
 } from "./index";
 import { evaluationSchemaVersion } from "./evaluation";
 
-const fixtureDocuments = [9110, 8446, 6749, 1034, 7230, 2616].map((rfcNumber) => ({
-  identifier: `RFC${rfcNumber}`,
-  rfcNumber,
-  title: `RFC ${rfcNumber}`,
-  abstract: "Protocol requirements and message semantics.",
-}));
+const fixtureDocuments = Array.from({ length: 40 }, (_, index) => {
+  const rfcNumber = 9500 + index;
+  return {
+    identifier: `RFC${rfcNumber}`,
+    rfcNumber,
+    title: `RFC ${rfcNumber}`,
+    abstract: "Protocol requirements and message semantics.",
+  };
+});
 
 const sourceText = [
   "1. Requirements",
@@ -105,9 +109,10 @@ export const evaluateDeterministicRetrievalCase = async (
   const cacheDirectory = await mkdtemp(join(tmpdir(), `rfc-retrieval-${retrievalCase.id}-`));
   let now = 0;
   let sourceRequests = 0;
+  const validators: Array<string | null> = [];
   const category = retrievalCase.category;
   const datatracker = HttpClient.make((request, url) => {
-    if (category === "fail_closed_upstream" && url.pathname.includes("/document/rfc9110/")) {
+    if (category === "fail_closed_metadata" && url.pathname.includes("/document/rfc9110/")) {
       return Effect.succeed(
         HttpClientResponse.fromWeb(request, new Response("unavailable", { status: 503 })),
       );
@@ -155,7 +160,12 @@ export const evaluateDeterministicRetrievalCase = async (
         ),
       );
     }
-    const documents = category === "no_candidate_outcome" ? [] : fixtureDocuments;
+    const documents =
+      category === "no_candidate_outcome"
+        ? []
+        : url.searchParams.has("abstract__icontains")
+          ? fixtureDocuments.slice(20)
+          : fixtureDocuments.slice(0, 20);
     return Effect.succeed(
       HttpClientResponse.fromWeb(
         request,
@@ -176,6 +186,12 @@ export const evaluateDeterministicRetrievalCase = async (
   });
   const sourceHttp = HttpClient.make((request) => {
     sourceRequests += 1;
+    validators.push(request.headers["if-none-match"] ?? null);
+    if (sourceRequests === 2 && category === "fail_closed_revalidation") {
+      return Effect.succeed(
+        HttpClientResponse.fromWeb(request, new Response("unavailable", { status: 503 })),
+      );
+    }
     if (sourceRequests === 2 && category === "source_cache_revalidated") {
       return Effect.succeed(
         HttpClientResponse.fromWeb(
@@ -206,7 +222,7 @@ export const evaluateDeterministicRetrievalCase = async (
     );
   });
   const usesConditionalSource =
-    category === "source_cache_revalidated" || category === "source_cache_replaced";
+    category.startsWith("source_cache_") || category === "fail_closed_revalidation";
   const client = await createRfcClient({
     cacheDirectory,
     datatrackerHttpClient: datatracker,
@@ -228,6 +244,8 @@ export const evaluateDeterministicRetrievalCase = async (
     now: () => now,
   });
   const traces: Array<LiveRetrievalTrace> = [];
+  let cacheEvidence: EvaluationCacheEvidence | null = null;
+  let staleSourceHash: string | null = null;
   let passed = false;
   let observedErrorKind: string | null = null;
   const knownRequest = {
@@ -240,6 +258,37 @@ export const evaluateDeterministicRetrievalCase = async (
     const result = await client.research(knownRequest);
     traces.push(result.diagnostics.retrieval);
     return result;
+  };
+  const sourceHashFrom = (result: Awaited<ReturnType<typeof runKnown>>): string | null =>
+    result.diagnostics.source?.sourceHash ?? null;
+  const cachedSourceHash = async (): Promise<string | null> => {
+    try {
+      const entry = JSON.parse(
+        await readFile(join(cacheDirectory, "sources", "v2", "RFC9110.json"), "utf8"),
+      ) as { readonly contentHash?: unknown };
+      return typeof entry.contentHash === "string" ? entry.contentHash : null;
+    } catch {
+      return null;
+    }
+  };
+  const recordCacheEvidence = (
+    beforeSourceHash: string | null,
+    afterSourceHash: string | null,
+    returnedSourceHash: string | null,
+    cacheEntryCorrupted: boolean,
+    sourceRequestCounts: ReadonlyArray<number> = traces.map(
+      ({ sourceRequestCount }) => sourceRequestCount,
+    ),
+  ) => {
+    cacheEvidence = {
+      beforeSourceHash,
+      afterSourceHash,
+      returnedSourceHash,
+      sourceRequestCounts,
+      networkRequestCount: sourceRequests,
+      validators,
+      cacheEntryCorrupted,
+    };
   };
 
   try {
@@ -289,8 +338,9 @@ export const evaluateDeterministicRetrievalCase = async (
         traces.push(trace);
         passed =
           trace.datatrackerRequestCount === 8 &&
-          (trace.semanticCandidates ?? 33) <= 32 &&
-          (trace.selectedSources ?? 9) <= 8;
+          trace.uniqueCandidates === 40 &&
+          trace.semanticCandidates === 32 &&
+          trace.selectedSources === 8;
         break;
       }
       case "no_candidate_outcome": {
@@ -316,21 +366,27 @@ export const evaluateDeterministicRetrievalCase = async (
         break;
       }
       case "source_cache_miss": {
+        const beforeHash = await cachedSourceHash();
         const result = await runKnown();
+        recordCacheEvidence(beforeHash, await cachedSourceHash(), sourceHashFrom(result), false);
         passed = result.diagnostics.retrieval.sourceCacheOutcome === "miss";
         break;
       }
       case "source_cache_hit": {
         await runKnown();
+        const beforeHash = await cachedSourceHash();
         const result = await runKnown();
+        recordCacheEvidence(beforeHash, await cachedSourceHash(), sourceHashFrom(result), false);
         passed = result.diagnostics.retrieval.sourceCacheOutcome === "hit";
         break;
       }
       case "source_cache_revalidated":
       case "source_cache_replaced": {
         await runKnown();
+        const beforeHash = await cachedSourceHash();
         now = 61_000;
         const result = await runKnown();
+        recordCacheEvidence(beforeHash, await cachedSourceHash(), sourceHashFrom(result), false);
         passed =
           result.diagnostics.retrieval.sourceCacheOutcome ===
           (category === "source_cache_revalidated" ? "revalidated" : "replaced");
@@ -338,18 +394,33 @@ export const evaluateDeterministicRetrievalCase = async (
       }
       case "source_cache_repaired": {
         await runKnown();
+        const beforeHash = await cachedSourceHash();
         await writeFile(join(cacheDirectory, "sources", "v2", "RFC9110.json"), "{corrupt");
         const result = await runKnown();
+        recordCacheEvidence(beforeHash, await cachedSourceHash(), sourceHashFrom(result), true);
         passed = result.diagnostics.retrieval.sourceCacheOutcome === "repaired";
         break;
       }
-      case "fail_closed_upstream":
+      case "fail_closed_metadata":
         await runKnown();
         break;
+      case "fail_closed_revalidation": {
+        await runKnown();
+        staleSourceHash = await cachedSourceHash();
+        now = 61_000;
+        await runKnown();
+        break;
+      }
     }
   } catch (error) {
     observedErrorKind = errorKind(error);
-    passed = category === "fail_closed_upstream" && observedErrorKind === "RfcDiscoveryError";
+    if (category === "fail_closed_revalidation") {
+      recordCacheEvidence(staleSourceHash, await cachedSourceHash(), null, false, [1, 1]);
+    }
+    passed =
+      (category === "fail_closed_metadata" && observedErrorKind === "RfcDiscoveryError") ||
+      (category === "fail_closed_revalidation" &&
+        observedErrorKind === "RfcSourceRevalidationError");
   } finally {
     await client.close();
     await rm(cacheDirectory, { recursive: true, force: true });
@@ -362,6 +433,7 @@ export const evaluateDeterministicRetrievalCase = async (
     seam: retrievalCase.seam,
     passed,
     traces,
+    cacheEvidence,
     errorKind: passed ? observedErrorKind : (observedErrorKind ?? "RetrievalAssertionError"),
   };
 };

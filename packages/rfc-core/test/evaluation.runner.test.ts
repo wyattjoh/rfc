@@ -411,7 +411,7 @@ const retrievalObservation = async (
   };
   const datatracker = HttpClient.make((request, url) => {
     if (
-      retrievalCase.category === "fail_closed_upstream" &&
+      retrievalCase.category === "fail_closed_metadata" &&
       url.pathname.includes("/document/rfc9110/")
     ) {
       return Effect.succeed(
@@ -482,6 +482,11 @@ const retrievalObservation = async (
   });
   const sourceHttp = HttpClient.make((request) => {
     sourceRequests += 1;
+    if (sourceRequests === 2 && retrievalCase.category === "fail_closed_revalidation") {
+      return Effect.succeed(
+        HttpClientResponse.fromWeb(request, new Response("unavailable", { status: 503 })),
+      );
+    }
     if (sourceRequests === 2 && retrievalCase.category === "source_cache_revalidated") {
       return Effect.succeed(
         HttpClientResponse.fromWeb(
@@ -513,7 +518,8 @@ const retrievalObservation = async (
   });
   const usesConditionalSource =
     retrievalCase.category === "source_cache_revalidated" ||
-    retrievalCase.category === "source_cache_replaced";
+    retrievalCase.category === "source_cache_replaced" ||
+    retrievalCase.category === "fail_closed_revalidation";
   const client = await createRfcClient({
     cacheDirectory,
     datatrackerHttpClient: datatracker,
@@ -639,15 +645,24 @@ const retrievalObservation = async (
         passed = result.diagnostics.retrieval.sourceCacheOutcome === "repaired";
         break;
       }
-      case "fail_closed_upstream": {
+      case "fail_closed_metadata":
+      case "fail_closed_revalidation": {
         try {
+          if (retrievalCase.category === "fail_closed_revalidation") {
+            await runKnown();
+            now = 61_000;
+          }
           await runKnown();
         } catch (error) {
           observedErrorKind =
             typeof error === "object" && error !== null && "_tag" in error
               ? String(error._tag)
               : "UnknownError";
-          passed = observedErrorKind === "RfcDiscoveryError";
+          passed =
+            observedErrorKind ===
+            (retrievalCase.category === "fail_closed_metadata"
+              ? "RfcDiscoveryError"
+              : "RfcSourceRevalidationError");
         }
         break;
       }
@@ -664,6 +679,7 @@ const retrievalObservation = async (
     seam: retrievalCase.seam,
     passed,
     traces,
+    cacheEvidence: null,
     errorKind: passed ? observedErrorKind : (observedErrorKind ?? "RetrievalAssertionError"),
   };
 };
@@ -684,9 +700,85 @@ describe("committed evaluation runner", () => {
     );
     expect(observations.every(({ passed }) => passed)).toBe(true);
     expect(
+      observations.find(({ category }) => category === "candidate_fan_out")?.traces[0],
+    ).toMatchObject({
+      uniqueCandidates: 40,
+      semanticCandidates: 32,
+      selectedSources: 8,
+    });
+    expect(
       observations.find(({ category }) => category === "relationship_bound")?.traces[0]
         ?.boundedExits,
     ).toEqual(["depth_limit", "context_limit", "relationship_limit"]);
+    expect(
+      observations.find(({ category }) => category === "source_cache_hit")?.cacheEvidence,
+    ).toMatchObject({
+      sourceRequestCounts: [1, 0],
+      networkRequestCount: 1,
+      validators: [null],
+    });
+    expect(
+      observations.find(({ category }) => category === "source_cache_revalidated")?.cacheEvidence,
+    ).toMatchObject({
+      sourceRequestCounts: [1, 1],
+      networkRequestCount: 2,
+      validators: [null, '"one"'],
+    });
+    expect(
+      observations.find(({ category }) => category === "source_cache_replaced")?.cacheEvidence,
+    ).toMatchObject({
+      sourceRequestCounts: [1, 1],
+      networkRequestCount: 2,
+      validators: [null, '"one"'],
+    });
+    expect(
+      observations.find(({ category }) => category === "source_cache_repaired")?.cacheEvidence,
+    ).toMatchObject({
+      sourceRequestCounts: [1, 1],
+      networkRequestCount: 2,
+      validators: [null, null],
+      cacheEntryCorrupted: true,
+    });
+    const cacheEvidence = Object.fromEntries(
+      observations
+        .filter(({ category }) => category.startsWith("source_cache_"))
+        .map(({ category, cacheEvidence }) => [category, cacheEvidence]),
+    );
+    expect(cacheEvidence.source_cache_hit?.beforeSourceHash).toBe(
+      cacheEvidence.source_cache_hit?.afterSourceHash,
+    );
+    expect(cacheEvidence.source_cache_revalidated?.beforeSourceHash).toBe(
+      cacheEvidence.source_cache_revalidated?.afterSourceHash,
+    );
+    expect(cacheEvidence.source_cache_replaced?.beforeSourceHash).not.toBe(
+      cacheEvidence.source_cache_replaced?.afterSourceHash,
+    );
+    expect(cacheEvidence.source_cache_repaired?.beforeSourceHash).toBe(
+      cacheEvidence.source_cache_repaired?.afterSourceHash,
+    );
+    for (const observation of observations.filter(({ category }) =>
+      category.startsWith("source_cache_"),
+    )) {
+      expect(observation.cacheEvidence?.returnedSourceHash).toBe(
+        observation.cacheEvidence?.afterSourceHash,
+      );
+    }
+    expect(
+      observations.find(({ category }) => category === "fail_closed_metadata")?.errorKind,
+    ).toBe("RfcDiscoveryError");
+    const staleFailure = observations.find(
+      ({ category }) => category === "fail_closed_revalidation",
+    );
+    expect(staleFailure?.errorKind).toBe("RfcSourceRevalidationError");
+    expect(staleFailure?.cacheEvidence).toMatchObject({
+      returnedSourceHash: null,
+      sourceRequestCounts: [1, 1],
+      networkRequestCount: 2,
+      validators: [null, '"one"'],
+    });
+    expect(staleFailure?.cacheEvidence?.afterSourceHash).toBe(
+      staleFailure?.cacheEvidence?.beforeSourceHash,
+    );
   });
 
   test("executes every committed case through public research and citation results", async () => {

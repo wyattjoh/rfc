@@ -181,7 +181,8 @@ const makeRetrievalObservation = (
     source_cache_repaired: "repaired",
   };
   const cacheOutcome = cacheOutcomes[retrievalCase.category];
-  const failClosed = retrievalCase.category === "fail_closed_upstream";
+  const metadataFailure = retrievalCase.category === "fail_closed_metadata";
+  const revalidationFailure = retrievalCase.category === "fail_closed_revalidation";
   const requestCopies = (kind: "metadata" | "relationships" | "source", count: number) => {
     const request = trace?.requests.find((candidate) => candidate.kind === kind);
     if (request === undefined) return [];
@@ -214,15 +215,19 @@ const makeRetrievalObservation = (
       retrievalCase.category === "candidate_fan_out"
     ) {
       const datatrackerRequestCount = retrievalCase.category === "candidate_fan_out" ? 8 : 4;
+      const sourceRequestCount = retrievalCase.category === "candidate_fan_out" ? 8 : 1;
       const requests = [
         ...requestCopies("metadata", datatrackerRequestCount),
-        ...requestCopies("source", 1),
+        ...requestCopies("source", sourceRequestCount),
       ];
       return {
         ...trace,
         requestCount: requests.length,
         datatrackerRequestCount,
-        sourceRequestCount: 1,
+        sourceRequestCount,
+        ...(retrievalCase.category === "candidate_fan_out"
+          ? { uniqueCandidates: 40, semanticCandidates: 32, selectedSources: 8 }
+          : {}),
         requests,
       };
     }
@@ -265,14 +270,74 @@ const makeRetrievalObservation = (
     }
     return { ...trace, sourceCacheOutcome: cacheOutcome ?? trace.sourceCacheOutcome };
   })();
+  const cacheScenario = (() => {
+    if (cacheOutcome === undefined || trace === null) return null;
+    const before = { ...trace, sourceCacheOutcome: "miss" as const };
+    const after =
+      retrievalCase.category === "source_cache_hit"
+        ? {
+            ...trace,
+            requestCount: trace.requestCount - 1,
+            sourceRequestCount: 0,
+            sourceCacheOutcome: "hit" as const,
+            requests: trace.requests.filter(({ kind }) => kind !== "source"),
+          }
+        : { ...trace, sourceCacheOutcome: cacheOutcome };
+    const traces = retrievalCase.category === "source_cache_miss" ? [before] : [before, after];
+    const replaced = retrievalCase.category === "source_cache_replaced";
+    return {
+      traces,
+      evidence: {
+        beforeSourceHash: retrievalCase.category === "source_cache_miss" ? null : "a".repeat(64),
+        afterSourceHash: replaced ? "b".repeat(64) : "a".repeat(64),
+        returnedSourceHash: replaced ? "b".repeat(64) : "a".repeat(64),
+        sourceRequestCounts: traces.map(({ sourceRequestCount }) => sourceRequestCount),
+        networkRequestCount: traces.reduce(
+          (total, { sourceRequestCount }) => total + sourceRequestCount,
+          0,
+        ),
+        validators:
+          retrievalCase.category === "source_cache_revalidated" || replaced
+            ? [null, '"one"']
+            : retrievalCase.category === "source_cache_repaired"
+              ? [null, null]
+              : [null],
+        cacheEntryCorrupted: retrievalCase.category === "source_cache_repaired",
+      },
+    };
+  })();
+  const failureCacheEvidence = revalidationFailure
+    ? {
+        beforeSourceHash: "a".repeat(64),
+        afterSourceHash: "a".repeat(64),
+        returnedSourceHash: null,
+        sourceRequestCounts: [1, 1],
+        networkRequestCount: 2,
+        validators: [null, '"one"'],
+        cacheEntryCorrupted: false,
+      }
+    : null;
   return {
     schemaVersion: evaluationSchemaVersion,
     caseId: retrievalCase.id,
     category: retrievalCase.category,
     seam: retrievalCase.seam,
     passed,
-    traces: failClosed || scenarioTrace === null ? [] : [scenarioTrace],
-    errorKind: passed ? (failClosed ? "RfcDiscoveryError" : null) : "RetrievalAssertionError",
+    traces: metadataFailure
+      ? []
+      : revalidationFailure
+        ? scenarioTrace === null
+          ? []
+          : [scenarioTrace]
+        : (cacheScenario?.traces ?? (scenarioTrace === null ? [] : [scenarioTrace])),
+    cacheEvidence: cacheScenario?.evidence ?? failureCacheEvidence,
+    errorKind: passed
+      ? metadataFailure
+        ? "RfcDiscoveryError"
+        : revalidationFailure
+          ? "RfcSourceRevalidationError"
+          : null
+      : "RetrievalAssertionError",
   };
 };
 
@@ -398,7 +463,8 @@ describe("precision evaluation", () => {
         "source_cache_revalidated",
         "source_cache_replaced",
         "source_cache_repaired",
-        "fail_closed_upstream",
+        "fail_closed_metadata",
+        "fail_closed_revalidation",
       ]),
     );
     expect(evaluationCorpus.retrievalCases.every(({ live }) => live === false)).toBe(true);
@@ -706,6 +772,58 @@ describe("precision evaluation", () => {
     expect(failed.gate.failures).toContain(
       "one or more deterministic retrieval cases did not pass",
     );
+  });
+
+  test("rejects unsaturated fan-out, incomplete cache evidence, and wrong typed failures", () => {
+    const observations = corpusObservations();
+    const retrievalObservations = corpusRetrievalObservations();
+    const unsaturatedFanOut = retrievalObservations.map((observation) =>
+      observation.category === "candidate_fan_out"
+        ? {
+            ...observation,
+            traces: observation.traces.map((trace) => ({
+              ...trace,
+              semanticCandidates: 31,
+              selectedSources: 7,
+            })),
+          }
+        : observation,
+    );
+    const networkedHit = retrievalObservations.map((observation) =>
+      observation.category === "source_cache_hit" && observation.cacheEvidence !== null
+        ? {
+            ...observation,
+            cacheEvidence: { ...observation.cacheEvidence, networkRequestCount: 2 },
+          }
+        : observation,
+    );
+    const wrongFailure = retrievalObservations.map((observation) =>
+      observation.category === "fail_closed_revalidation"
+        ? { ...observation, errorKind: "RfcSourceFetchError" }
+        : observation,
+    );
+
+    expect(
+      evaluateGateWithRetrieval(
+        calculateEvaluationMetrics(observations),
+        observations,
+        unsaturatedFanOut,
+      ).retrievalCasesPassed,
+    ).toBe(false);
+    expect(
+      evaluateGateWithRetrieval(
+        calculateEvaluationMetrics(observations),
+        observations,
+        networkedHit,
+      ).retrievalCasesPassed,
+    ).toBe(false);
+    expect(
+      evaluateGateWithRetrieval(
+        calculateEvaluationMetrics(observations),
+        observations,
+        wrongFailure,
+      ).retrievalCasesPassed,
+    ).toBe(false);
   });
 
   test("requires bounded traversal fields for research but not citation traces", () => {

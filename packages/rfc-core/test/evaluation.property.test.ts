@@ -186,6 +186,7 @@ describe("evaluation invariants", () => {
           seam: retrievalCase.seam,
           passed: true,
           traces: [],
+          cacheEvidence: null,
           errorKind: null,
         })),
       );

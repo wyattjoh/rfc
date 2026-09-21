@@ -16,7 +16,7 @@ import {
 /**
  * Version of the evaluation contracts and report format.
  */
-export const evaluationSchemaVersion = 5 as const;
+export const evaluationSchemaVersion = 6 as const;
 
 /**
  * Version of the committed precision evaluation corpus.
@@ -104,7 +104,8 @@ export const EvaluationRetrievalCategorySchema = Schema.Literals([
   "source_cache_revalidated",
   "source_cache_replaced",
   "source_cache_repaired",
-  "fail_closed_upstream",
+  "fail_closed_metadata",
+  "fail_closed_revalidation",
 ]);
 
 /**
@@ -124,6 +125,24 @@ export const EvaluationRetrievalCaseSchema = Schema.Struct({
 export type EvaluationRetrievalCase = Schema.Schema.Type<typeof EvaluationRetrievalCaseSchema>;
 
 /**
+ * Cache-state evidence recorded around one deterministic source-cache scenario.
+ */
+export const EvaluationCacheEvidenceSchema = Schema.Struct({
+  beforeSourceHash: Schema.NullOr(Schema.NonEmptyString),
+  afterSourceHash: Schema.NullOr(Schema.NonEmptyString),
+  returnedSourceHash: Schema.NullOr(Schema.NonEmptyString),
+  sourceRequestCounts: Schema.Array(Schema.Natural),
+  networkRequestCount: Schema.Natural,
+  validators: Schema.Array(Schema.NullOr(Schema.NonEmptyString)),
+  cacheEntryCorrupted: Schema.Boolean,
+});
+
+/**
+ * Before/after cache evidence attached to a deterministic retrieval observation.
+ */
+export type EvaluationCacheEvidence = Schema.Schema.Type<typeof EvaluationCacheEvidenceSchema>;
+
+/**
  * Evidence that one deterministic retrieval case executed through the public client seam.
  */
 export const EvaluationRetrievalObservationSchema = Schema.Struct({
@@ -133,6 +152,7 @@ export const EvaluationRetrievalObservationSchema = Schema.Struct({
   seam: Schema.Literal("rfc_client"),
   passed: Schema.Boolean,
   traces: Schema.Array(LiveRetrievalTraceSchema),
+  cacheEvidence: Schema.NullOr(EvaluationCacheEvidenceSchema),
   errorKind: Schema.NullOr(Schema.NonEmptyString),
 });
 
@@ -651,12 +671,19 @@ const retrievalCases = [
     assertion: "A corrupt source-cache entry is unconditionally refetched and repaired.",
   },
   {
-    id: "retrieval-upstream-errors",
-    category: "fail_closed_upstream",
+    id: "retrieval-metadata-failure",
+    category: "fail_closed_metadata",
+    seam: "rfc_client",
+    live: false,
+    assertion: "Required Datatracker metadata failure returns RfcDiscoveryError without fallback.",
+  },
+  {
+    id: "retrieval-stale-source-failure",
+    category: "fail_closed_revalidation",
     seam: "rfc_client",
     live: false,
     assertion:
-      "Required Datatracker and stale-source failures return typed errors without fallback.",
+      "Stale RFC source revalidation failure returns RfcSourceRevalidationError without serving stale text.",
   },
 ] as const;
 
@@ -1805,15 +1832,117 @@ const retrievalTraceWithinPolicy = (
         trace.depthLimit === policy.traversalLimits.maxDepth;
 };
 
+const sameNumbers = (left: ReadonlyArray<number>, right: ReadonlyArray<number>): boolean =>
+  left.length === right.length && left.every((value, index) => value === right[index]);
+
+const isStrongValidator = (value: string | null | undefined): boolean =>
+  value !== null && value !== undefined && /^"[^"\r\n]*"$/.test(value);
+
+const cacheEvidenceMatches = (
+  observation: EvaluationRetrievalObservation,
+  expectedOutcome: LiveRetrievalTrace["sourceCacheOutcome"],
+): boolean => {
+  const evidence = observation.cacheEvidence;
+  if (evidence === null) return false;
+  const traceCounts = observation.traces.map(({ sourceRequestCount }) => sourceRequestCount);
+  const validators = evidence.validators;
+  const base =
+    observation.traces.some(({ sourceCacheOutcome }) => sourceCacheOutcome === expectedOutcome) &&
+    sameNumbers(evidence.sourceRequestCounts, traceCounts) &&
+    evidence.networkRequestCount ===
+      evidence.sourceRequestCounts.reduce((sum, count) => sum + count, 0) &&
+    validators.length === evidence.networkRequestCount &&
+    evidence.returnedSourceHash !== null &&
+    evidence.returnedSourceHash === evidence.afterSourceHash;
+  if (!base) return false;
+  switch (observation.category) {
+    case "source_cache_miss":
+      return (
+        evidence.beforeSourceHash === null &&
+        evidence.afterSourceHash !== null &&
+        sameNumbers(evidence.sourceRequestCounts, [1]) &&
+        validators[0] === null &&
+        !evidence.cacheEntryCorrupted
+      );
+    case "source_cache_hit":
+      return (
+        evidence.beforeSourceHash !== null &&
+        evidence.beforeSourceHash === evidence.afterSourceHash &&
+        sameNumbers(evidence.sourceRequestCounts, [1, 0]) &&
+        validators[0] === null &&
+        !evidence.cacheEntryCorrupted
+      );
+    case "source_cache_revalidated":
+      return (
+        evidence.beforeSourceHash !== null &&
+        evidence.beforeSourceHash === evidence.afterSourceHash &&
+        sameNumbers(evidence.sourceRequestCounts, [1, 1]) &&
+        validators[0] === null &&
+        isStrongValidator(validators[1]) &&
+        !evidence.cacheEntryCorrupted
+      );
+    case "source_cache_replaced":
+      return (
+        evidence.beforeSourceHash !== null &&
+        evidence.afterSourceHash !== null &&
+        evidence.beforeSourceHash !== evidence.afterSourceHash &&
+        sameNumbers(evidence.sourceRequestCounts, [1, 1]) &&
+        validators[0] === null &&
+        isStrongValidator(validators[1]) &&
+        !evidence.cacheEntryCorrupted
+      );
+    case "source_cache_repaired":
+      return (
+        evidence.beforeSourceHash !== null &&
+        evidence.beforeSourceHash === evidence.afterSourceHash &&
+        sameNumbers(evidence.sourceRequestCounts, [1, 1]) &&
+        validators.every((validator) => validator === null) &&
+        evidence.cacheEntryCorrupted
+      );
+    default:
+      return false;
+  }
+};
+
 const retrievalObservationHasEvidence = (
   observation: EvaluationRetrievalObservation,
   policy: EvaluationPolicy,
 ): boolean => {
   if (!observation.passed) return false;
-  if (observation.category === "fail_closed_upstream") {
-    return observation.errorKind !== null && observation.traces.length === 0;
+  if (observation.category === "fail_closed_metadata") {
+    return (
+      observation.errorKind === "RfcDiscoveryError" &&
+      observation.traces.length === 0 &&
+      observation.cacheEvidence === null
+    );
   }
-  if (observation.errorKind !== null || observation.traces.length === 0) return false;
+  if (observation.category === "fail_closed_revalidation") {
+    const evidence = observation.cacheEvidence;
+    return (
+      observation.errorKind === "RfcSourceRevalidationError" &&
+      observation.traces.length === 1 &&
+      observation.traces.every((trace) => knownRfcTraceWithinPolicy(trace, policy)) &&
+      evidence !== null &&
+      evidence.beforeSourceHash !== null &&
+      evidence.beforeSourceHash === evidence.afterSourceHash &&
+      evidence.returnedSourceHash === null &&
+      sameNumbers(evidence.sourceRequestCounts, [1, 1]) &&
+      evidence.networkRequestCount === 2 &&
+      evidence.validators.length === 2 &&
+      evidence.validators[0] === null &&
+      isStrongValidator(evidence.validators[1]) &&
+      !evidence.cacheEntryCorrupted
+    );
+  }
+  if (
+    observation.errorKind !== null ||
+    observation.traces.length === 0 ||
+    (observation.category.startsWith("source_cache_")
+      ? observation.cacheEvidence === null
+      : observation.cacheEvidence !== null)
+  ) {
+    return false;
+  }
   const finalTrace = observation.traces[observation.traces.length - 1];
   if (finalTrace === undefined) return false;
   switch (observation.category) {
@@ -1845,7 +1974,9 @@ const retrievalObservationHasEvidence = (
       return (
         observation.traces.every((trace) => topicTraceWithinPolicy(trace, policy)) &&
         finalTrace.datatrackerRequestCount === policy.retrievalLimits.maxTopicRequests &&
-        (finalTrace.semanticCandidates ?? 0) > 0
+        (finalTrace.uniqueCandidates ?? 0) > policy.candidateLimits.maxMergedDocumentCandidates &&
+        finalTrace.semanticCandidates === policy.candidateLimits.maxMergedDocumentCandidates &&
+        finalTrace.selectedSources === policy.candidateLimits.maxSourceRetrievalCandidates
       );
     case "no_candidate_outcome":
       return (
@@ -1868,18 +1999,17 @@ const retrievalObservationHasEvidence = (
     case "source_cache_revalidated":
     case "source_cache_replaced":
     case "source_cache_repaired": {
-      const expectedCacheOutcome = {
+      const expectedCacheOutcomes = {
         source_cache_miss: "miss",
         source_cache_hit: "hit",
         source_cache_revalidated: "revalidated",
         source_cache_replaced: "replaced",
         source_cache_repaired: "repaired",
-      }[observation.category];
+      } as const;
+      const expectedCacheOutcome = expectedCacheOutcomes[observation.category];
       return (
         observation.traces.every((trace) => knownRfcTraceWithinPolicy(trace, policy)) &&
-        observation.traces.some(
-          ({ sourceCacheOutcome }) => sourceCacheOutcome === expectedCacheOutcome,
-        )
+        cacheEvidenceMatches(observation, expectedCacheOutcome)
       );
     }
   }

@@ -165,6 +165,7 @@ const writeUnattestedCalibrationReport = async (path: string): Promise<void> => 
           seam: retrievalCase.seam,
           passed: true,
           traces: [],
+          cacheEvidence: null,
           errorKind: null,
         })),
         {
