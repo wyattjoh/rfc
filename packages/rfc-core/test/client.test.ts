@@ -3064,4 +3064,23 @@ describe("createRfcClient", () => {
       },
     });
   });
+
+  test("bounds an upstream failure description carried into the envelope", () => {
+    // A provider or platform reason can embed a response body of unknown size
+    // and content, and the envelope reaches standard error and MCP tool errors.
+    const envelope = toErrorEnvelope(
+      new RfcSourceFetchError({
+        stage: "request",
+        url: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+        reason: `leading\n\tdetail ${"x".repeat(5_000)}`,
+      }),
+    );
+    const message = envelope.kind === "error" ? envelope.error.message : "";
+    expect(message.length).toBeLessThan(300);
+    expect(message).toContain("https://www.rfc-editor.org/rfc/rfc9110.txt");
+    // Newlines and tabs are collapsed so one failure stays one line.
+    expect(message).not.toContain("\n");
+    expect(message).not.toContain("\t");
+    expect(message.endsWith("…")).toBe(true);
+  });
 });

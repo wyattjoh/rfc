@@ -170,6 +170,15 @@ export const automaticAnswerActivationFromReport = (
 ): AutomaticAnswerActivation | undefined =>
   isAcceptedEvaluationReport(input) ? makeArtifactActivation() : undefined;
 
+/**
+ * Whole-operation ceiling for one research or citation call.
+ *
+ * Generous relative to the warm-cache latency targets, because it exists to
+ * bound a pathological fan-out against a slow upstream rather than to enforce
+ * the per-stage deadlines that already apply.
+ */
+export const operationBudgetMilliseconds = 120_000;
+
 const defaultCacheDirectoryRoot = (() => {
   if (process.platform === "darwin") {
     return join(homedir(), "Library", "Caches");
@@ -213,6 +222,11 @@ export interface RfcClientOptions {
    * Values above the production limit are clamped to its hard maximum.
    */
   readonly currencyTraversalDepthLimit?: number | undefined;
+  /**
+   * Optional lower whole-operation budget used by deterministic tests.
+   * Values above the production ceiling are clamped to it.
+   */
+  readonly operationBudgetMilliseconds?: number | undefined;
   /**
    * TypeSafe model alias used to construct the official DecisionModel provider.
    */
@@ -301,6 +315,20 @@ export class ConfigurationError extends Schema.TaggedError<ConfigurationError>()
 ) {}
 
 /**
+ * Signals that one semantic operation exceeded its whole-operation budget.
+ *
+ * Every network and provider stage is individually bounded, but a known-RFC
+ * request fans out across a bounded set of contexts and each stage restarts
+ * its own budget. This is the ceiling across all of them.
+ */
+export class OperationTimeoutError extends Schema.TaggedError<OperationTimeoutError>()(
+  "OperationTimeoutError",
+  {
+    milliseconds: Schema.Number,
+  },
+) {}
+
+/**
  * The operational errors exposed by the Promise facade.
  */
 export type RfcCoreError =
@@ -316,7 +344,8 @@ export type RfcCoreError =
   | DecisionModelError
   | ResearchPolicyError
   | InvalidInputError
-  | ConfigurationError;
+  | ConfigurationError
+  | OperationTimeoutError;
 
 /**
  * Stable machine-readable error codes emitted by the CLI boundary.
@@ -340,6 +369,7 @@ export type ErrorCode =
   | "credential_access_denied"
   | "credential_storage_failed"
   | "credential_deletion_failed"
+  | "operation_timeout"
   | "internal_error";
 
 const ErrorCodeSchema = Schema.Literals([
@@ -361,6 +391,7 @@ const ErrorCodeSchema = Schema.Literals([
   "credential_access_denied",
   "credential_storage_failed",
   "credential_deletion_failed",
+  "operation_timeout",
   "internal_error",
 ]);
 
@@ -1041,6 +1072,30 @@ const resetModelTrackingProgram = (options: RfcClientOptions) =>
   });
 
 /**
+ * Maximum characters of an upstream failure description carried into a public
+ * error envelope.
+ */
+const errorEnvelopeReasonMaximumCharacters = 200;
+
+/**
+ * Bound an upstream failure description before it enters a public envelope.
+ *
+ * A typed error's reason originates in a provider, platform, or HTTP layer and
+ * can embed a response body of unknown size and content. The envelope is
+ * documented as safe and is written to standard error and to MCP tool errors,
+ * so the description is collapsed to a single bounded line.
+ *
+ * @param reason The upstream failure description.
+ * @returns A single-line description no longer than the bound.
+ */
+const boundedReason = (reason: string): string => {
+  const collapsed = reason.replace(/\s+/g, " ").trim();
+  return collapsed.length <= errorEnvelopeReasonMaximumCharacters
+    ? collapsed
+    : `${collapsed.slice(0, errorEnvelopeReasonMaximumCharacters - 1)}…`;
+};
+
+/**
  * Convert an unknown boundary failure into the versioned CLI error envelope.
  *
  * @param error The rejected value from a core Promise operation.
@@ -1053,7 +1108,7 @@ export const toErrorEnvelope = (error: unknown): ErrorEnvelope => {
       kind: "error",
       error: {
         code: "discovery_failed",
-        message: `Unable to retrieve live RFC metadata from ${error.url}: ${error.reason}`,
+        message: `Unable to retrieve live RFC metadata from ${error.url}: ${boundedReason(error.reason)}`,
       },
     };
   }
@@ -1064,7 +1119,7 @@ export const toErrorEnvelope = (error: unknown): ErrorEnvelope => {
       kind: "error",
       error: {
         code: "source_cache_failed",
-        message: `Unable to read RFC source cache: ${error.reason}`,
+        message: `Unable to read RFC source cache: ${boundedReason(error.reason)}`,
       },
     };
   }
@@ -1075,7 +1130,7 @@ export const toErrorEnvelope = (error: unknown): ErrorEnvelope => {
       kind: "error",
       error: {
         code: "source_fetch_failed",
-        message: `Unable to fetch RFC source from ${error.url}: ${error.reason}`,
+        message: `Unable to fetch RFC source from ${error.url}: ${boundedReason(error.reason)}`,
       },
     };
   }
@@ -1086,7 +1141,7 @@ export const toErrorEnvelope = (error: unknown): ErrorEnvelope => {
       kind: "error",
       error: {
         code: "source_revalidation_failed",
-        message: `Unable to revalidate stale RFC source from ${error.url}: ${error.reason}`,
+        message: `Unable to revalidate stale RFC source from ${error.url}: ${boundedReason(error.reason)}`,
       },
     };
   }
@@ -1130,7 +1185,7 @@ export const toErrorEnvelope = (error: unknown): ErrorEnvelope => {
       kind: "error",
       error: {
         code: "decision_model_failed",
-        message: `DecisionModel ${error.stage} failed: ${error.reason}`,
+        message: `DecisionModel ${error.stage} failed: ${boundedReason(error.reason)}`,
       },
     };
   }
@@ -1174,7 +1229,18 @@ export const toErrorEnvelope = (error: unknown): ErrorEnvelope => {
       kind: "error",
       error: {
         code: "invalid_input",
-        message: error.reason,
+        message: boundedReason(error.reason),
+      },
+    };
+  }
+
+  if (error instanceof OperationTimeoutError) {
+    return {
+      schemaVersion,
+      kind: "error",
+      error: {
+        code: "operation_timeout",
+        message: `The operation exceeded its ${error.milliseconds} ms budget`,
       },
     };
   }
@@ -1185,7 +1251,7 @@ export const toErrorEnvelope = (error: unknown): ErrorEnvelope => {
       kind: "error",
       error: {
         code: "configuration_error",
-        message: `Unable to load CLI configuration: ${error.reason}`,
+        message: `Unable to load CLI configuration: ${boundedReason(error.reason)}`,
       },
     };
   }
@@ -1201,6 +1267,7 @@ export const toErrorEnvelope = (error: unknown): ErrorEnvelope => {
 };
 
 const defaultClientOptions: RfcClientOptions = {
+  operationBudgetMilliseconds: undefined,
   cacheDirectory: undefined,
   datatrackerApiUrl: undefined,
   datatrackerHttpClient: undefined,
@@ -1247,11 +1314,25 @@ export const createRfcClient = async (
     await runtime.dispose();
   };
 
+  const operationBudget = Math.min(
+    options.operationBudgetMilliseconds ?? operationBudgetMilliseconds,
+    operationBudgetMilliseconds,
+  );
+
   const runModelOperation = <A>(program: Effect.Effect<A, any, any>): Promise<A> => {
     const operation = modelOperationTail.then(async () => {
       await runtime.runPromise(resetModelTrackingProgram(options));
       try {
-        return await runtime.runPromise(program);
+        // Every retrieval and provider stage carries its own deadline, but a
+        // request fans out across a bounded set of contexts and each stage
+        // restarts that deadline. Without a ceiling across all of them, a
+        // slow-but-responsive upstream can hold a call open for minutes.
+        return await runtime.runPromise(
+          Effect.timeoutOrElse(program, {
+            duration: Duration.millis(operationBudget),
+            orElse: () => Effect.fail(new OperationTimeoutError({ milliseconds: operationBudget })),
+          }),
+        );
       } finally {
         await runtime.runPromise(resetModelTrackingProgram(options));
       }
