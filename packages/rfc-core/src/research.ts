@@ -1748,24 +1748,12 @@ const successorLookup = (
     addEdge(identifier, "obsoletes");
   }
 
-  for (const candidate of documents) {
-    for (const identifier of candidate.updates) {
-      const normalized = normalizedRfcIdentifier(identifier);
-      if (normalized === undefined) continue;
-      if (normalized === currencyIdentifier(document)) {
-        hasSuccessorMetadata = true;
-        addEdge(candidate.identifier, "updates");
-      }
-    }
-    for (const identifier of candidate.obsoletes) {
-      const normalized = normalizedRfcIdentifier(identifier);
-      if (normalized === undefined) continue;
-      if (normalized === currencyIdentifier(document)) {
-        hasSuccessorMetadata = true;
-        addEdge(candidate.identifier, "obsoletes");
-      }
-    }
-  }
+  // Successors are read only from the requested document's own `updatedBy`
+  // and `obsoletedBy`. There is deliberately no reverse scan over every other
+  // candidate's `updates`/`obsoletes`: live discovery constructs those two
+  // fields as empty on every document, so such a scan can never add an edge,
+  // while making currency depend on how many unrelated documents happen to be
+  // in the request-local set.
 
   const sortedEdges = [...edges.values()].sort(
     (left, right) =>
