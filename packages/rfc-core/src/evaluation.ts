@@ -6,6 +6,7 @@ import {
   type CitationVerdict,
 } from "./citation";
 import { LiveRetrievalTraceSchema, type LiveRetrievalTrace } from "./discovery";
+import { precisionV2HumanReviewDecision } from "./precision-v2-release-decision";
 import {
   precisionPolicy,
   ResearchStatusSchema,
@@ -988,16 +989,17 @@ export type EvaluationReleaseAttestation = {
   readonly policyDigest: string;
   readonly authoritativeSourceHashes: Readonly<Record<string, ReadonlyArray<string>>>;
   readonly expiresAt: string | null;
+  readonly reviewDecisionId: string | null;
   readonly reviewedAt: string | null;
   readonly reviewFailures: ReadonlyArray<string>;
 };
 
 export const evaluationReleaseAttestation: EvaluationReleaseAttestation = Object.freeze({
-  status: "rejected",
-  buildId: "rfc-evidence-precision-v2",
-  reportDigest: "3ce4d88e7ee0450562679342fc3f9e4a27b545ca5a2b0d0dbb9f8955efe400f1",
-  corpusDigest: evaluationCorpusDigest,
-  policyDigest: evaluationPolicyDigest,
+  status: precisionV2HumanReviewDecision.decision,
+  buildId: precisionV2HumanReviewDecision.releaseBuildId,
+  reportDigest: precisionV2HumanReviewDecision.reportDigest,
+  corpusDigest: precisionV2HumanReviewDecision.corpusDigest,
+  policyDigest: precisionV2HumanReviewDecision.policyDigest,
   authoritativeSourceHashes: Object.freeze({
     RFC1034: ["d6b10a71441df879cc2817d23f2dad120c8a5f87e74eba1e4ed4b743a76a891a"],
     RFC1101: ["972d509dcb4cb6cc2a41315b8a14a2bc520d4098cd318cb8d170de37017e26d3"],
@@ -1019,13 +1021,10 @@ export const evaluationReleaseAttestation: EvaluationReleaseAttestation = Object
     RFC9846: ["773437ae1a8236757ea6c73cdccecad5d54589b591bbbadec1e48c69c41d694a"],
     RFC9931: ["07fdef22c7a8c2db5d92d7afde50d4c3478368b7e6d31f3ac7f9d0cb282601b2"],
   }),
-  expiresAt: "2026-10-21T03:47:47.612Z",
-  reviewedAt: "2026-09-21T03:50:35.000Z",
-  reviewFailures: Object.freeze([
-    "observed outcomes fell outside committed allowed outcome sets",
-    "positive-control research cases did not remain answered",
-    "warm-cache research p95 latency exceeded a configured gate",
-  ]),
+  expiresAt: precisionV2HumanReviewDecision.reportExpiresAt,
+  reviewDecisionId: precisionV2HumanReviewDecision.id,
+  reviewedAt: precisionV2HumanReviewDecision.reviewedAt,
+  reviewFailures: precisionV2HumanReviewDecision.failures,
 });
 
 /**
@@ -1685,6 +1684,7 @@ export const isAcceptedEvaluationReportForAttestation = (
     );
     return (
       attestation.status === "accepted" &&
+      attestation.reviewDecisionId !== null &&
       Number.isFinite(reviewedAt) &&
       createdAt <= reviewedAt &&
       reviewedAt <= now &&

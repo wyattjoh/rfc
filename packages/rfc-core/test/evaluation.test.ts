@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { Schema } from "effect";
+import { precisionV2HumanReviewDecision } from "../src/precision-v2-release-decision";
 import {
   EvaluationObservationSchema,
   EvaluationReportSchema,
@@ -402,6 +403,7 @@ const acceptedFixtureReport = () => {
       policyDigest: report.policyDigest,
       authoritativeSourceHashes: report.authoritativeSourceHashes,
       expiresAt: report.expiresAt,
+      reviewDecisionId: "fixture-accepted-review",
       reviewedAt: "2026-01-02T00:00:00.000Z",
       reviewFailures: [],
     },
@@ -1196,6 +1198,28 @@ describe("precision evaluation", () => {
         "warm-cache research p95 latency exceeded a configured gate",
       ],
     });
+    expect(evaluationReleaseAttestation.reviewDecisionId).toBe(precisionV2HumanReviewDecision.id);
+    expect(evaluationReleaseAttestation.status).toBe(precisionV2HumanReviewDecision.decision);
+    expect(evaluationReleaseAttestation.buildId).toBe(
+      precisionV2HumanReviewDecision.releaseBuildId,
+    );
+    expect(evaluationReleaseAttestation.reportDigest).toBe(
+      precisionV2HumanReviewDecision.reportDigest,
+    );
+    expect(evaluationReleaseAttestation.corpusDigest).toBe(
+      precisionV2HumanReviewDecision.corpusDigest,
+    );
+    expect(evaluationReleaseAttestation.policyDigest).toBe(
+      precisionV2HumanReviewDecision.policyDigest,
+    );
+    expect(evaluationReleaseAttestation.expiresAt).toBe(
+      precisionV2HumanReviewDecision.reportExpiresAt,
+    );
+    expect(evaluationReleaseAttestation.reviewedAt).toBe(precisionV2HumanReviewDecision.reviewedAt);
+    expect(evaluationReleaseAttestation.reviewFailures).toEqual(
+      precisionV2HumanReviewDecision.failures,
+    );
+    expect(precisionV2HumanReviewDecision.reviewAuthority).toBe("human_user");
     expect(evaluationReleaseAttestation.reportDigest).toMatch(/^[a-f0-9]{64}$/);
     expect(evaluationReleaseAttestation.reviewedAt).not.toBeNull();
     expect(
@@ -1233,6 +1257,13 @@ describe("precision evaluation", () => {
       isAcceptedEvaluationReportForAttestation(
         report,
         { ...attestation, status: "pending_live_calibration" },
+        now,
+      ),
+    ).toBe(false);
+    expect(
+      isAcceptedEvaluationReportForAttestation(
+        report,
+        { ...attestation, reviewDecisionId: null },
         now,
       ),
     ).toBe(false);
