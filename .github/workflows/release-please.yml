@@ -1,0 +1,60 @@
+name: Release Please
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    outputs:
+      releases_created: ${{ steps.release.outputs.releases_created }}
+      rfc_core_release_created: ${{ steps.release.outputs['packages/rfc-core--release_created'] }}
+      rfc_release_created: ${{ steps.release.outputs['packages/rfc--release_created'] }}
+    steps:
+      - uses: googleapis/release-please-action@v5.0.0
+        id: release
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  publish:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.releases_created == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: oven-sh/setup-bun@v2.2.0
+        with:
+          bun-version: "1.4.2"
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Install current npm CLI
+        run: npm install --global npm@12.0.2
+      - run: bun install --frozen-lockfile
+      - run: bun run format:check
+      - run: bun run lint
+      - run: bun run typecheck
+      - run: bun test packages
+      - name: Publish @wyattjoh/rfc-core
+        if: ${{ needs.release-please.outputs.rfc_core_release_created == 'true' }}
+        run: npm publish --workspace packages/rfc-core --access public
+      - name: Publish @wyattjoh/rfc
+        if: ${{ needs.release-please.outputs.rfc_release_created == 'true' }}
+        run: npm publish --workspace packages/rfc --access public
