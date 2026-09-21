@@ -37,19 +37,21 @@ export const rfcMcpAgentReferenceUri = "rfc://docs/agent-workflow" as const;
 /**
  * Cross-tool instructions advertised during MCP initialization.
  */
-export const rfcMcpInstructions = `Use this server as the complete backend for questions about published IETF RFCs. Do not answer RFC claims from memory or another provider.
+export const rfcMcpInstructions = `For an ordinary known-RFC answer, call research_known_rfc exactly once, then answer and stop. Do not call verify_citation after research to re-check returned evidence, including when status is needs_review. Do not run preflight tools. Do not read the agent-workflow resource.
 
-For one simple atomic question, call a research tool once. Only when that result contains neither usable accepted evidence nor a review candidate may you make at most one targeted follow-up research call. Do not rephrase valid results to chase answered status or higher confidence. For up to two explicit independent questions, keep them as separate research calls; do not invent a split for an ambiguous request.
+Use this server as the complete backend for published IETF RFC questions. Do not answer RFC claims from memory or another provider. When the RFC identifier is unknown, call research_topic with { question, searchTerms } using one to four deliberate ordered technical terms. Use verify_citation only when the user supplied a quotation or explicitly requested a distinct paraphrase check.
 
-Use research_known_rfc when the RFC identifier is known. Use research_topic only with one to four deliberate ordered technical search terms. Search terms are transmitted verbatim in Datatracker URLs and may appear in upstream logs; never derive hidden terms or send the full question as a search term unless the user explicitly chose it.
+For one simple atomic question, call one research tool once. Only when that result contains neither usable accepted evidence nor a review candidate may you make at most one targeted follow-up research call. Do not rephrase valid results to chase answered status or higher confidence. For up to two explicit independent questions, keep them as separate research calls; do not invent a split for an ambiguous request.
+
+Topic search terms are transmitted verbatim in Datatracker URLs and may appear in upstream logs; never derive hidden terms or send the full question as a search term unless the user explicitly chose it.
 
 Preserve research status exactly: answered, partial, unsupported, needs_review, or needs_split. Accepted evidence may support an answer. A review candidate is canonical but unaccepted and must be quoted only as qualified review material. Keep requested and current RFC contexts distinct and never silently substitute a successor.
 
-Exact reproduction of accepted evidence needs no citation call. Verify at most two paraphrased claims once each with verify_citation, using the exact returned quote and its UTF-8 byte offset. A direct quote-verification request starts with one citation call and no research preflight; if its verdict is fabricated, use at most one research call to locate current wording and one verification call for that replacement. Never guess wording or offsets. Unsupported, contradicted, or fabricated verdicts cannot support an unqualified claim.
+Exact reproduction of accepted evidence needs no citation call. Verify at most two paraphrased claims once each with verify_citation, using the exact returned quote and its UTF-8 byte offset. If a direct verification verdict is fabricated, use at most one research call to locate current wording and one verification call for that replacement. Never guess wording or offsets. Unsupported, contradicted, or fabricated verdicts cannot support an unqualified claim.
 
-Operational tool errors are not research statuses. Preserve their typed error code and stop rather than substituting stale text, another provider, or memory. If auth_status or a tool error reports a missing credential, ask the human operator to run rfc auth add; never request or accept the secret through MCP. A usage-accounting warning follows a successful paid operation and must not trigger a retry.
+Operational tool errors are not research statuses. Preserve their typed error code and stop rather than substituting stale text, another provider, or memory. If a tool error reports a missing credential, ask the human operator to run rfc auth add; never request or accept the secret through MCP. A usage-accounting warning follows a successful paid operation and must not trigger a retry.
 
-For the complete tool, status, provenance, privacy, cost, cache, and failure reference, read ${rfcMcpAgentReferenceUri}.`;
+Do not read the agent-workflow resource for ordinary research. Read ${rfcMcpAgentReferenceUri} only when handling a non-answer status, operational failure, citation-repair workflow, or a provenance, privacy, cost, or cache question.`;
 
 /**
  * Complete Markdown reference exposed as a static MCP resource.
@@ -64,8 +66,8 @@ For one atomic question:
 
 1. Call \`research_known_rfc\` when the RFC is known, otherwise call \`research_topic\` with one to four deliberate ordered technical search terms.
 2. Make at most one targeted follow-up research call, and only when the first result has neither usable accepted evidence nor a review candidate. Never loop by rephrasing a valid result to chase \`answered\` or higher confidence.
-3. Quote accepted evidence unchanged with provenance. Quote a review candidate only as explicitly unaccepted or \`needs_review\`.
-4. Exact reproduction of returned accepted evidence needs no duplicate verification. Verify at most two paraphrased claims once each with \`verify_citation\`.
+3. When accepted evidence or a review candidate is returned, answer from that result and stop. Quote accepted evidence unchanged with provenance. Quote a review candidate only as explicitly unaccepted or \`needs_review\`.
+4. Never call \`verify_citation\` after research to re-check returned evidence, normalize formatting, or obtain alternate provenance. Use it only for a user-supplied quotation or an explicitly requested distinct paraphrase check, at most twice.
 5. Stop after the budget. Preserve non-answer statuses and typed operational failures.
 
 For up to two explicit independently answerable questions, use one research call per question and keep their inputs and outputs separate. Do not invent a split for an ambiguous request; preserve \`needs_split\`.
@@ -258,7 +260,7 @@ export const createRfcMcpServer = (
     {
       title: "RFC MCP agent workflow",
       description:
-        "Complete workflow, tool, status, failure, provenance, privacy, cache, and cost reference",
+        "Reference for non-answer statuses, failures, citation repair, provenance, privacy, cache, and cost; skip for ordinary research",
       mimeType: "text/markdown",
     },
     async (uri) => ({
@@ -277,7 +279,7 @@ export const createRfcMcpServer = (
     {
       title: "Research a known RFC",
       description:
-        "Research one atomic question against a known published RFC, including bounded RFC currency traversal. Returns exact accepted evidence, qualified review candidates, provenance, status, and diagnostics.",
+        "Inputs: question, rfc. Research one atomic question against a known published RFC. If evidence or a review candidate is returned, answer from it without a verification call. Includes bounded RFC currency traversal, provenance, status, and diagnostics.",
       inputSchema: toMcpSchema(KnownRfcResearchInputSchema),
       outputSchema: toMcpSchema(EvidenceBundleSchema),
       annotations: {
@@ -304,7 +306,7 @@ export const createRfcMcpServer = (
     {
       title: "Discover and research RFCs",
       description:
-        "Research one atomic topic question using one to four ordered search terms sent verbatim to Datatracker. Returns exact accepted evidence, qualified review candidates, provenance, status, and diagnostics.",
+        "Inputs: question, searchTerms (1-4). Research one atomic topic question. If evidence or a review candidate is returned, answer from it without a verification call. Terms are sent verbatim to Datatracker; results include provenance, status, and diagnostics.",
       inputSchema: toMcpSchema(TopicResearchInputSchema),
       outputSchema: toMcpSchema(EvidenceBundleSchema),
       annotations: {
@@ -335,7 +337,7 @@ export const createRfcMcpServer = (
     {
       title: "Verify an RFC citation",
       description:
-        "Check one factual claim against one exact RFC quotation and optional UTF-8 byte offset. Returns a verified, unsupported, contradicted, or fabricated verdict with canonical provenance.",
+        "Inputs: rfc, claim, quote; optional offset. Check one factual claim against one exact RFC quotation. Returns a verified, unsupported, contradicted, or fabricated verdict with canonical provenance.",
       inputSchema: toMcpSchema(CitationInputSchema),
       outputSchema: toMcpSchema(CitationVerificationResultSchema),
       annotations: {
@@ -366,7 +368,7 @@ export const createRfcMcpServer = (
     {
       title: "Inspect an RFC source cache entry",
       description:
-        "Inspect one named canonical RFC source-cache entry locally without network access.",
+        "Input: rfc. Inspect one named canonical RFC source-cache entry locally without network access.",
       inputSchema: toMcpSchema(RfcInputSchema),
       outputSchema: toMcpSchema(RfcSourceCacheStatusSchema),
       annotations: {
@@ -393,7 +395,7 @@ export const createRfcMcpServer = (
     {
       title: "Remove an RFC source cache entry",
       description:
-        "Remove one named canonical RFC source-cache entry locally without network access. Requires explicit confirm=true and never performs bulk removal.",
+        "Inputs: rfc, confirm=true. Remove one named canonical RFC source-cache entry locally without network access; never performs bulk removal.",
       inputSchema: toMcpSchema(SourceCacheRemoveInputSchema),
       outputSchema: toMcpSchema(RfcSourceCacheRemoveResultSchema),
       annotations: {
@@ -420,7 +422,7 @@ export const createRfcMcpServer = (
     {
       title: "Inspect RFC provider credential status",
       description:
-        "Report only whether the stable TypeSafe credential identity is configured. Never returns, accepts, adds, or removes the credential.",
+        "No inputs. Report only whether the stable TypeSafe credential identity is configured. Never returns, accepts, adds, or removes the credential.",
       inputSchema: toMcpSchema(EmptyInputSchema),
       outputSchema: toMcpSchema(AuthStatusSchema),
       annotations: {

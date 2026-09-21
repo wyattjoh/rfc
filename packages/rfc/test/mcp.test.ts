@@ -175,8 +175,21 @@ describe("RFC MCP agent surface", () => {
     const connection = await connect(makeDependencies());
     try {
       expect(connection.client.getInstructions()).toBe(rfcMcpInstructions);
+      expect(rfcMcpInstructions).toStartWith(
+        "For an ordinary known-RFC answer, call research_known_rfc exactly once, then answer and stop.",
+      );
       expect(rfcMcpInstructions).toContain("at most one targeted follow-up research call");
       expect(rfcMcpInstructions).toContain("never request or accept the secret through MCP");
+      expect(rfcMcpInstructions).toContain("Do not run preflight tools");
+      expect(rfcMcpInstructions).toContain(
+        "Do not call verify_citation after research to re-check returned evidence",
+      );
+      expect(rfcMcpInstructions).toContain("Do not read the agent-workflow resource");
+      expect(
+        rfcMcpInstructions.indexOf(
+          "Do not call verify_citation after research to re-check returned evidence",
+        ),
+      ).toBeLessThan(300);
 
       const { tools } = await connection.client.listTools();
       expect(tools.map(({ name }) => name)).toEqual([
@@ -188,6 +201,15 @@ describe("RFC MCP agent surface", () => {
         "auth_status",
       ]);
       expect(tools.every(({ outputSchema }) => outputSchema !== undefined)).toBe(true);
+      expect(tools.find(({ name }) => name === "research_known_rfc")?.description).toStartWith(
+        "Inputs: question, rfc.",
+      );
+      expect(tools.find(({ name }) => name === "research_topic")?.description).toStartWith(
+        "Inputs: question, searchTerms (1-4).",
+      );
+      expect(tools.find(({ name }) => name === "verify_citation")?.description).toStartWith(
+        "Inputs: rfc, claim, quote; optional offset.",
+      );
       expect(tools.find(({ name }) => name === "source_cache_remove")?.annotations).toMatchObject({
         destructiveHint: true,
         idempotentHint: true,
