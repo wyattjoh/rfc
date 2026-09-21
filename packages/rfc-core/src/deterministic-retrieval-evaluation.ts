@@ -263,9 +263,10 @@ export const evaluateDeterministicRetrievalCase = async (
     result.diagnostics.source?.sourceHash ?? null;
   const cachedSourceHash = async (): Promise<string | null> => {
     try {
-      const entry = JSON.parse(
+      const entry: unknown = JSON.parse(
         await readFile(join(cacheDirectory, "sources", "v2", "RFC9110.json"), "utf8"),
-      ) as { readonly contentHash?: unknown };
+      );
+      if (typeof entry !== "object" || entry === null || !("contentHash" in entry)) return null;
       return typeof entry.contentHash === "string" ? entry.contentHash : null;
     } catch {
       return null;
