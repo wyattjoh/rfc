@@ -1,8 +1,21 @@
 version: 2
 
-# Dependabot's Bun updater currently supports bun.lock lockfileVersion 1,
-# while the repository's current Bun release writes lockfileVersion 2.
 updates:
+  - package-ecosystem: bun
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Denver
+    groups:
+      dependencies:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: chore
+      include: scope
+
   - package-ecosystem: github-actions
     directory: /
     schedule:
