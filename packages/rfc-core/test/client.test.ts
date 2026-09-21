@@ -2943,14 +2943,38 @@ describe("createRfcClient", () => {
       rfc: "RFC9110",
       searchTerms: undefined,
     });
-    expect(() =>
+    // Reported as the conflict it is, not as the topic schema's generic
+    // complaint that `rfc` is not null.
+    const decodeFailure = (input: unknown): unknown => {
+      try {
+        decodeResearchRequest(input);
+        return undefined;
+      } catch (error) {
+        return error;
+      }
+    };
+    for (const searchTerms of [["HTTP"], []]) {
+      expect(
+        decodeFailure({
+          schemaVersion: 2,
+          question: "What is HTTP?",
+          rfc: "RFC9110",
+          searchTerms,
+        }),
+      ).toMatchObject({
+        _tag: "InvalidInputError",
+        reason: "Known-RFC research must not include topic search terms",
+      });
+    }
+    // An explicitly undefined searchTerms is the known-RFC spelling, not a conflict.
+    expect(
       decodeResearchRequest({
         schemaVersion: 2,
         question: "What is HTTP?",
         rfc: "RFC9110",
-        searchTerms: ["HTTP"],
+        searchTerms: undefined,
       }),
-    ).toThrow(InvalidInputError);
+    ).toMatchObject({ rfc: "RFC9110", searchTerms: undefined });
     expect(() =>
       decodeResearchRequest({
         schemaVersion: 2,

@@ -491,13 +491,24 @@ export type ResearchRequest = LiveKnownRfcResearchRequest | LiveTopicResearchReq
  * @throws InvalidInputError when the value does not satisfy the version-two contract.
  */
 export const decodeResearchRequest = (input: unknown): ResearchRequest => {
+  // Checked ahead of both schemas. The known-RFC schema admits only an absent
+  // or undefined `searchTerms`, so a request naming an RFC *and* search terms
+  // fails that decode and falls through to the topic schema, where it is
+  // refused for the unrelated reason that `rfc` is not null. Reporting the
+  // actual conflict requires seeing the raw input.
+  if (
+    typeof input === "object" &&
+    input !== null &&
+    typeof (input as { readonly rfc?: unknown }).rfc === "string" &&
+    (input as { readonly searchTerms?: unknown }).searchTerms !== undefined
+  ) {
+    throw new InvalidInputError({
+      reason: "Known-RFC research must not include topic search terms",
+    });
+  }
+
   try {
     const request = Schema.decodeUnknownSync(KnownRfcResearchRequestInputSchema)(input);
-    if (request.searchTerms !== undefined) {
-      throw new InvalidInputError({
-        reason: "Known-RFC research must not include topic search terms",
-      });
-    }
     return { ...request, searchTerms: undefined };
   } catch (error) {
     if (error instanceof InvalidInputError) throw error;
