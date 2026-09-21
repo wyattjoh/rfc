@@ -1,6 +1,40 @@
 # `@wyattjoh/rfc`
 
-The private `rfc` package exposes the RFC evidence engine's agent-facing CLI.
+The private `rfc` package exposes the RFC evidence engine through an agent-facing CLI and a self-describing local MCP server.
+
+## MCP server
+
+Run the MCP server over stdio:
+
+```sh
+rfc mcp
+```
+
+An MCP host should launch that command directly and treat standard output as protocol traffic. The server advertises the complete bounded workflow in its initialization instructions and exposes the full Markdown reference at `rfc://docs/agent-workflow`, so a connected model does not need this repository's skill or direct CLI access.
+
+The model-facing tools are:
+
+- `research_known_rfc`
+- `research_topic`
+- `verify_citation`
+- `source_cache_status`
+- `source_cache_remove`
+- `auth_status`
+
+Each successful tool call returns concise text plus the complete version-two result as validated structured content. Operational failures are MCP tool errors containing the same safe version-two error envelope as the CLI. Valid fail-closed research statuses and citation verdicts remain successful domain results. `source_cache_remove` requires `confirm: true` and is marked destructive and idempotent.
+
+Provider credentials are intentionally outside the model-facing mutation surface. The MCP can inspect safe credential status but can never accept, reveal, add, or remove a key. Configure the credential through `rfc auth add` before launching the server. The stored key is resolved separately for every semantic tool call.
+
+Trusted operators may select the same deterministic test or self-hosted boundaries at process startup:
+
+```sh
+rfc mcp \
+  --cache-directory /path/to/cache \
+  --datatracker-api-url https://datatracker.example/api/v1 \
+  --typesafe-api-url https://typesafe.example/api
+```
+
+Those values are fixed for the MCP process and never appear in tool input schemas. This prevents a model from redirecting credential-bearing provider traffic, issuing arbitrary metadata requests, or selecting arbitrary filesystem paths. Each call creates and closes its own RFC client, preserving CLI isolation and allowing credential rotation while the server remains running.
 
 ## Process protocol
 

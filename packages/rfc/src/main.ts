@@ -1,36 +1,44 @@
 import {
-  ConfigurationError,
   InvalidInputError,
   createRfcClient,
   decodeCitationVerificationRequest,
   decodeResearchRequest,
   defaultCacheDirectory,
   schemaVersion,
-  toErrorEnvelope,
-  type RfcClient,
 } from "@wyattjoh/rfc-core";
 import { NodeServices } from "@effect/platform-node";
 import { Console, Effect, Option } from "effect";
 import { CliError, Command, Flag } from "effect/unstable/cli";
-import { automaticAnswerActivationFor, readCliConfig } from "./config";
+import { runRfcMcpServer } from "./mcp";
+import {
+  executeAuthStatus,
+  executeCitationVerification,
+  executeResearch,
+  executeSourceCacheRemove,
+  executeSourceCacheStatus,
+  renderAuthStatus,
+  renderCitationVerification,
+  renderEvidenceBundle,
+  renderSourceCacheRemove,
+  renderSourceCacheStatus,
+  toRfcOperationErrorEnvelope,
+  type RfcOperationOptions,
+  type RfcOperationWarning,
+} from "./operations";
 import { makeUsageRecorder, type UsageRecorder } from "./usage-store";
 import {
   CredentialInputError,
-  CredentialMissingError,
-  CredentialStoreError,
   addStoredCredential,
   makeDefaultCredentialStore,
   removeStoredCredential,
-  resolveStoredCredential,
-  storedCredentialStatus,
   type CredentialStore,
 } from "./credentials";
 
 /**
  * Injectable side effects used by the CLI composition root.
  *
- * Production uses process streams and Bun.secrets. Tests provide all five
- * functions so they never touch the operator's credential manager or terminal.
+ * Production uses process streams and Bun.secrets. Tests replace every
+ * boundary so they never touch the operator's credential manager or terminal.
  */
 export interface RfcCliDependencies {
   /**
@@ -128,11 +136,6 @@ const credentialFromStdinAlias = Flag.Boolean("from-stdin").pipe(
   Flag.withDefault(false),
 );
 
-const renderTokenCount = (value: number | null): string => value?.toString() ?? "unavailable";
-
-const renderEstimatedUsd = (value: number | null): string =>
-  value === null ? "unavailable" : `$${value.toFixed(9)}`;
-
 const readProcessStandardInput = async (): Promise<string> => {
   if (process.stdin.isTTY) return "";
   const chunks: Array<string> = [];
@@ -207,63 +210,13 @@ export const makeDefaultCliDependencies = (): RfcCliDependencies => ({
   createClient: createRfcClient,
 });
 
-const credentialErrorEnvelope = (error: unknown): object | undefined => {
-  if (error instanceof CredentialMissingError) {
-    return {
-      schemaVersion,
-      kind: "error",
-      error: {
-        code: "credential_missing",
-        message: "No TypeSafe API key is configured; run `rfc auth add`",
-      },
-    };
-  }
-
-  if (error instanceof CredentialInputError) {
-    return {
-      schemaVersion,
-      kind: "error",
-      error: {
-        code: "invalid_input",
-        message: "The TypeSafe API key input is invalid",
-      },
-    };
-  }
-
-  if (error instanceof CredentialStoreError) {
-    const messages = {
-      unavailable: "The platform credential store is unavailable",
-      denied: "Access to the platform credential store was denied",
-      storage: "Unable to store the TypeSafe API key",
-      deletion: "Unable to remove the TypeSafe API key",
-    } as const;
-    const codes = {
-      unavailable: "credential_store_unavailable",
-      denied: "credential_access_denied",
-      storage: "credential_storage_failed",
-      deletion: "credential_deletion_failed",
-    } as const;
-    return {
-      schemaVersion,
-      kind: "error",
-      error: {
-        code: codes[error.kind],
-        message: messages[error.kind],
-      },
-    };
-  }
-
-  return undefined;
-};
-
 /**
  * Map a CLI or core failure to a safe versioned process envelope.
  *
  * @param error Rejected operation value.
  * @returns An envelope that never contains credential values or platform error text.
  */
-export const toCliErrorEnvelope = (error: unknown): object =>
-  credentialErrorEnvelope(error) ?? toErrorEnvelope(error);
+export const toCliErrorEnvelope = (error: unknown): object => toRfcOperationErrorEnvelope(error);
 
 const decodeResearchInput = (input: string) => {
   let parsed: unknown;
@@ -307,46 +260,22 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
   const writeStdout = (value: string): Effect.Effect<void> =>
     Effect.sync(() => dependencies.writeStdout(`${value}\n`));
 
-  const recordUsage = (
-    inputTokens: number | null,
-    estimatedInputCostUsd: number | null,
-  ): Effect.Effect<void> =>
-    Effect.promise(async () => {
-      try {
-        await dependencies.recordUsage({ inputTokens, estimatedInputCostUsd });
-      } catch {
-        dependencies.writeStderr(
-          `${JSON.stringify({
-            schemaVersion,
-            kind: "warning",
-            warning: {
-              code: "usage_accounting_failed",
-              message: "Unable to update the per-user RFC usage totals",
-            },
-          })}\n`,
-        );
+  const writeWarnings = (warnings: ReadonlyArray<RfcOperationWarning>): Effect.Effect<void> =>
+    Effect.sync(() => {
+      for (const warning of warnings) {
+        dependencies.writeStderr(`${JSON.stringify(warning)}\n`);
       }
     });
 
-  const withSourceCacheClient = <A>(
-    cacheDirectory: string,
-    use: (client: RfcClient) => Promise<A>,
-  ): Effect.Effect<A, unknown> =>
-    Effect.acquireUseRelease(
-      Effect.tryPromise({
-        try: () =>
-          dependencies.createClient({
-            cacheDirectory,
-            modelAlias: undefined,
-            automaticAnswerActivation: undefined,
-            typeSafeApiKey: undefined,
-            typeSafeApiUrl: undefined,
-          }),
-        catch: (error) => error,
-      }),
-      (client) => Effect.tryPromise({ try: () => use(client), catch: (error) => error }),
-      (client) => Effect.tryPromise({ try: () => client.close(), catch: (error) => error }),
-    );
+  const operationOptions = (
+    selectedCacheDirectory: string,
+    selectedDatatrackerApiUrl: Option.Option<string>,
+    selectedTypeSafeApiUrl: Option.Option<string>,
+  ): RfcOperationOptions => ({
+    cacheDirectory: selectedCacheDirectory,
+    datatrackerApiUrl: Option.getOrUndefined(selectedDatatrackerApiUrl),
+    typeSafeApiUrl: Option.getOrUndefined(selectedTypeSafeApiUrl),
+  });
 
   const sourceCacheStatusCommand = Command.make(
     "status",
@@ -356,15 +285,18 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
       rfc: cacheRfc,
     },
     Effect.fn(function* ({ cacheDirectory, format, rfc }) {
-      const status = yield* withSourceCacheClient(cacheDirectory, (client) =>
-        client.sourceCacheStatus(rfc),
+      const status = yield* Effect.tryPromise({
+        try: () =>
+          executeSourceCacheStatus(
+            rfc,
+            operationOptions(cacheDirectory, Option.none(), Option.none()),
+            dependencies,
+          ),
+        catch: (error) => error,
+      });
+      yield* writeStdout(
+        format === "human" ? renderSourceCacheStatus(status) : JSON.stringify(status),
       );
-      if (format === "human") {
-        yield* writeStdout(`RFC: ${status.rfc}`);
-        yield* writeStdout(`Cache: ${status.state}`);
-        return;
-      }
-      yield* writeStdout(JSON.stringify(status));
     }),
   ).pipe(Command.withDescription("Inspect one RFC source cache entry without network access"));
 
@@ -376,15 +308,18 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
       rfc: cacheRfc,
     },
     Effect.fn(function* ({ cacheDirectory, format, rfc }) {
-      const result = yield* withSourceCacheClient(cacheDirectory, (client) =>
-        client.sourceCacheRemove(rfc),
+      const result = yield* Effect.tryPromise({
+        try: () =>
+          executeSourceCacheRemove(
+            rfc,
+            operationOptions(cacheDirectory, Option.none(), Option.none()),
+            dependencies,
+          ),
+        catch: (error) => error,
+      });
+      yield* writeStdout(
+        format === "human" ? renderSourceCacheRemove(result) : JSON.stringify(result),
       );
-      if (format === "human") {
-        yield* writeStdout(`RFC: ${result.rfc}`);
-        yield* writeStdout(`Cache: ${result.removed ? "removed" : "missing"}`);
-        return;
-      }
-      yield* writeStdout(JSON.stringify(result));
     }),
   ).pipe(Command.withDescription("Remove one RFC source cache entry without network access"));
 
@@ -436,66 +371,21 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
               });
             })();
 
-      const cliConfig = yield* Effect.tryPromise({
-        try: async () => readCliConfig(),
-        catch: (error) =>
-          new ConfigurationError({
-            reason: error instanceof Error ? error.message : "Unknown configuration error",
-          }),
-      });
-      const apiKey = yield* Effect.tryPromise({
-        try: () => resolveStoredCredential(dependencies.credentialStore),
-        catch: (error) => error,
-      });
-
-      const client = yield* Effect.tryPromise({
+      const result = yield* Effect.tryPromise({
         try: () =>
-          dependencies.createClient({
-            cacheDirectory: flags.cacheDirectory,
-            datatrackerApiUrl: Option.getOrUndefined(flags.datatrackerApiUrl),
-            modelAlias: cliConfig.modelAlias,
-            policyPreset: cliConfig.policyPreset,
-            automaticAnswerActivation: automaticAnswerActivationFor(cliConfig),
-            typeSafeApiKey: apiKey,
-            typeSafeApiUrl: Option.getOrUndefined(flags.typeSafeApiUrl),
-          }),
+          executeCitationVerification(
+            request,
+            operationOptions(flags.cacheDirectory, flags.datatrackerApiUrl, flags.typeSafeApiUrl),
+            dependencies,
+          ),
         catch: (error) => error,
       });
-
-      const result = yield* Effect.acquireUseRelease(
-        Effect.succeed(client),
-        (activeClient) =>
-          Effect.tryPromise({
-            try: () => activeClient.verifyCitation(request),
-            catch: (error) => error,
-          }),
-        (activeClient) =>
-          Effect.tryPromise({ try: () => activeClient.close(), catch: (error) => error }),
+      yield* writeWarnings(result.warnings);
+      yield* writeStdout(
+        flags.format === "human"
+          ? renderCitationVerification(result.value)
+          : JSON.stringify(result.value),
       );
-      yield* recordUsage(
-        result.diagnostics.usage.inputTokens,
-        result.diagnostics.inputCost.estimatedUsd,
-      );
-
-      if (flags.format === "human") {
-        yield* writeStdout(`Verdict: ${result.verdict}`);
-        yield* writeStdout(`RFC: ${result.rfc.identifier}`);
-        yield* writeStdout(`Quote: ${result.quote}`);
-        yield* writeStdout(
-          `Offsets: ${result.provenance.startOffset ?? "unknown"}-${result.provenance.endOffset ?? "unknown"}`,
-        );
-        yield* writeStdout(`Section: ${result.provenance.section ?? "unknown"}`);
-        yield* writeStdout(`Source: ${result.provenance.sourceUrl}`);
-        yield* writeStdout(
-          `Input tokens: ${renderTokenCount(result.diagnostics.usage.inputTokens)}`,
-        );
-        yield* writeStdout(
-          `Estimated input cost (USD): ${renderEstimatedUsd(result.diagnostics.inputCost.estimatedUsd)}`,
-        );
-        return;
-      }
-
-      yield* writeStdout(JSON.stringify(result));
     }),
   ).pipe(
     Command.withDescription("Verify an RFC quotation against a factual claim"),
@@ -552,85 +442,21 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
                 });
               })();
 
-      const cliConfig = yield* Effect.tryPromise({
-        try: async () => readCliConfig(),
-        catch: (error) =>
-          new ConfigurationError({
-            reason: error instanceof Error ? error.message : "Unknown configuration error",
-          }),
-      });
-      const apiKey = yield* Effect.tryPromise({
-        try: () => resolveStoredCredential(dependencies.credentialStore),
-        catch: (error) => error,
-      });
-
-      const client = yield* Effect.tryPromise({
+      const result = yield* Effect.tryPromise({
         try: () =>
-          dependencies.createClient({
-            cacheDirectory: flags.cacheDirectory,
-            datatrackerApiUrl: Option.getOrUndefined(flags.datatrackerApiUrl),
-            modelAlias: cliConfig.modelAlias,
-            policyPreset: cliConfig.policyPreset,
-            automaticAnswerActivation: automaticAnswerActivationFor(cliConfig),
-            typeSafeApiKey: apiKey,
-            typeSafeApiUrl: Option.getOrUndefined(flags.typeSafeApiUrl),
-          }),
+          executeResearch(
+            request,
+            operationOptions(flags.cacheDirectory, flags.datatrackerApiUrl, flags.typeSafeApiUrl),
+            dependencies,
+          ),
         catch: (error) => error,
       });
-
-      const result = yield* Effect.acquireUseRelease(
-        Effect.succeed(client),
-        (activeClient) =>
-          Effect.tryPromise({ try: () => activeClient.research(request), catch: (error) => error }),
-        (activeClient) =>
-          Effect.tryPromise({ try: () => activeClient.close(), catch: (error) => error }),
+      yield* writeWarnings(result.warnings);
+      yield* writeStdout(
+        flags.format === "human"
+          ? renderEvidenceBundle(result.value)
+          : JSON.stringify(result.value),
       );
-      yield* recordUsage(
-        result.diagnostics.usage.inputTokens,
-        result.diagnostics.inputCost.estimatedUsd,
-      );
-
-      if (flags.format === "human") {
-        yield* writeStdout(`Status: ${result.status}`);
-        yield* writeStdout(`RFC: ${result.rfc?.identifier ?? "none discovered"}`);
-        for (const context of result.contexts ?? []) {
-          yield* writeStdout(
-            `Context: ${context.role} ${context.document.identifier} (${context.state})`,
-          );
-        }
-        for (const passage of result.evidence) {
-          yield* writeStdout(
-            `Evidence RFC: ${passage.provenance.identifier} (${passage.context} context)`,
-          );
-          yield* writeStdout(`Section: ${passage.provenance.section ?? "unknown"}`);
-          yield* writeStdout(`Quote: ${passage.quote}`);
-          yield* writeStdout(`Source: ${passage.provenance.sourceUrl}`);
-          yield* writeStdout(
-            `Offsets: ${passage.provenance.startOffset}-${passage.provenance.endOffset} (${passage.provenance.offsetUnit})`,
-          );
-        }
-        for (const candidate of result.reviewCandidates ?? []) {
-          yield* writeStdout("Review candidate: not accepted evidence");
-          yield* writeStdout(
-            `Candidate RFC: ${candidate.provenance.identifier} (${candidate.context} context)`,
-          );
-          yield* writeStdout(`Section: ${candidate.provenance.section ?? "unknown"}`);
-          yield* writeStdout(`Quote: ${candidate.quote}`);
-          yield* writeStdout(`Source: ${candidate.provenance.sourceUrl}`);
-          yield* writeStdout(
-            `Offsets: ${candidate.provenance.startOffset}-${candidate.provenance.endOffset} (${candidate.provenance.offsetUnit})`,
-          );
-        }
-        yield* writeStdout(
-          `Input tokens: ${renderTokenCount(result.diagnostics.usage.inputTokens)}`,
-        );
-        yield* writeStdout(
-          `Estimated input cost (USD): ${renderEstimatedUsd(result.diagnostics.inputCost.estimatedUsd)}`,
-        );
-        return;
-      }
-
-      yield* writeStdout(JSON.stringify(result));
     }),
   ).pipe(
     Command.withDescription("Research an RFC question from versioned JSON input"),
@@ -683,16 +509,10 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
     { format },
     Effect.fn(function* ({ format }) {
       const result = yield* Effect.tryPromise({
-        try: () => storedCredentialStatus(dependencies.credentialStore),
+        try: () => executeAuthStatus(dependencies),
         catch: (error) => error,
       });
-      if (format === "human") {
-        yield* writeStdout(`Credential: ${result.configured ? "configured" : "not configured"}`);
-        yield* writeStdout(`Service: ${result.service}`);
-        yield* writeStdout(`Name: ${result.name}`);
-        return;
-      }
-      yield* writeStdout(JSON.stringify(result));
+      yield* writeStdout(format === "human" ? renderAuthStatus(result) : JSON.stringify(result));
     }),
   ).pipe(Command.withDescription("Inspect TypeSafe credential configuration without revealing it"));
 
@@ -723,6 +543,27 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
     Command.withSubcommands([authAddCommand, authStatusCommand, authRemoveCommand]),
   );
 
+  const mcpCommand = Command.make(
+    "mcp",
+    { cacheDirectory, datatrackerApiUrl, typeSafeApiUrl },
+    Effect.fn(function* (flags) {
+      yield* Effect.tryPromise({
+        try: () =>
+          runRfcMcpServer(
+            operationOptions(flags.cacheDirectory, flags.datatrackerApiUrl, flags.typeSafeApiUrl),
+            dependencies,
+            (error) =>
+              dependencies.writeStderr(`${JSON.stringify(toRfcOperationErrorEnvelope(error))}\n`),
+          ),
+        catch: (error) => error,
+      });
+    }),
+  ).pipe(
+    Command.withDescription(
+      "Serve the self-describing RFC agent surface over the Model Context Protocol on stdio",
+    ),
+  );
+
   return Command.make("rfc").pipe(
     Command.withDescription("TypeSafe RFC evidence engine"),
     Command.withSubcommands([
@@ -730,6 +571,7 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
       sourceCacheCommand,
       researchCommand,
       verifyCitationCommand,
+      mcpCommand,
     ]),
   );
 };

@@ -93,7 +93,12 @@ export {
   type CitationVerificationResult,
   type CitationVerdict,
 } from "./citation";
-export { RfcDiscoveryError, RfcDocumentSchema } from "./discovery";
+export {
+  RfcDiscoveryError,
+  RfcDocumentSchema,
+  datatrackerTopicSearchTermLimit,
+  datatrackerTopicSearchTermMaximumCharacters,
+} from "./discovery";
 export type { LiveRetrievalTrace, RetrievalRequestTrace, RfcDocument } from "./discovery";
 export * from "./evaluation";
 export { RfcSourceRevalidationError } from "./live-source";
@@ -488,48 +493,36 @@ export const decodeResearchRequest = (input: unknown): ResearchRequest => {
 };
 
 /**
+ * Schema for local-only status of one named RFC source-cache entry.
+ */
+export const RfcSourceCacheStatusSchema = Schema.Struct({
+  schemaVersion: Schema.Literal(schemaVersion),
+  kind: Schema.Literal("source_cache_status"),
+  rfc: Schema.NonEmptyString,
+  state: Schema.Literals(["hit", "miss"]),
+});
+
+/**
  * Local-only status for one named RFC source-cache entry.
  */
-export interface RfcSourceCacheStatus {
-  /**
-   * Public protocol version.
-   */
-  readonly schemaVersion: typeof schemaVersion;
-  /**
-   * Identifies a source-cache inspection result.
-   */
-  readonly kind: "source_cache_status";
-  /**
-   * Canonical RFC identifier inspected locally.
-   */
-  readonly rfc: string;
-  /**
-   * Whether the named local entry is valid.
-   */
-  readonly state: "hit" | "miss";
-}
+export type RfcSourceCacheStatus = Schema.Schema.Type<typeof RfcSourceCacheStatusSchema>;
+
+/**
+ * Schema for the result of removing one named RFC source-cache entry.
+ */
+export const RfcSourceCacheRemoveResultSchema = Schema.Struct({
+  schemaVersion: Schema.Literal(schemaVersion),
+  kind: Schema.Literal("source_cache_remove"),
+  rfc: Schema.NonEmptyString,
+  removed: Schema.Boolean,
+});
 
 /**
  * Result of removing one named RFC source-cache entry.
  */
-export interface RfcSourceCacheRemoveResult {
-  /**
-   * Public protocol version.
-   */
-  readonly schemaVersion: typeof schemaVersion;
-  /**
-   * Identifies a source-cache removal result.
-   */
-  readonly kind: "source_cache_remove";
-  /**
-   * Canonical RFC identifier targeted locally.
-   */
-  readonly rfc: string;
-  /**
-   * Whether the named entry existed before removal.
-   */
-  readonly removed: boolean;
-}
+export type RfcSourceCacheRemoveResult = Schema.Schema.Type<
+  typeof RfcSourceCacheRemoveResultSchema
+>;
 
 /**
  * The public client boundary for RFC evidence operations.
