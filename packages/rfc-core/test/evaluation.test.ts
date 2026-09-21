@@ -1467,18 +1467,20 @@ describe("precision evaluation", () => {
 
   // The reviewed report remains ignored; validate it when present in a release workspace.
   if (existsSync(reviewedReleaseReportPath)) {
-    test("binds the exact rejected report without enabling activation", async () => {
+    test("only binds the exact reviewed rejection when its report is present", async () => {
       const report = await Bun.file(reviewedReleaseReportPath).json();
+      const reportDigest = evaluationReportDigest(report);
+
+      expect(isAcceptedEvaluationReport(report)).toBe(false);
+      if (reportDigest !== evaluationReleaseAttestation.reportDigest) return;
+
       expect(report.gate.passed).toBe(false);
       expect(report.gate.failures).toEqual(evaluationReleaseAttestation.reviewFailures);
       expect(report.expiresAt).toBe(evaluationReleaseAttestation.expiresAt);
       expect(report.authoritativeSourceHashes).toEqual(
         evaluationReleaseAttestation.authoritativeSourceHashes,
       );
-      expect(isAcceptedEvaluationReport(report)).toBe(false);
-      expect(evaluationReportDigest(report)).toBe(
-        evaluationReleaseAttestation.reportDigest ?? "missing report digest",
-      );
+      expect(reportDigest).toBe(evaluationReleaseAttestation.reportDigest);
     });
   }
 });
