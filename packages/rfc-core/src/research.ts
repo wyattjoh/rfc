@@ -1243,6 +1243,22 @@ const isConfidentAtomic = (atomicity: AtomicityResult, policy: ResearchPolicy): 
   atomicity.confidence !== undefined &&
   atomicity.confidence >= policy.relationConfidenceThreshold;
 
+/**
+ * Whether a question was confidently judged to ask more than one thing.
+ *
+ * Mirrors {@link isConfidentAtomic} so both document selection and relation
+ * scoring reach the same verdict for the same classification.
+ *
+ * @param atomicity The atomicity judgment for the question.
+ * @param policy Acceptance policy supplying the confidence threshold.
+ * @returns Whether the compound label may be acted on.
+ */
+const isConfidentCompound = (atomicity: AtomicityResult, policy: ResearchPolicy): boolean =>
+  atomicity.label === "compound" &&
+  (atomicity.probabilities.compound ?? 0) >= policy.relationConfidenceThreshold &&
+  atomicity.confidence !== undefined &&
+  atomicity.confidence >= policy.relationConfidenceThreshold;
+
 const documentDecisionKey = (index: number): string => `document_${index}`;
 
 const passageDecisionKey = (index: number): string => `passage_${index}`;
@@ -2842,7 +2858,13 @@ export const researchTopic = Effect.fnUntraced(function* (
     return Schema.decodeUnknownSync(InternalEvidenceBundleSchema)({
       schemaVersion: 2,
       kind: "evidence_bundle",
-      status: "needs_review",
+      // A confidently compound question is reported as such even when no
+      // document was accepted. needs_review tells the caller nothing it can act
+      // on, and the relation path already returns needs_split for this exact
+      // classification.
+      status: isConfidentCompound(documentSelection.atomicity, policy)
+        ? "needs_split"
+        : "needs_review",
       question,
       rfc: null,
       evidence: [],

@@ -1388,7 +1388,7 @@ describe("createRfcClient", () => {
     await rm(cacheDirectory, { recursive: true, force: true });
   });
 
-  test("returns needs_review when a compound question has no accepted RFCs", async () => {
+  test("returns needs_split when a compound question has no accepted RFCs", async () => {
     const cacheDirectory = await makeCacheDirectory();
     const datatracker = makeDatatrackerHttpClient(() =>
       Response.json({
@@ -1445,7 +1445,9 @@ describe("createRfcClient", () => {
       searchTerms: ["HTTP semantics"],
     });
 
-    expect(result).toMatchObject({ status: "needs_review", rfc: null, evidence: [] });
+    // documentSelectionStage accepts nothing unless the question is confidently
+    // atomic, so the compound verdict is the known cause of the empty result.
+    expect(result).toMatchObject({ status: "needs_split", rfc: null, evidence: [] });
     expect(result.diagnostics).toMatchObject({
       atomicity: { label: "compound" },
       candidates: { acceptedDocuments: 0 },
