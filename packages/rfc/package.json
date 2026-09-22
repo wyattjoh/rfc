@@ -1,6 +1,6 @@
 {
   "name": "@wyattjoh/rfc",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Agent-facing CLI and MCP server for evidence-grounded IETF RFC research.",
   "keywords": [
     "cli",
