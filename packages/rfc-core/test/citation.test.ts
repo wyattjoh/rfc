@@ -126,7 +126,14 @@ const makeSourceFetcher =
     text,
   });
 
-const makeTypeSafeCitationHttpClient = (models: ReadonlyArray<string>) => {
+const makeTypeSafeCitationHttpClient = (
+  models: ReadonlyArray<string>,
+  probabilities: Readonly<Record<string, number>> = {
+    verified: 0.95,
+    unsupported: 0.025,
+    contradicted: 0.025,
+  },
+) => {
   let calls = 0;
   const client = HttpClient.make((request) => {
     const model = models[Math.min(calls, models.length - 1)] ?? "jev-1.13.0";
@@ -141,7 +148,7 @@ const makeTypeSafeCitationHttpClient = (models: ReadonlyArray<string>) => {
               citation_verdict: {
                 type: "choice",
                 choice: "verified",
-                probabilities: { verified: 0.95, unsupported: 0.025, contradicted: 0.025 },
+                probabilities,
                 confidence: 0.95,
               },
             },
@@ -317,6 +324,45 @@ describe("citation verification", () => {
     });
     expect(second.diagnostics.retrieval?.requests).toHaveLength(1);
     expect(typeSafe.calls()).toBe(2);
+  });
+
+  test("renormalizes a rounded TypeSafe distribution through the real layer", async () => {
+    const citation = {
+      schemaVersion: 3 as const,
+      rfc: "RFC9110",
+      claim: "The client must send a request containing the target resource.",
+      quote: "The client MUST send a request containing the target resource.",
+      offset: null,
+    };
+    const makeClient = async (probabilities: Readonly<Record<string, number>>) => {
+      const client = await createRfcClient({
+        cacheDirectory: await makeCacheDirectory(),
+        modelAlias: "jev-latest",
+        typeSafeApiKey: undefined,
+        typeSafeApiUrl: undefined,
+        typeSafeHttpClient: makeTypeSafeCitationHttpClient(["jev-1.13.0"], probabilities).client,
+        metadataSource: async () => [rfcDocument],
+        rfcSourceFetcher: makeSourceFetcher(sourceText),
+        now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+      });
+      clients.push(client);
+      return client;
+    };
+
+    // Two-decimal rounding leaves this distribution at 0.99, within tolerance.
+    const rounded = await makeClient({ verified: 0.94, unsupported: 0.03, contradicted: 0.02 });
+    const result = await rounded.verifyCitation(citation);
+    expect(result.verdict).toBe("verified");
+    const total = Object.values(result.probabilities).reduce((sum, value) => sum + value, 0);
+    expect(total).toBeCloseTo(1, 9);
+    expect(result.probabilities.verified).toBeCloseTo(0.94 / 0.99, 9);
+
+    // A deviation beyond rounding still fails DecisionModel validation.
+    const skewed = await makeClient({ verified: 0.8, unsupported: 0.05, contradicted: 0.05 });
+    await expect(skewed.verifyCitation(citation)).rejects.toMatchObject({
+      _tag: "DecisionModelError",
+      stage: "citation",
+    });
   });
 
   test("uses UTF-8 byte offsets for Unicode quotations and provenance", async () => {

@@ -589,6 +589,14 @@ type SystemOneResponse = {
 };
 
 /**
+ * The part of a System One answer that carries a distribution. Answers that do
+ * not match pass through untouched for DecisionModel to validate.
+ */
+const isDistributionAnswer = Schema.is(
+  Schema.Struct({ probabilities: Schema.Record(Schema.String, Schema.Finite) }),
+);
+
+/**
  * Rescale rounded Choice and Score distributions so they sum to exactly one.
  *
  * @param response Raw TypeSafe System One response.
@@ -598,26 +606,16 @@ const normalizeRoundedDistributions = <R extends SystemOneResponse>(response: R)
   ...response,
   answers: Object.fromEntries(
     Object.entries(response.answers).map(([key, answer]) => {
-      if (typeof answer !== "object" || answer === null || !("probabilities" in answer)) {
-        return [key, answer];
-      }
-      const probabilities = answer.probabilities;
-      if (typeof probabilities !== "object" || probabilities === null) return [key, answer];
-      const values = Object.values(probabilities);
-      if (!values.every((value) => typeof value === "number" && Number.isFinite(value))) {
-        return [key, answer];
-      }
-      const total = (values as ReadonlyArray<number>).reduce((sum, value) => sum + value, 0);
+      if (!isDistributionAnswer(answer)) return [key, answer];
+      const entries = Object.entries(answer.probabilities);
+      const total = entries.reduce((sum, [, value]) => sum + value, 0);
       if (total <= 0 || Math.abs(total - 1) > distributionRoundingTolerance) return [key, answer];
       return [
         key,
         {
           ...answer,
           probabilities: Object.fromEntries(
-            Object.entries(probabilities as Record<string, number>).map(([label, value]) => [
-              label,
-              value / total,
-            ]),
+            entries.map(([label, value]) => [label, value / total]),
           ),
         },
       ];
@@ -625,6 +623,15 @@ const normalizeRoundedDistributions = <R extends SystemOneResponse>(response: R)
   ),
 });
 
+/**
+ * The TypeSafe DecisionModel layer, with rounding repaired before validation.
+ *
+ * `TypeSafeClient.make` only exposes an HTTP-level `transformClient` hook, and
+ * nothing reaches the decoded `systemOne` response before `DecisionModel`
+ * validates it, so this wraps the client service and overrides `systemOne`. It
+ * relies on the `TypeSafeClient` service shape of `@effect/ai-typesafe`
+ * 4.0.0-rc.117; re-check the override on every upgrade.
+ */
 const typeSafeDecisionModelLayer = (options: RfcClientOptions) => {
   const observedClientLayer = Layer.fromBuildMemo(() =>
     Effect.gen(function* () {
