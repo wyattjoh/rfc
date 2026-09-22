@@ -1414,22 +1414,26 @@ const documentSelectionStage = Effect.fnUntraced(function* (
     "document",
     Predicate.isObject(response) ? response.usage : undefined,
   );
-  const accepted = isConfidentAtomic(atomicity, policy)
-    ? candidates
-        .map((candidate, index) => ({
-          document: candidate.document,
-          priority: candidate.priority,
-          probability: diagnostics[index]?.probability ?? 0,
-        }))
-        .filter(({ probability }) => probability >= policy.documentProbabilityThreshold)
-        .sort(
-          (left, right) =>
-            right.probability - left.probability ||
-            left.priority - right.priority ||
-            left.document.rfcNumber - right.document.rfcNumber,
-        )
-        .slice(0, policy.maxAcceptedDocumentCandidates)
-    : [];
+  // Document relevance is independent of how many questions the request
+  // bundles, so atomicity does not gate it. Refusing every document for a
+  // compound request returned a bundle with no RFC and no passage, which reads
+  // as a retrieval failure and makes callers rephrase rather than split.
+  // Passage selection and statusFromRelations still apply their own atomicity
+  // gates, so nothing accepted here can reach answered or partial.
+  const accepted = candidates
+    .map((candidate, index) => ({
+      document: candidate.document,
+      priority: candidate.priority,
+      probability: diagnostics[index]?.probability ?? 0,
+    }))
+    .filter(({ probability }) => probability >= policy.documentProbabilityThreshold)
+    .sort(
+      (left, right) =>
+        right.probability - left.probability ||
+        left.priority - right.priority ||
+        left.document.rfcNumber - right.document.rfcNumber,
+    )
+    .slice(0, policy.maxAcceptedDocumentCandidates);
   return { accepted, atomicity, diagnostics, usage };
 });
 
@@ -1438,6 +1442,10 @@ const selectionStage = Effect.fnUntraced(function* (
   candidates: ReadonlyArray<SourceBlock>,
   policy: ResearchPolicy,
   includeAtomicity: boolean,
+  // The topic path already judged atomicity during document selection and does
+  // not re-ask here. Passing that judgment back in keeps the passage gate
+  // identical on both paths; without it an undefined atomicity opened the gate.
+  priorAtomicity?: AtomicityResult,
 ): Effect.fn.Return<SelectionResult, DecisionModelError, DecisionModel.DecisionModel> {
   const decisions = Object.fromEntries([
     ...(includeAtomicity
@@ -1532,9 +1540,10 @@ const selectionStage = Effect.fnUntraced(function* (
     "selection",
     Predicate.isObject(response) ? response.usage : undefined,
   );
+  const gateAtomicity = atomicity ?? priorAtomicity;
   return {
     selected:
-      atomicity === undefined || isConfidentAtomic(atomicity, policy)
+      gateAtomicity === undefined || isConfidentAtomic(gateAtomicity, policy)
         ? candidates.flatMap((candidate, index) => {
             const probability = diagnostics[index]?.probability ?? 0;
             return probability >= policy.selectionProbabilityThreshold
@@ -2923,7 +2932,13 @@ export const researchTopic = Effect.fnUntraced(function* (
   const candidates = shortlistPassageCandidates(allBlocks, question, policy.maxPassageCandidates);
   const lexicalFinished = yield* Clock.currentTimeMillis;
   const selectionStarted = lexicalFinished;
-  const selection = yield* selectionStage(question, candidates, policy, false);
+  const selection = yield* selectionStage(
+    question,
+    candidates,
+    policy,
+    false,
+    documentSelection.atomicity,
+  );
   const selectionFinished = yield* Clock.currentTimeMillis;
   const relationStarted = selectionFinished;
   const relation = yield* relationStage(question, selection.selected, policy);

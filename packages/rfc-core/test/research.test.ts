@@ -2550,10 +2550,10 @@ describe("known RFC research", () => {
   test("returns needs_split when no document is accepted and the question is compound", async () => {
     const cacheDirectory = await makeCacheDirectory();
     const calls: Array<unknown> = [];
-    // The document scores well above the acceptance threshold, so compoundness
-    // is the only reason nothing is accepted: documentSelectionStage discards
-    // every candidate unless the question is confidently atomic. Reporting
-    // needs_review here would hide a cause the engine already knows.
+    // The document scores well above the acceptance threshold and the passage
+    // relation is a confident direct answer, so compoundness is the only reason
+    // nothing is accepted. Reporting needs_review here would hide a cause the
+    // engine already knows.
     const model = makeDecisionModel([], "compound", "direct_answer", 0.9, 0.95, 0.95);
     const client = await createRfcClient({
       cacheDirectory,
@@ -2583,12 +2583,46 @@ describe("known RFC research", () => {
     // needs_split names a question the caller can act on; needs_review does not.
     expect(result.status).toBe("needs_split");
     expect(result.diagnostics.atomicity).toMatchObject({ label: "compound" });
-    expect(result.diagnostics.candidates).toMatchObject({
-      documentCandidates: 1,
-      acceptedDocuments: 0,
-    });
-    // The candidate was well above the acceptance threshold and still rejected.
+    expect(result.diagnostics.candidates).toMatchObject({ documentCandidates: 1 });
     expect(result.diagnostics.documentSelection?.[0]?.probability).toBeGreaterThan(0.9);
+    // Compoundness, not passage quality, is what keeps the passage unaccepted.
+    expect(result.diagnostics.candidates).toMatchObject({ selectedPassages: 0 });
+  });
+
+  test("researches a well-scoring document even when the question is compound", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    // Whether a document is relevant does not depend on how many questions the
+    // request bundles. Refusing the document leaves the caller an empty bundle
+    // with no RFC and no passage, so it rephrases instead of splitting. The
+    // atomicity gates in passage selection and statusFromRelations still keep
+    // the result out of answered and partial.
+    const model = makeDecisionModel([], "compound", "direct_answer", 0.9, 0.95, 0.95);
+    const client = await createRfcClient({
+      cacheDirectory,
+      modelAlias: "jev-topic-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      metadataSource: async () => [rfcDocument],
+      rfcSourceFetcher: async () => sourceText,
+      decisionModel: model,
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 2,
+      question: "What must an HTTP client send, and which RFC obsoleted that rule?",
+      rfc: null,
+      searchTerms: ["HTTP client request"],
+    });
+
+    expect(result.status).toBe("needs_split");
+    // The caller now learns which RFC the engine settled on.
+    expect(result.rfc?.identifier).toBe(rfcDocument.identifier);
+    expect(result.diagnostics.candidates).toMatchObject({ acceptedDocuments: 1 });
+    // Compoundness still blocks accepted evidence.
+    expect(result.evidence).toHaveLength(0);
+    expect(result.reviewCandidates?.length ?? 0).toBeGreaterThan(0);
   });
 
   test("fails with a document-stage error when a document probability is malformed", async () => {
