@@ -103,6 +103,20 @@ const datatrackerApiUrl = Flag.String("datatracker-api-url").pipe(
   Flag.optional,
 );
 
+const rfcSearchApiUrl = Flag.String("rfc-search-api-url").pipe(
+  Flag.withDescription(
+    "RFC full-text search API base URL, overriding RFC_SEARCH_API_URL (requires a search key)",
+  ),
+  Flag.optional,
+);
+
+const rfcSearchApiKey = Flag.String("rfc-search-api-key").pipe(
+  Flag.withDescription(
+    "Search-only key enabling full-text topic discovery, overriding RFC_SEARCH_API_KEY",
+  ),
+  Flag.optional,
+);
+
 const question = Flag.String("question").pipe(
   Flag.withAlias("q"),
   Flag.withDescription("Short question used when standard input is not supplied"),
@@ -294,6 +308,11 @@ const loopbackHosts = new Set(["localhost", "127.0.0.1", "[::1]"]);
  * @returns The value unchanged when it is safe to use.
  * @throws InvalidInputError when the URL is malformed or cleartext off-host.
  */
+const nonEmptyEnv = (name: string): string | undefined => {
+  const value = process.env[name];
+  return value === undefined || value.trim().length === 0 ? undefined : value;
+};
+
 const secureEndpointOverride = (flag: string, value: string | undefined): string | undefined => {
   if (value === undefined) return undefined;
   const url = URL.parse(value);
@@ -402,6 +421,8 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
     selectedCacheDirectory: string,
     selectedDatatrackerApiUrl: Option.Option<string>,
     selectedTypeSafeApiUrl: Option.Option<string>,
+    selectedRfcSearchApiUrl: Option.Option<string> = Option.none(),
+    selectedRfcSearchApiKey: Option.Option<string> = Option.none(),
   ): RfcOperationOptions => ({
     cacheDirectory: selectedCacheDirectory,
     datatrackerApiUrl: secureEndpointOverride(
@@ -412,6 +433,14 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
       "--typesafe-api-url",
       Option.getOrUndefined(selectedTypeSafeApiUrl),
     ),
+    // A flag beats the environment so one invocation can override a shell that
+    // configured search globally, matching how the other endpoint flags behave.
+    rfcSearchApiUrl: secureEndpointOverride(
+      "--rfc-search-api-url",
+      Option.getOrUndefined(selectedRfcSearchApiUrl) ?? nonEmptyEnv("RFC_SEARCH_API_URL"),
+    ),
+    rfcSearchApiKey:
+      Option.getOrUndefined(selectedRfcSearchApiKey) ?? nonEmptyEnv("RFC_SEARCH_API_KEY"),
   });
 
   const sourceCacheStatusCommand = Command.make(
@@ -478,6 +507,8 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
     {
       cacheDirectory,
       datatrackerApiUrl,
+      rfcSearchApiUrl,
+      rfcSearchApiKey,
       format,
       rfc,
       rfcArgument,
@@ -528,7 +559,13 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
         try: () =>
           executeCitationVerification(
             request,
-            operationOptions(flags.cacheDirectory, flags.datatrackerApiUrl, flags.typeSafeApiUrl),
+            operationOptions(
+              flags.cacheDirectory,
+              flags.datatrackerApiUrl,
+              flags.typeSafeApiUrl,
+              flags.rfcSearchApiUrl,
+              flags.rfcSearchApiKey,
+            ),
             dependencies,
           ),
         catch: (error) => error,
@@ -560,6 +597,8 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
     {
       cacheDirectory,
       datatrackerApiUrl,
+      rfcSearchApiUrl,
+      rfcSearchApiKey,
       format,
       question,
       questionArgument,
@@ -603,7 +642,13 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
         try: () =>
           executeResearch(
             request,
-            operationOptions(flags.cacheDirectory, flags.datatrackerApiUrl, flags.typeSafeApiUrl),
+            operationOptions(
+              flags.cacheDirectory,
+              flags.datatrackerApiUrl,
+              flags.typeSafeApiUrl,
+              flags.rfcSearchApiUrl,
+              flags.rfcSearchApiKey,
+            ),
             dependencies,
           ),
         catch: (error) => error,
@@ -718,12 +763,18 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
 
   const mcpCommand = Command.make(
     "mcp",
-    { cacheDirectory, datatrackerApiUrl, typeSafeApiUrl },
+    { cacheDirectory, datatrackerApiUrl, typeSafeApiUrl, rfcSearchApiUrl, rfcSearchApiKey },
     Effect.fn(function* (flags) {
       yield* Effect.tryPromise({
         try: () =>
           runRfcMcpServer(
-            operationOptions(flags.cacheDirectory, flags.datatrackerApiUrl, flags.typeSafeApiUrl),
+            operationOptions(
+              flags.cacheDirectory,
+              flags.datatrackerApiUrl,
+              flags.typeSafeApiUrl,
+              flags.rfcSearchApiUrl,
+              flags.rfcSearchApiKey,
+            ),
             dependencies,
             (error) =>
               dependencies.writeStderr(`${JSON.stringify(toRfcOperationErrorEnvelope(error))}\n`),

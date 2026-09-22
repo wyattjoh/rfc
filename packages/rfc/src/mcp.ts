@@ -62,7 +62,7 @@ Inputs are \`question\` and \`rfc\`. Use the exact RFC identifier, such as \`RFC
 
 ### rfc_research_topic
 
-Discover and research published RFCs for one atomic topic question. Inputs are \`question\` and \`searchTerms\`. Supply one to four ordered non-empty terms, each no longer than ${datatrackerTopicSearchTermMaximumCharacters} characters. Each term is matched as a literal case-insensitive substring of an RFC title or abstract, so use short noun phrases such as \`DNS over TLS\`; a sentence fragment such as \`DNS over TLS default port\` matches nothing. Terms are transmitted verbatim in Datatracker query URLs and may appear in diagnostics, errors, and upstream access logs. Do not generate hidden terms, rewrite the caller's phrases, or send the natural-language question upstream unless it was explicitly chosen as a term.
+Discover and research published RFCs for one atomic topic question. Inputs are \`question\` and \`searchTerms\`. Supply one to four ordered non-empty terms, each no longer than ${datatrackerTopicSearchTermMaximumCharacters} characters. Each term is matched as a literal case-insensitive substring of an RFC title or abstract, so use short noun phrases such as \`DNS over TLS\`; a sentence fragment such as \`DNS over TLS default port\` matches nothing. If the operator enabled optional full-text search, terms additionally match RFC keywords and body text, so a term naming a protocol element can also resolve; write terms that work either way. Terms are transmitted verbatim in upstream query URLs and may appear in diagnostics, errors, and upstream access logs. Do not generate hidden terms, rewrite the caller's phrases, or send the natural-language question upstream unless it was explicitly chosen as a term.
 
 ### rfc_verify_citation
 
@@ -119,7 +119,7 @@ Operational failures are returned as MCP tool errors containing the safe version
 
 ## Privacy, cost, and cache behavior
 
-Questions and model responses are request-local and are not persisted. Topic search terms are sent to Datatracker and can be retained in upstream logs. Canonical RFC Editor text is cached per RFC with integrity and validator metadata. Fresh entries are reused; stale entries must revalidate successfully.
+Questions and model responses are request-local and are not persisted. Topic search terms are sent to Datatracker, and to the IETF RFC search service when the operator enabled it, and can be retained in upstream logs. When \`retrieval.topicSearchFallback\` is true, full-text search was configured but failed and discovery matched titles and abstracts only, so an empty result is less conclusive than usual. Canonical RFC Editor text is cached per RFC with integrity and validator metadata. Fresh entries are reused; stale entries must revalidate successfully.
 
 Research and citation results report provider input tokens and estimated input cost. A null estimate means unavailable, not zero. Each successful semantic operation updates per-user usage totals. If accounting fails, the tool still succeeds and adds a \`usage_accounting_failed\` warning; do not retry a successful paid operation because of that warning.
 `;

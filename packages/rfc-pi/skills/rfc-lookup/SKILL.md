@@ -140,6 +140,13 @@ title or abstract. A short noun phrase such as `DNS over TLS` finds documents; a
 sentence fragment such as `DNS over TLS default port` matches nothing, because
 no title or abstract contains that exact string.
 
+If the operator enabled optional full-text search, terms additionally match RFC
+keywords and body text, so a term naming a protocol element such as
+`Retry-After` also resolves. Write terms that work under either configuration.
+When `retrieval.topicSearchFallback` is true, full-text search was configured but
+failed and discovery ran on titles and abstracts alone, so an empty result is
+less conclusive than usual.
+
 ```sh
 cat <<'JSON' | rfc research --format human
 {

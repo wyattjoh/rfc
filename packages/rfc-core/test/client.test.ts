@@ -121,6 +121,25 @@ const datatrackerDocument = {
   states: ["/api/v1/doc/state/177/"],
 };
 
+const topicSearchDocument = {
+  rfcNumber: 9110,
+  title: "HTTP Semantics",
+  abstract: "HTTP semantics.",
+  type: "rfc",
+  status: { name: "Internet Standard", slug: "std" },
+  stream: { name: "IETF", slug: "ietf" },
+};
+
+const topicSearchPage = (
+  documents: ReadonlyArray<unknown> = [topicSearchDocument],
+  found: number = documents.length,
+) => ({ found, hits: documents.map((document) => ({ document })) });
+
+const emptyDatatrackerTopicPage = () =>
+  Response.json({ meta: { limit: 20, offset: 0, total_count: 0, next: null }, objects: [] });
+
+const isTopicSearchRequest = (url: URL) => url.pathname.endsWith("/documents/search");
+
 type CurrencyRelationship = {
   readonly source: number;
   readonly relationship: "obs" | "updates";
@@ -984,6 +1003,225 @@ describe("createRfcClient", () => {
       relationshipLimit: 64,
       boundedExits: ["relationship_limit"],
     });
+  });
+
+  test("queries only Datatracker when no search key is configured", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const datatracker = makeDatatrackerHttpClient(() =>
+      Response.json({
+        meta: { limit: 20, offset: 0, total_count: 1, next: null },
+        objects: [datatrackerDocument],
+      }),
+    );
+    const client = await createRfcClient({
+      cacheDirectory,
+      datatrackerHttpClient: datatracker.client,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      rfcSourceFetcher: async () => ({
+        sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+        text: sourceText,
+      }),
+      decisionModel: makeDecisionModel(),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 2,
+      question: "Which requirements apply?",
+      rfc: null,
+      searchTerms: ["HTTP semantics"],
+    });
+
+    // Full-text search is opt-in. Without a key nothing may reach the search
+    // host, and discovery must behave exactly as it did before it existed.
+    expect(datatracker.urls.every((url) => !isTopicSearchRequest(new URL(url)))).toBe(true);
+    expect(
+      datatracker.urls.map((value) => {
+        const url = new URL(value);
+        return (
+          url.searchParams.get("title__icontains") ?? url.searchParams.get("abstract__icontains")
+        );
+      }),
+    ).toEqual(["HTTP semantics", "HTTP semantics"]);
+    expect(result.diagnostics.retrieval).toMatchObject({ datatrackerRequestCount: 2 });
+    expect(result.diagnostics.retrieval?.topicSearchFallback).toBeUndefined();
+  });
+
+  test("discovers an RFC from a term that appears only in its body text", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    // "Retry-After" is defined in RFC 9110 but appears in neither its title nor
+    // its abstract, so the Datatracker substring filters return nothing for it.
+    // With search enabled, discovery reaches an index of the RFC body and finds
+    // the RFC a caller named by the protocol element they actually care about.
+    const datatracker = makeDatatrackerHttpClient((url) =>
+      isTopicSearchRequest(url) ? Response.json(topicSearchPage()) : emptyDatatrackerTopicPage(),
+    );
+    const client = await createRfcClient({
+      cacheDirectory,
+      datatrackerHttpClient: datatracker.client,
+      rfcSearchApiKey: "test-search-key",
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      rfcSourceFetcher: async () => ({
+        sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+        text: sourceText,
+      }),
+      decisionModel: makeDecisionModel(),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 2,
+      question: "How long should a client wait before retrying?",
+      rfc: null,
+      searchTerms: ["Retry-After"],
+    });
+
+    expect(result.rfc?.identifier).toBe("RFC9110");
+    expect(datatracker.urls.map((value) => new URL(value).searchParams.get("q"))).toEqual([
+      "Retry-After",
+    ]);
+    expect(datatracker.urls.every((value) => !value.includes("How+long"))).toBe(true);
+    expect(result.diagnostics.retrieval?.topicSearchFallback).toBeUndefined();
+  });
+
+  test("sends the configured search key as a header and never in the URL", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const seenKeys: Array<string | undefined> = [];
+    const urls: Array<string> = [];
+    const datatracker = HttpClient.make((request, url) => {
+      urls.push(url.toString());
+      seenKeys.push(request.headers["x-typesense-api-key"]);
+      return Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          isTopicSearchRequest(url)
+            ? Response.json(topicSearchPage())
+            : emptyDatatrackerTopicPage(),
+        ),
+      );
+    });
+    const client = await createRfcClient({
+      cacheDirectory,
+      datatrackerHttpClient: datatracker,
+      rfcSearchApiKey: "secret-search-key",
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      rfcSourceFetcher: async () => ({
+        sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+        text: sourceText,
+      }),
+      decisionModel: makeDecisionModel(),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 2,
+      question: "Which requirements apply?",
+      rfc: null,
+      searchTerms: ["Retry-After"],
+    });
+
+    expect(seenKeys).toContain("secret-search-key");
+    // The key must stay out of request URLs so it cannot reach traces,
+    // diagnostics, or the metadata cache key derived from the URL.
+    expect(urls.every((url) => !url.includes("secret-search-key"))).toBe(true);
+    expect(
+      result.diagnostics.retrieval?.requests.every(({ url }) => !url.includes("secret-search-key")),
+    ).toBe(true);
+  });
+
+  test("falls back to Datatracker and reports it when topic search fails", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const datatracker = makeDatatrackerHttpClient((url) =>
+      isTopicSearchRequest(url)
+        ? new Response("forbidden", { status: 401 })
+        : Response.json({
+            meta: { limit: 20, offset: 0, total_count: 1, next: null },
+            objects: [datatrackerDocument],
+          }),
+    );
+    const client = await createRfcClient({
+      cacheDirectory,
+      datatrackerHttpClient: datatracker.client,
+      rfcSearchApiKey: "rotated-key",
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      rfcSourceFetcher: async () => ({
+        sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+        text: sourceText,
+      }),
+      decisionModel: makeDecisionModel(),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 2,
+      question: "Which requirements apply?",
+      rfc: null,
+      searchTerms: ["HTTP semantics"],
+    });
+
+    // A revoked key must degrade discovery, never remove the tool.
+    expect(result.rfc?.identifier).toBe("RFC9110");
+    expect(result.diagnostics.retrieval).toMatchObject({
+      topicSearchFallback: true,
+      datatrackerRequestCount: 2,
+    });
+    expect(result.diagnostics.retrieval?.topicSearchFallbackReason).toContain("401");
+    // One failed search attempt, then both Datatracker field queries.
+    expect(datatracker.urls).toHaveLength(3);
+    expect(datatracker.urls.filter((url) => isTopicSearchRequest(new URL(url)))).toHaveLength(1);
+  });
+
+  test("falls back when topic search returns an unreadable body", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const datatracker = makeDatatrackerHttpClient((url) =>
+      isTopicSearchRequest(url)
+        ? new Response("<html>challenge</html>", {
+            status: 200,
+            headers: { "content-type": "text/html" },
+          })
+        : Response.json({
+            meta: { limit: 20, offset: 0, total_count: 1, next: null },
+            objects: [datatrackerDocument],
+          }),
+    );
+    const client = await createRfcClient({
+      cacheDirectory,
+      datatrackerHttpClient: datatracker.client,
+      rfcSearchApiKey: "test-search-key",
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      rfcSourceFetcher: async () => ({
+        sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+        text: sourceText,
+      }),
+      decisionModel: makeDecisionModel(),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 2,
+      question: "Which requirements apply?",
+      rfc: null,
+      searchTerms: ["HTTP semantics"],
+    });
+
+    // A bot-management interstitial is not JSON; discovery must survive it.
+    expect(result.rfc?.identifier).toBe("RFC9110");
+    expect(result.diagnostics.retrieval?.topicSearchFallback).toBe(true);
   });
 
   test("discovers topic candidates from ordered bounded caller-supplied terms", async () => {

@@ -421,10 +421,11 @@ describe("precision evaluation", () => {
       calibrationStatus: "uncalibrated",
       retrievalLimits: {
         maxSearchTerms: 4,
-        maxTopicRequests: 8,
+        maxTopicRequests: 12,
+        maxDatatrackerTopicRequests: 8,
         maxConcurrentDatatrackerRequests: 4,
         maxRowsPerTopicRequest: 20,
-        maxUpstreamTopicRows: 160,
+        maxUpstreamTopicRows: 240,
         datatrackerMaxAttempts: 3,
         datatrackerDeadlineMilliseconds: 10_000,
         sourceDeadlineMilliseconds: 10_000,
@@ -1251,6 +1252,31 @@ describe("precision evaluation", () => {
           reviewFailures: ["positive-control research cases did not remain answered"],
         },
         Date.parse("2026-01-15T00:00:00.000Z"),
+      ),
+    ).toBe(false);
+  });
+
+  test("keeps activation disabled when a report's policy digest drifts from this build", () => {
+    const { report, attestation } = acceptedFixtureReport();
+    const now = Date.parse("2026-01-15T00:00:00.000Z");
+
+    expect(isAcceptedEvaluationReportForAttestation(report, attestation, now)).toBe(true);
+
+    // A report whose policy digest is not this build's describes a calibration
+    // nobody ran against this code. Re-attesting the drifted report is not
+    // enough to activate it: changing the policy has to force a fresh review,
+    // not merely a fresh signature over the stale measurement.
+    const drifted = { ...report, policyDigest: "0".repeat(64) };
+    expect(drifted.policyDigest).not.toBe(evaluationPolicyDigest);
+    expect(
+      isAcceptedEvaluationReportForAttestation(
+        drifted,
+        {
+          ...attestation,
+          policyDigest: drifted.policyDigest,
+          reportDigest: evaluationReportDigest(drifted),
+        },
+        now,
       ),
     ).toBe(false);
   });

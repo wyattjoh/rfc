@@ -116,12 +116,35 @@ The server describes its own bounded workflow in its initialization instructions
 
 [`packages/rfc/README.md`](packages/rfc/README.md) is the full reference for the CLI protocol, the MCP surface, credential handling, and configuration.
 
+## Optional full-text topic search
+
+By default, topic discovery matches each search term as a literal substring of an RFC title or abstract through the Datatracker. That finds an RFC only when you can name it close to its title: `Retry-After` matches nothing, even though RFC 9110 defines it.
+
+The IETF runs the full-text search backend behind the search box on [rfc-editor.org](https://www.rfc-editor.org), which also indexes keywords and published RFC body text. Pointing this tool at it makes `Retry-After` resolve to RFC 9110. Measured over twelve realistic terms, full-text search found the intended RFC in the top twenty every time, where the title/abstract filters found six.
+
+It is **off by default and ships with no credential**. That backend carries no documented contract for programmatic use, sits behind bot management, and belongs to the IETF, so enabling it is your decision and the key is yours to supply and rotate:
+
+```sh
+export RFC_SEARCH_API_KEY="<search-only key>"
+export RFC_SEARCH_API_URL="https://typesense.ietf.org/"   # optional, this is the default
+rfc research "How long should a client wait before retrying?" --search-term "Retry-After"
+```
+
+or per invocation:
+
+```sh
+rfc research --rfc-search-api-key "<key>" --search-term "Retry-After" ...
+```
+
+If a search request fails for any reason — revoked key, rate limit, outage, bot challenge, changed index — discovery **falls back to the Datatracker title/abstract queries** rather than failing. The fallback is reported as `topicSearchFallback` in retrieval diagnostics, so a result that found nothing while degraded is distinguishable from a term that genuinely matches nothing.
+
 ## Data & privacy
 
 Using this tool sends data to third parties. Specifically:
 
 - **To [TypeSafe](https://typesafe.ai)**, when semantic evaluation is required: research sends your question and selected candidate passages; citation verification sends your claim and quotation. Some fail-closed results, such as empty discovery or an absent quotation, return without contacting TypeSafe. Your API key is sent as a bearer credential.
 - **To the [IETF Datatracker](https://datatracker.ietf.org)**, for discovery: RFC identifiers, and — for topic search — **your search terms verbatim in the query URL**, where they may appear in upstream request logs. The tool never derives search terms on its own and never sends your full question as one unless you write it that way.
+- **To the IETF RFC search service**, only if you enable full-text topic search: the same search terms verbatim, to a different IETF host with its own access logs. Your search key is sent as a request header and never appears in URLs, diagnostics, or traces.
 - **To the [RFC Editor](https://www.rfc-editor.org)**, for source text: RFC numbers only.
 
 RFC source text is cached on your machine (`~/Library/Caches/rfc-evidence-engine` on macOS) and is never redistributed by this package. Cumulative token and cost totals are written to `~/.config/rfc/usage.json`; no questions, quotations or provider output are recorded there. The credential lives only in the OS credential manager and never appears in output, diagnostics, or error envelopes.
