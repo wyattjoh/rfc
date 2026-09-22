@@ -228,7 +228,7 @@ const corpusCases = [
     expectedStatus: "needs_review",
     expectedVerdict: null,
     expectedOutcomeRationale:
-      "Measured RFC7230 procedure evidence was not policy-accepted across repetitions; do not lower the relation gate to answer.",
+      "RFC7230 evidence is accepted, but its current successor contexts do not confirm it; partial is safe only as a non-automatic result and needs_review remains the conservative alternative. Do not lower the relation gate to answer.",
     supportedClaim: false,
     live: true,
   },
@@ -262,7 +262,7 @@ const corpusCases = [
     expectedStatus: "needs_review",
     expectedVerdict: null,
     expectedOutcomeRationale:
-      "Measured OAuth grant evidence did not provide policy-accepted direct support across repetitions; fail closed.",
+      "RFC6749 evidence is accepted, but the RFCs that update it do not confirm it; partial is safe only as a non-automatic result and needs_review remains the conservative alternative. Fail closed.",
     supportedClaim: false,
     live: true,
   },
@@ -350,7 +350,7 @@ const corpusCases = [
     expectedStatus: "needs_review",
     expectedVerdict: null,
     expectedOutcomeRationale:
-      "Broad bounded discovery must not become an automatic answer before candidate fan-out is recertified.",
+      "Broad bounded discovery must not become an automatic answer before candidate fan-out is recertified. The question names four independent areas, so needs_split is the correct non-automatic alternative.",
     supportedClaim: false,
     live: true,
   },
@@ -555,12 +555,17 @@ const corpusCases = [
 /**
  * Reviewed bounded outcome alternatives for the current corpus.
  *
- * Precision-v2 has not been recertified, so this set is empty. It is keyed to
- * committed case ids rather than inferred from observed labels to prevent a
- * report from widening its own acceptance policy.
+ * Every alternative is non-automatic: widening a set never lets a case reach
+ * answered. Sets are keyed to committed case ids rather than inferred from
+ * observed labels to prevent a report from widening its own acceptance policy.
  */
 export const evaluationAllowedOutcomeSets: Readonly<Record<string, ReadonlyArray<string>>> =
-  Object.freeze({});
+  Object.freeze({
+    procedure: Object.freeze(["needs_review", "partial"]),
+    "oauth-grant": Object.freeze(["needs_review", "partial"]),
+    "updated-document": Object.freeze(["needs_review", "partial"]),
+    "topic-candidate-fan-out": Object.freeze(["needs_review", "needs_split"]),
+  });
 
 const baseCaseId = (caseId: string): string =>
   /^(.*):iteration-[1-9][0-9]*$/.exec(caseId)?.[1] ?? caseId;
@@ -896,6 +901,7 @@ const EvaluationCandidateLimitsSchema = Schema.Struct({
   maxMergedDocumentCandidates: Schema.Natural,
   maxSourceRetrievalCandidates: Schema.Natural,
   maxPassageCandidates: Schema.Natural,
+  maxLengthNormalizedPassageCandidates: Schema.Natural,
   sourceBlockMaxCharacters: Schema.Natural,
   sourceBlockOverlapCharacters: Schema.Natural,
 });

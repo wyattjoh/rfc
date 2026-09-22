@@ -547,7 +547,15 @@ describe("precision evaluation", () => {
   });
 
   test("keeps unreviewed outcomes exact and automatic outcomes evidence-backed", () => {
-    expect(evaluationAllowedOutcomeSets).toEqual({});
+    expect(evaluationAllowedOutcomeSets).toEqual({
+      procedure: ["needs_review", "partial"],
+      "oauth-grant": ["needs_review", "partial"],
+      "updated-document": ["needs_review", "partial"],
+      "topic-candidate-fan-out": ["needs_review", "needs_split"],
+    });
+    for (const outcomes of Object.values(evaluationAllowedOutcomeSets)) {
+      expect(outcomes).not.toContain("answered");
+    }
 
     const observations = corpusObservations();
     const report = makeEvaluationReport(
