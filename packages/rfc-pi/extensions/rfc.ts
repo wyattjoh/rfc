@@ -20,10 +20,58 @@ import {
   schemaVersion,
 } from "@wyattjoh/rfc/agent";
 import { Type } from "typebox";
+import rfcPiPackage from "../package.json" with { type: "json" };
 
-const rfcPackageSpec = "@wyattjoh/rfc@latest";
+/**
+ * The CLI is pinned to the exact version this package depends on.
+ *
+ * A dist-tag would re-resolve against the registry on every tool call and could
+ * run a CLI this package was never tested against. `release-please`'s
+ * `node-workspace` plugin rewrites this dependency whenever the CLI is
+ * released, so the pin follows the published version without manual edits.
+ */
+const rfcPackageSpec = `@wyattjoh/rfc@${rfcPiPackage.dependencies["@wyattjoh/rfc"]}`;
 const commandTimeoutMilliseconds = 180_000;
 const commandOutputMaximumBytes = 1024 * 1024;
+const commandStderrMaximumCharacters = 2_000;
+const commandFailureRetentionLimit = 32;
+
+/**
+ * Raw diagnostics from an RFC CLI process that exited non-zero.
+ */
+type RfcCommandFailureDiagnostics = {
+  /**
+   * Process exit code, or null when the process was terminated by a signal.
+   */
+  readonly exitCode: number | null;
+  /**
+   * Bounded stderr text exactly as the CLI wrote it.
+   */
+  readonly stderr: string;
+};
+
+/**
+ * A non-zero RFC CLI exit, carrying the diagnostics that name its cause.
+ */
+class RfcCommandFailure extends Error {
+  readonly diagnostics: RfcCommandFailureDiagnostics;
+
+  constructor(message: string, diagnostics: RfcCommandFailureDiagnostics) {
+    super(message);
+    this.name = "RfcCommandFailure";
+    this.diagnostics = diagnostics;
+  }
+}
+
+/**
+ * Diagnostics awaiting the `tool_result` hook, keyed by tool call.
+ *
+ * Pi replaces a thrown tool error with a result whose `details` is `{}`, so a
+ * throw alone destroys the exit code and stderr at the point of failure. The
+ * hook reattaches them to the recorded result without turning the failure into
+ * an apparent success.
+ */
+const commandFailures = new Map<string, RfcCommandFailureDiagnostics>();
 
 const nonEmptyString = (description: string) => Type.String({ description, minLength: 1 });
 
@@ -188,11 +236,15 @@ const runRfcCommand = <A extends object>(
 
       if (code !== 0) {
         const envelope = stderrObjects.find((entry) => "kind" in entry && entry.kind === "error");
+        const stderrText = stderrLines.join(" | ").slice(0, commandStderrMaximumCharacters);
         finishWithError(
-          new Error(
+          new RfcCommandFailure(
             envelope === undefined
-              ? "RFC CLI failed without a versioned error envelope"
+              ? `RFC CLI failed without a versioned error envelope (exit ${String(code)}); stderr: ${
+                  stderrText.length === 0 ? "<empty>" : stderrText
+                }`
               : JSON.stringify(envelope),
+            { exitCode: code, stderr: stderrText },
           ),
         );
         return;
@@ -214,6 +266,33 @@ const runRfcCommand = <A extends object>(
   });
 
 /**
+ * Run one RFC CLI command, retaining the diagnostics of a non-zero exit so the
+ * `tool_result` hook can record them against this tool call.
+ *
+ * @param toolCallId Pi tool call the command belongs to.
+ * @param args Command arguments appended to the RFC CLI package spec.
+ * @param input Structured standard input, when the command reads one.
+ * @param signal Cancellation signal for the tool call.
+ * @returns The decoded CLI result and any warnings it emitted.
+ */
+const runToolCommand = <A extends object>(
+  toolCallId: string,
+  args: ReadonlyArray<string>,
+  input: object | undefined,
+  signal: AbortSignal | undefined,
+): Promise<RfcCommandResult<A>> =>
+  runRfcCommand<A>(args, input, signal).catch((error: unknown) => {
+    if (error instanceof RfcCommandFailure) {
+      if (commandFailures.size >= commandFailureRetentionLimit) {
+        const oldest = commandFailures.keys().next();
+        if (oldest.done !== true) commandFailures.delete(oldest.value);
+      }
+      commandFailures.set(toolCallId, error.diagnostics);
+    }
+    throw error;
+  });
+
+/**
  * Register the RFC evidence engine as native Pi tools with the MCP surface's names and metadata.
  *
  * @param pi Pi extension API used to register tools and prompt guidance.
@@ -223,14 +302,22 @@ export default function rfcExtension(pi: ExtensionAPI): void {
     event.systemPromptOptions.sections.rfc_evidence_engine = rfcMcpInstructions;
   });
 
+  pi.on("tool_result", (event) => {
+    const diagnostics = commandFailures.get(event.toolCallId);
+    if (diagnostics === undefined) return undefined;
+    commandFailures.delete(event.toolCallId);
+    return { details: diagnostics };
+  });
+
   pi.registerTool({
     name: rfcAgentToolMetadata.researchKnownRfc.name,
     label: rfcAgentToolMetadata.researchKnownRfc.title,
     description: rfcAgentToolMetadata.researchKnownRfc.description,
     promptSnippet: rfcAgentToolMetadata.researchKnownRfc.title,
     parameters: knownRfcResearchParameters,
-    async execute(_toolCallId, { question, rfc }, signal) {
-      const result = await runRfcCommand<EvidenceBundle>(
+    async execute(toolCallId, { question, rfc }, signal) {
+      const result = await runToolCommand<EvidenceBundle>(
+        toolCallId,
         ["research"],
         { schemaVersion, question, rfc },
         signal,
@@ -245,8 +332,9 @@ export default function rfcExtension(pi: ExtensionAPI): void {
     description: rfcAgentToolMetadata.researchTopic.description,
     promptSnippet: rfcAgentToolMetadata.researchTopic.title,
     parameters: topicResearchParameters,
-    async execute(_toolCallId, { question, searchTerms }, signal) {
-      const result = await runRfcCommand<EvidenceBundle>(
+    async execute(toolCallId, { question, searchTerms }, signal) {
+      const result = await runToolCommand<EvidenceBundle>(
+        toolCallId,
         ["research"],
         { schemaVersion, question, rfc: null, searchTerms },
         signal,
@@ -261,8 +349,9 @@ export default function rfcExtension(pi: ExtensionAPI): void {
     description: rfcAgentToolMetadata.verifyCitation.description,
     promptSnippet: rfcAgentToolMetadata.verifyCitation.title,
     parameters: citationParameters,
-    async execute(_toolCallId, { rfc, claim, quote, offset }, signal) {
-      const result = await runRfcCommand<CitationVerificationResult>(
+    async execute(toolCallId, { rfc, claim, quote, offset }, signal) {
+      const result = await runToolCommand<CitationVerificationResult>(
+        toolCallId,
         ["verify-citation"],
         { schemaVersion, rfc, claim, quote, offset: offset ?? null },
         signal,
@@ -277,8 +366,9 @@ export default function rfcExtension(pi: ExtensionAPI): void {
     description: rfcAgentToolMetadata.sourceCacheStatus.description,
     promptSnippet: rfcAgentToolMetadata.sourceCacheStatus.title,
     parameters: rfcParameters,
-    async execute(_toolCallId, { rfc }, signal) {
-      const result = await runRfcCommand<RfcSourceCacheStatus>(
+    async execute(toolCallId, { rfc }, signal) {
+      const result = await runToolCommand<RfcSourceCacheStatus>(
+        toolCallId,
         ["cache", "status", "--rfc", rfc, "--format", "json"],
         undefined,
         signal,
@@ -293,8 +383,9 @@ export default function rfcExtension(pi: ExtensionAPI): void {
     description: rfcAgentToolMetadata.sourceCacheRemove.description,
     promptSnippet: rfcAgentToolMetadata.sourceCacheRemove.title,
     parameters: sourceCacheRemoveParameters,
-    async execute(_toolCallId, { rfc }, signal) {
-      const result = await runRfcCommand<RfcSourceCacheRemoveResult>(
+    async execute(toolCallId, { rfc }, signal) {
+      const result = await runToolCommand<RfcSourceCacheRemoveResult>(
+        toolCallId,
         ["cache", "remove", "--rfc", rfc, "--format", "json"],
         undefined,
         signal,
@@ -309,9 +400,11 @@ export default function rfcExtension(pi: ExtensionAPI): void {
     description: rfcAgentToolMetadata.authStatus.description,
     promptSnippet: rfcAgentToolMetadata.authStatus.title,
     parameters: emptyParameters,
-    async execute(_toolCallId, _params, signal) {
-      const result = await runRfcCommand<AuthStatus>(
-        ["auth", "status", "--format", "json"],
+    async execute(toolCallId, _params, signal) {
+      const result = await runToolCommand<AuthStatus>(
+        toolCallId,
+        // `auth` reports status itself; its only subcommands are login and remove.
+        ["auth", "--format", "json"],
         undefined,
         signal,
       );
