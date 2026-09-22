@@ -1,15 +1,15 @@
 # RFC Evidence Engine
 
-The RFC Evidence Engine turns questions about published IETF RFCs into bounded, traceable evidence that a caller can safely compose into an answer.
+The RFC Evidence Engine finds the published IETF RFCs that answer a caller's questions and returns the exact paragraphs that do, so the caller can reason over authoritative text and compose its own answer.
 
 ## Research language
 
-**Atomic question**:
-A single independently answerable question whose evidence can be judged without deciding how to split it further.
-_Avoid_: Compound question, broad prompt
+**Question**:
+One fact the caller needs, answered independently against the shared candidate pool. The caller decides how to split a request into questions; the engine never judges or splits them.
+_Avoid_: Atomic question, compound question
 
 **RFC discovery**:
-The bounded identification of published RFCs relevant to an atomic question from current authoritative metadata.
+The bounded identification of published RFCs matching caller-supplied search terms from current authoritative metadata.
 _Avoid_: Index, registry
 
 **RFC source cache**:
@@ -17,45 +17,37 @@ The local collection of exact source text retained only for RFCs that have been 
 _Avoid_: Corpus mirror
 
 **RFC currency**:
-The bounded, deterministic traversal from a requested RFC through update and obsoletion relationships to applicable current RFC contexts.
+The bounded, deterministic traversal from a named RFC through update and obsoletion relationships to its current successors.
 _Avoid_: Replacement, latest-document substitution
 
-**RFC context**:
-The requested or applicable current published RFC whose exact source text is researched independently for one evidence bundle.
-_Avoid_: Source alias, version
+**Candidate pool**:
+The bounded set of RFCs one research request considers: the named RFCs, their current successors, and RFC discovery hits.
+_Avoid_: Search results, corpus
 
-**Document candidate**:
-A published RFC that remains plausible evidence for an atomic question after RFC discovery.
-_Avoid_: Search result, source
+**Role**:
+How an RFC entered the candidate pool: `requested` when the caller named it, `current` when it is the current successor of a named RFC, or `discovered` when topic search found it.
+_Avoid_: Context, source alias
 
-**Source block**:
-A bounded range of authoritative RFC text that preserves enough adjacent context for evidence judgment.
-_Avoid_: Chunk, snippet
+**Relevance**:
+The ranking stage's probability that an RFC defines or normatively specifies what a question asks, rather than only covering a related topic. It is absent when the pool held a single RFC and ranking was skipped.
+_Avoid_: Confidence, score
 
-**Passage candidate**:
-A source block shortlisted for semantic evaluation because deterministic retrieval found vocabulary related to the atomic question.
-_Avoid_: Match, hit
+**Hit**:
+One RFC judged relevant to a question, returned with its role, relevance, verdict, and passages.
+_Avoid_: Match, result
 
-**Evidence passage**:
-An exact quotation from an authoritative source block that is returned as evidence, together with its provenance.
-_Avoid_: Generated quote, summary
+**Passage**:
+An exact paragraph of canonical RFC text, never including page furniture, returned with its section, verdict, and UTF-8 byte range in the hashed source.
+_Avoid_: Chunk, snippet, generated quote
 
-**Evidence bundle**:
-The versioned research result containing the status, accepted evidence passages, provenance, and bounded diagnostics for one atomic question.
-_Avoid_: Answer, report
-
-**Answer relation**:
-The relationship between an evidence passage and its atomic question: direct answer, partial answer, background, contradiction, or irrelevance.
-_Avoid_: Relevance score
+**Verdict**:
+How a passage or hit bears on a question: `supports`, `partial`, `says_nothing`, or `contradicts`.
+_Avoid_: Status, answer relation
 
 **Citation verdict**:
 The result of checking a claim against an exact RFC quotation: verified, unsupported, contradicted, or fabricated.
 _Avoid_: Citation confidence
 
-**Research status**:
-The fail-closed outcome assigned to an evidence bundle: answered, partial, unsupported, needs review, or needs split.
-_Avoid_: Success state
-
-**Policy preset**:
-A named, versioned set of acceptance and uncertainty rules used to turn evidence judgments into a research status.
-_Avoid_: Per-request threshold
+**Retrieval policy**:
+The named, versioned set of working limits and floors that bound ranking, section selection, and paragraph selection.
+_Avoid_: Per-request threshold, calibration

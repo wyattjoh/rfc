@@ -1,31 +1,31 @@
 ---
 name: rfc-lookup
-description: Answer questions about published IETF RFCs from exact authoritative source text through the self-describing RFC MCP or linked typed `rfc` CLI. Use for RFC requirements, definitions, procedures, updates, obsoletions, or citations. For one atomic question, never exceed two research calls and two citation calls, never loop by rephrasing a valid result, and preserve the status of qualified review candidates.
+description: Answer questions about published IETF RFCs from exact authoritative source text through the self-describing RFC MCP or linked typed `rfc` CLI. Use for RFC requirements, definitions, procedures, updates, obsoletions, or citations. Make one rfc_research call per user request with each fact as its own question, answer from the returned passages, and make at most one follow-up call when a question is not found.
 argument-hint: "[RFC number or question]"
 ---
 
 # RFC lookup
 
 Use the RFC MCP when its tools are available; otherwise use the linked `rfc`
-binary. Both are complete RFC research backends and own live RFC discovery,
-source retrieval, evidence selection, RFC currency, and citation verification.
-Compose only a short answer from returned canonical passages, preserving whether
-each passage is accepted evidence or a qualified review candidate; never answer
+binary. Both are complete RFC retrieval backends: they own live RFC discovery,
+RFC currency, canonical source retrieval, relevance ranking, passage selection,
+and citation verification. The tool finds the RFCs and exact paragraphs that
+bear on each question; you do the reasoning and write the answer. Never answer
 from memory or a second provider.
 
 ## Self-describing MCP surface
 
 Launch the local stdio server with `rfc mcp`. A model connected through MCP does
 not need this skill or direct CLI access: initialization instructions contain the
-bounded workflow, and `rfc://docs/agent-workflow` contains the complete agent
-reference. The typed tools are `rfc_research_known_rfc`, `rfc_research_topic`,
-`rfc_verify_citation`, `rfc_source_cache_status`, `rfc_source_cache_remove`, and
-`rfc_auth_status`.
+workflow, and `rfc://docs/agent-workflow` contains the complete agent reference.
+The typed tools are `rfc_research`, `rfc_verify_citation`,
+`rfc_source_cache_status`, `rfc_source_cache_remove`, and `rfc_auth_status`.
 
-Successful calls return concise text plus complete version-two structured
+Successful calls return concise text plus complete version-three structured
 content. Operational failures are MCP tool errors containing the same safe error
-envelope as the CLI. Research status and citation verdict remain domain results,
-not tool failures. `rfc_source_cache_remove` requires `confirm: true`.
+envelope as the CLI. A question that was not found and a citation verdict are
+domain results, not tool failures. `rfc_source_cache_remove` requires
+`confirm: true`.
 
 The MCP deliberately excludes credential mutation and per-call cache or upstream
 URL overrides. If `rfc_auth_status` or a tool error reports a missing credential, ask
@@ -33,45 +33,64 @@ the human operator to run `rfc auth login`; never solicit a key through MCP. Tru
 cache and upstream overrides may be set only when the operator launches
 `rfc mcp`.
 
-## Bounded agent workflow
+## Workflow
 
 Use the typed MCP tools directly when available. Otherwise use `rfc` directly;
 do not resolve its installation path, invoke its TypeScript entrypoint with
 `bun`, read source-cache internals, or use shell loops to probe wording and
 offsets.
 
-For each simple atomic user question, use this hard budget:
+1. Make one `rfc_research` call, or one `rfc research` fallback call, per user
+   request. Put each fact you need in `questions` as its own entry, up to four.
+   Each question is answered independently against the same candidate RFCs, so
+   split a compound request yourself rather than sending it as one question.
+2. Pass `rfcs` when you know the RFC numbers and `searchTerms` when you do not;
+   both may be combined. Named RFCs, their current successors, and topic hits
+   form one candidate pool.
+3. Answer from the returned passages. Cite only the RFC and section shown with
+   each passage; do not attribute a passage to a section or RFC it did not come
+   from.
+4. When a question is not found, you may make one follow-up call with other
+   `rfcs` or `searchTerms`; RFC titles often differ from common names. Then
+   stop and report what was searched.
+5. Never re-research or re-verify returned passages. Reproducing or paraphrasing
+   a returned passage needs no citation call.
 
-1. Call `rfc_research_known_rfc` or `rfc_research_topic` once, or run one
-   `rfc research --format human` fallback call.
-2. Only when that result has no usable evidence, run at most one targeted
-   follow-up research call. Do not repeatedly rephrase a valid result to chase
-   `answered` or a higher confidence.
-3. If the result includes accepted evidence, quote it directly with provenance.
-   If it includes a review candidate, quote it only as qualified, unaccepted
-   evidence. Verify at most two paraphrased claims once each; exact reproduction
-   of a returned passage does not require duplicate verification.
-4. Stop after the budget. Do not say that no source passage was found when the
-   backend returned a review candidate; report its status and qualification.
-   Keep nearby protocol categories distinct rather than substituting one for
-   another.
-
-A direct quote-verification request starts with one `rfc_verify_citation` tool call
-or `rfc verify-citation` fallback call and needs no research preflight. If the
-quote is `fabricated`, use at most one research call to locate current wording
-and at most one verification call for the replacement. Never guess or
-brute-force byte offsets: copy an offset from research provenance, or omit it
-when the quote occurs only once. If replacement research returns a review
-candidate, report that exact candidate and its qualification instead of
-re-querying for a higher score.
+A passage from a hit whose role is `current` comes from the RFC that replaced
+the one named. Say so rather than attributing it to the named RFC, and never
+silently substitute a successor. `currency` reports, per named RFC, `requested`,
+its `current` successors, `complete`, and the relationship `paths` that led to
+them. When `complete` is false, a successor was unresolved or cut off by a
+traversal bound (the concise text says "incomplete: some successors were not
+fetched"); say that the successor list may be partial rather than presenting it
+as final.
 
 Use MCP's concise text content for agent-facing calls; the complete result also
-remains available as structured content. For the CLI fallback, use
-`--format human`. Both include status, accepted quotes, qualified review
-candidates, source URLs, byte offsets, input tokens, and estimated cost without
-dumping full model diagnostics into the conversation. Use CLI JSON only when
-code needs to extract a specific field, and summarize it before returning it to
-model context.
+remains available as structured content. For the CLI fallback, argument-based
+invocations already print the concise human layout. Use CLI JSON only when code
+needs to extract a specific field, and summarize it before returning it to model
+context.
+
+## Search-term privacy
+
+Search terms are transmitted verbatim in Datatracker query URLs, and to the IETF
+RFC search service when the operator enabled it, and may appear in diagnostics,
+errors, and upstream access logs. Never put private or user-specific details in
+a term, derive hidden terms, or send the full question as a term unless the user
+explicitly chose it. Standard technical terms, including title words of an RFC
+you expect to match, are fine. Preserve the caller's order.
+
+Datatracker matches each term as a literal case-insensitive substring of an RFC
+title or abstract. A short noun phrase such as `DNS over TLS` finds documents; a
+sentence fragment such as `DNS over TLS default port` matches nothing, because
+no title or abstract contains that exact string.
+
+If the operator enabled optional full-text search, terms additionally match RFC
+keywords and body text, so a term naming a protocol element such as
+`Retry-After` also resolves. Write terms that work under either configuration.
+When `retrieval.topicSearchFallback` is true, full-text search was configured but
+failed and discovery ran on titles and abstracts alone, so an empty result is
+less conclusive than usual.
 
 ## Install and link the CLI
 
@@ -104,104 +123,81 @@ single-line key through `rfc auth login --stdin`. If the credential store is
 unavailable or denied, report the typed error; do not bypass `Bun.secrets` with
 a plaintext fallback.
 
-## Version-two semantic protocol
+## Version-three CLI protocol
 
-Use human output for normal agent work and JSON standard input only when a
-multiline quote or programmatic extraction requires it. Non-whitespace standard
-input is authoritative over convenience flags and positional arguments, and it
-defaults to JSON output. Argument-based invocations default to human output;
-pass `--format json` only for programmatic extraction. A valid research status
-is a successful process result even when it is not `answered`.
+Use flags for normal agent work and JSON standard input only when programmatic
+extraction or a multiline quote requires it. Non-whitespace standard input is
+authoritative over flags and positional arguments, and it defaults to JSON
+output. Argument-based invocations default to human output; pass
+`--format json` only for programmatic extraction.
 
-### Research one known RFC
+### Research
+
+Repeat `-q`/`--question` once per fact, and add `-r`/`--rfc` or
+`--search-term` up to four times each:
+
+```sh
+rfc research \
+  -q "What does the 429 status code mean?" \
+  -q "Which header says how long to wait?" \
+  -r RFC6585 -r RFC9110
+
+rfc research \
+  -q "Which port does DNS over TLS use by default?" \
+  --search-term "DNS over TLS"
+```
+
+The same request as JSON on standard input:
 
 ```sh
 cat <<'JSON' | rfc research --format human
 {
-  "schemaVersion": 2,
-  "question": "What does RFC 9110 require a client to send?",
-  "rfc": "RFC9110"
+  "schemaVersion": 3,
+  "questions": [
+    "What does the 429 status code mean?",
+    "Which header says how long to wait?"
+  ],
+  "rfcs": ["RFC6585", "RFC9110"]
 }
 JSON
 ```
 
-Known-RFC research retrieves only the requested RFC's metadata and the bounded
-successor relationships needed for RFC currency.
+`questions` holds one to four entries; at least one of `rfcs` or `searchTerms`
+is required, each with one to four entries.
 
-### Discover RFCs for a topic
+The result is a version-three `research_result`. For each question, `answers`
+reports `found`, the `searched` RFCs, and ranked `hits`. Each hit names its
+`rfc`, its `role` (`requested`, `current`, or `discovered`), its `relevance`,
+a `verdict`, and one to three exact `passages`. Verdicts are:
 
-A topic request sets `rfc` to `null` and supplies one to four ordered, non-empty
-search terms. Supply the technical phrases intentionally; they are transmitted
-verbatim in Datatracker query URLs and may appear in upstream access logs. The
-full natural-language question is not sent to Datatracker.
+- `supports`: the passage states the answer or directly implies it.
+- `partial`: the passage answers only part of the question.
+- `says_nothing`: the passage does not address the question.
+- `contradicts`: the passage states the opposite of what the question presumes.
 
-Datatracker matches each term as a literal case-insensitive substring of an RFC
-title or abstract. A short noun phrase such as `DNS over TLS` finds documents; a
-sentence fragment such as `DNS over TLS default port` matches nothing, because
-no title or abstract contains that exact string.
+Each passage includes an unchanged quote, its nullable section, and provenance
+with the canonical source URL, source hash, `offsetUnit`, and UTF-8 byte
+offsets. `found: false` means none of the `searched` RFCs contained an answer;
+it is a successful result, not a failure.
 
-If the operator enabled optional full-text search, terms additionally match RFC
-keywords and body text, so a term naming a protocol element such as
-`Retry-After` also resolves. Write terms that work under either configuration.
-When `retrieval.topicSearchFallback` is true, full-text search was configured but
-failed and discovery ran on titles and abstracts alone, so an empty result is
-less conclusive than usual.
-
-```sh
-cat <<'JSON' | rfc research --format human
-{
-  "schemaVersion": 2,
-  "question": "Which published RFC defines HTTP caching requirements?",
-  "rfc": null,
-  "searchTerms": ["HTTP caching", "cache control"]
-}
-JSON
-```
-
-The short form accepts the question positionally or through `--question`, then
-uses repeatable `--search-term` flags. Preserve the caller's order. Never put private or user-specific
-details in a term, infer a broad query from the whole question, or run a catalog preflight: each supplied
-term appears in Datatracker query URLs and can be retained in upstream access logs. Standard technical
-terms, including title words of an RFC you expect to match, are fine.
-
-The result is a version-two `evidence_bundle` containing `status`, exact
-`evidence`, optional exact `reviewCandidates`, optional requested/current
-`contexts`, and bounded `diagnostics`. Review candidates are canonical source
-passages surfaced only for bounded review; they are never accepted evidence and
-must be labeled as qualified when quoted. Each human-rendered passage names its
-RFC and whether it came from the requested or a current context. Do not answer a
-question about the requested RFC with a current-context passage unless you
-explicitly explain the distinction.
 `diagnostics.usage.inputTokens` reports the provider-observed input tokens, while
 `diagnostics.inputCost` reports the estimated USD charge and its per-million-token
 rate. Treat a null estimate as unavailable rather than zero cost. Each successful
 research or citation operation atomically updates the per-user running total in
 `~/.config/rfc/usage.json`; its unpriced and missing-usage counters qualify the
-cumulative estimate. Each evidence passage includes an unchanged quote and
-provenance with RFC identity, nullable section, canonical URLs, source hash,
-`offsetUnit`, and UTF-8 byte offsets.
-Metadata, relationships, candidate collections, questions, and model responses
-are request-local and are not persisted.
+cumulative estimate. Metadata, relationships, candidate pools, questions, and
+model responses are request-local and are not persisted.
 
-When the user supplies up to two explicit, independently answerable questions,
-run one `rfc research` process per atomic question. For example, “Can the server
-issue this?” and “What protections are required?” are two atomic questions even
-when they share a topic. Keep each input and output separate. Do not merge
-questions, split into more than two parts, or invent a split for an ambiguous
-request.
+### Verify a supplied quotation
 
-### Verify accepted claims once
-
-Keep a simple answer to at most two factual claims. Exact reproduction of a
-returned passage with its status and provenance needs no duplicate citation
-call. For a paraphrased claim, make one citation request, once, using the exact
-returned quote and byte offset. Do not split one claim into multiple paraphrased
-verification attempts:
+Use `rfc_verify_citation` or `rfc verify-citation` only for a quotation the user
+supplied or a check the user explicitly requested; it needs no research
+preflight. Never verify passages research already returned.
 
 ```sh
 cat <<'JSON' | rfc verify-citation --format human
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "rfc": "RFC9110",
   "claim": "The client sends a request containing the target resource.",
   "quote": "The client MUST send a request containing the target resource.",
@@ -210,15 +206,12 @@ cat <<'JSON' | rfc verify-citation --format human
 JSON
 ```
 
-Only accepted research evidence or a `verified` citation supports an
-unqualified factual claim. A verified citation is an independent acceptance
-path even when discovery was fail-closed. A review candidate may be reproduced
-exactly only when explicitly labeled unaccepted or `needs_review`; do not turn it
-into an unqualified paraphrase. Remove or qualify claims whose verdict is
-`unsupported`, `contradicted`, or `fabricated`. Present each accepted normative
-claim with its unchanged quote, RFC identifier, section when available, byte
-offsets, and canonical source URL. Never repair quote wording, retry with guessed
-offsets, or replace an evidence gap with recall.
+Verify at most two paraphrased claims, once each. Never guess or brute-force
+byte offsets: copy an offset from research provenance, or omit it when the quote
+occurs only once. If the quote is `fabricated`, use at most one research call to
+locate current wording and at most one verification call for the replacement.
+Remove or qualify claims whose verdict is `unsupported`, `contradicted`, or
+`fabricated`; never repair quote wording or replace a gap with recall.
 
 ## RFC source-cache operations
 
@@ -235,63 +228,45 @@ operation. Fresh entries are reused; stale entries are conditionally revalidated
 A revalidation failure is an operational error, never permission to serve stale
 text.
 
-## Fail-closed statuses and failures
+## Failures
 
-Report research status exactly:
+Tool errors are final. On a nonzero exit, parse the version-three JSON error
+envelope from standard error, report the code, and stop; never substitute memory
+or another provider. Never retry a successful paid call over a
+`usage_accounting_failed` warning. Common recovery actions:
 
-- `answered`: accepted direct evidence with no disqualifying uncertainty.
-- `partial`: only part of the question or currency coverage is established.
-- `unsupported`: bounded research found no accepted answering evidence.
-- `needs_review`: confidence is low, evidence conflicts, discovery is empty, or
-  RFC currency is uncertain.
-- `needs_split`: the question is compound and requires atomic questions. The
-  result still names the RFC it selected and returns the canonical review
-  candidates it already retrieved. Split the request into one atomic question
-  per requested fact, research each in its own call against that RFC, and
-  answer every part. The one-follow-up budget applies per sub-question, not to
-  the compound request; never rephrase and resubmit the compound request.
+| Code                                                                         | Recovery                                                                                         |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `invalid_input`                                                              | Correct the version-three JSON, RFC identifiers, or ordered search terms.                        |
+| `credential_missing`                                                         | Ask the human operator to run `rfc auth login`; never request or accept the secret.              |
+| `credential_store_unavailable` / `credential_access_denied`                  | Unlock or authorize the OS store; never use plaintext fallback.                                  |
+| `discovery_failed`                                                           | Report the Datatracker failure and URL; do not use stale or invented metadata.                   |
+| `source_cache_failed` / `source_fetch_failed` / `source_revalidation_failed` | Report the authoritative source failure; do not substitute another representation or stale text. |
+| `rfc_not_found`                                                              | Correct the exact RFC identifier or use `searchTerms`.                                           |
+| `decision_model_failed`                                                      | Report provider failure after bounded retries; do not switch providers or models.                |
+| `citation_quote_ambiguous` / `citation_offset_mismatch`                      | Never guess. Copy the exact UTF-8 byte offset from research provenance, or stop if none exists.  |
+| `internal_error` / `configuration_error`                                     | Report an operational failure instead of asserting an answer.                                    |
 
-Keep requested and current RFC contexts distinct. Follow returned
-`relationshipPath`, `isCurrent`, and currency diagnostics; never silently
-substitute a successor for the requested RFC.
-
-On a nonzero exit, parse the version-two JSON error envelope from standard error
-and stop. Common recovery actions:
-
-| Code                                                                         | Recovery                                                                                          |
-| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `invalid_input`                                                              | Correct the version-two JSON, RFC, or ordered search terms.                                       |
-| `credential_missing`                                                         | Run `rfc auth login` or `rfc auth login --stdin`.                                                 |
-| `credential_store_unavailable` / `credential_access_denied`                  | Unlock or authorize the OS store; never use plaintext fallback.                                   |
-| `discovery_failed`                                                           | Report the Datatracker failure and URL; do not use stale or invented metadata.                    |
-| `source_cache_failed` / `source_fetch_failed` / `source_revalidation_failed` | Retry the authoritative source operation; do not substitute another representation or stale text. |
-| `rfc_not_found`                                                              | Correct the exact RFC identifier or make a topic request with explicit search terms.              |
-| `decision_model_failed`                                                      | Report provider failure after bounded retries; do not switch providers or models.                 |
-| `citation_quote_ambiguous` / `citation_offset_mismatch`                      | Never guess. Copy the exact UTF-8 byte offset from research provenance, or stop if none exists.   |
-| `internal_error` / `configuration_error`                                     | Report an operational failure instead of asserting an answer.                                     |
-
-Never turn an operational failure into a research status or unverified
-fail-closed evidence into an affirmative answer. A valid non-answer result is
-not an operational failure and must not trigger a rephrasing loop.
+A question that was not found is not an operational failure and must not
+trigger a rephrasing loop beyond the one follow-up call.
 
 ## Verification boundaries
 
 Normal repository gates are deterministic and offline. They inject Datatracker,
 RFC Editor, DecisionModel, clock, and credential behavior at public boundaries.
-Live provider evaluation is opt-in and uses the same `Bun.secrets` boundary as
-production.
 
 ## Required scenarios
 
-1. **Known RFC:** pass an RFC hint, preserve exact evidence, and verify each claim.
-2. **Topic discovery:** pass one to four explicit search terms and report evidence
-   only when the returned status permits it.
-3. **Compound request:** split only explicit independent subquestions; otherwise
-   preserve `needs_split`, then research each part it asks for separately.
-4. **Updated RFC:** show requested and current contexts and relationship paths.
-5. **Unsupported question:** report the evidence gap without recall.
-6. **Provider or upstream failure:** preserve the typed nonzero error and stop.
-7. **Citation rejection:** remove or qualify rejected claims and retain only exact
-   verified citations.
+1. **Known RFC:** pass `rfcs`, answer from the returned passages, and cite the
+   RFC and section shown.
+2. **Topic discovery:** pass one to four explicit `searchTerms` and answer only
+   from returned passages.
+3. **Several facts:** put each fact in its own entry in `questions` in one call.
+4. **Updated RFC:** keep `current` hits distinct from the named RFC and report
+   the currency path.
+5. **Not found:** make at most one follow-up call, then report what was searched
+   without recall.
+6. **Provider or upstream failure:** preserve the typed error and stop.
+7. **Supplied quotation:** verify it once and remove or qualify rejected claims.
 
 The linked typed CLI and this skill are the supported RFC workflow.

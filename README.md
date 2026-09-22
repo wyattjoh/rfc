@@ -1,13 +1,13 @@
 # rfc — an evidence engine for IETF RFCs
 
-`rfc` answers questions about published IETF RFCs from the actual specification text. It discovers the right RFC through the IETF Datatracker, follows `updates` and `obsoletes` relationships, retrieves the canonical RFC Editor source, and returns exact quotations with their UTF-8 byte offsets and source hash. It runs as a CLI and as a local [Model Context Protocol](https://modelcontextprotocol.io) server, so a coding agent can cite a specification instead of recalling one.
+`rfc` answers questions about published IETF RFCs from the actual specification text. It discovers candidate RFCs through the IETF Datatracker, follows `updates` and `obsoletes` relationships, retrieves the canonical RFC Editor source, ranks which RFCs and sections bear on each question, and returns the exact paragraphs with their UTF-8 byte offsets and source hash. It runs as a CLI and as a local [Model Context Protocol](https://modelcontextprotocol.io) server, so a coding agent can cite a specification instead of recalling one.
 
-It is precision-first: when the evidence does not support an answer, it returns `partial`, `unsupported`, `needs_review`, or `needs_split` rather than a confident paraphrase. Every quotation is a byte range in a hashed source you can re-slice yourself.
+It does retrieval and relevance judgment only; the caller does the reasoning and writes the answer. For each question it reports whether an answer was found, which RFCs were searched, and up to three exact passages per relevant RFC, each labelled `supports`, `partial`, `says_nothing`, or `contradicts`. Every quotation is a byte range in a hashed source you can re-slice yourself. See [ADR 0005](docs/adr/0005-jev-ranked-retrieval-without-research-statuses.md) for the design.
 
 > [!IMPORTANT]
 > **Status: research preview**
 >
-> Automatic answering is disabled in published configurations because the latest precision calibration was rejected. The retrieval, provenance, and citation machinery is tested, but the engine returns evidence and a non-answer status until a calibration passes review. See [ADR 0004](docs/adr/0004-gate-automatic-answers-on-a-reviewed-calibration.md) and the [recorded release decision](packages/rfc-core/src/precision-v2-release-decision.ts).
+> The ranking floors and selection limits are uncalibrated working values. The retrieval, provenance, and citation machinery is tested, but a passage the tool did not select is never read, so treat `found: false` as "not found in these RFCs", not as proof that no RFC says it.
 
 ## Run
 
@@ -22,13 +22,15 @@ bunx @wyattjoh/rfc@latest auth
 
 ## Quickstart
 
-Human invocations accept positional arguments and print readable output by default:
+Human invocations print readable output by default. Repeat `-q` once per fact you need, and name RFCs with `-r` or discover them with `--search-term`:
 
 ```sh
-bunx @wyattjoh/rfc@latest research "What must a client send in a request?" RFC9110
-bunx @wyattjoh/rfc@latest research "Which RFC defines HTTP caching?" \
-  --search-term "HTTP caching" \
-  --search-term "cache control"
+bunx @wyattjoh/rfc@latest research \
+  -q "What does the 429 status code mean?" \
+  -q "Which header says how long to wait?" \
+  -r RFC6585 -r RFC9110
+bunx @wyattjoh/rfc@latest research -q "How long may a cache reuse a response?" \
+  --search-term "HTTP caching"
 bunx @wyattjoh/rfc@latest verify-citation RFC9110 \
   "A client must send a target resource." \
   "The client MUST send a request containing the target resource."
@@ -36,18 +38,18 @@ bunx @wyattjoh/rfc@latest cache status RFC9110
 bunx @wyattjoh/rfc@latest costs
 ```
 
-The equivalent long flags remain available, including `--question`, `--rfc`, `--claim`, and `--quote`. Pass `--format json` when a human-style invocation needs machine-readable output.
+The equivalent long flags are available, including `--question`, `--rfc`, `--claim`, and `--quote`. Pass `--format json` when a human-style invocation needs machine-readable output.
 
-Agents and programs can continue sending the unchanged version-two JSON protocol on standard input. Structured standard input selects JSON output by default:
+Agents and programs can send the version-three JSON protocol on standard input. Structured standard input selects JSON output by default:
 
 ```sh
-echo '{"schemaVersion":2,"question":"What must a client send in a request?","rfc":"RFC9110"}' \
+echo '{"schemaVersion":3,"questions":["What must a client send in a request?"],"rfcs":["RFC9110"]}' \
   | bunx @wyattjoh/rfc@latest research
 
-echo '{"schemaVersion":2,"question":"Which RFC defines HTTP caching?","rfc":null,"searchTerms":["HTTP caching","cache control"]}' \
+echo '{"schemaVersion":3,"questions":["How long may a cache reuse a response?"],"searchTerms":["HTTP caching"]}' \
   | bunx @wyattjoh/rfc@latest research
 
-echo '{"schemaVersion":2,"rfc":"RFC9110","claim":"A client must send a target resource.","quote":"The client MUST send a request containing the target resource.","offset":null}' \
+echo '{"schemaVersion":3,"rfc":"RFC9110","claim":"A client must send a target resource.","quote":"The client MUST send a request containing the target resource.","offset":null}' \
   | bunx @wyattjoh/rfc@latest verify-citation
 ```
 
@@ -77,7 +79,7 @@ claude --plugin-dir .
 
 ## Install the Pi package
 
-The published `@wyattjoh/rfc-pi` Pi package registers the MCP server's research and citation tools with the same names, labels, descriptions, and input constraints, plus bounded workflow instructions without the MCP-only rules; set `RFC_PI_LOCAL_TOOLS=1` to also register the cache and credential tools. It invokes the latest published CLI directly for each tool call rather than running an MCP transport, so Bun 1.4.2 or newer must be available. It also includes the RFC lookup skill:
+The published `@wyattjoh/rfc-pi` Pi package registers the MCP server's `rfc_research` and `rfc_verify_citation` tools with the same names, labels, descriptions, and input constraints, plus bounded workflow instructions without the MCP-only rules; set `RFC_PI_LOCAL_TOOLS=1` to also register the cache and credential tools. It invokes the latest published CLI directly for each tool call rather than running an MCP transport, so Bun 1.4.2 or newer must be available. It also includes the RFC lookup skill:
 
 ```sh
 pi install npm:@wyattjoh/rfc-pi
@@ -112,7 +114,7 @@ Claude Code, Claude Desktop, and other MCP hosts launch that command directly:
 }
 ```
 
-The server describes its own bounded workflow in its initialization instructions, so a connected model needs nothing else from this repository. It exposes `rfc_research_known_rfc`, `rfc_research_topic`, `rfc_verify_citation`, `rfc_source_cache_status`, `rfc_source_cache_remove` and `rfc_auth_status`. The credential is outside the model-facing surface entirely: a model can ask whether one is configured and can never read, set, or remove it.
+The server describes its own workflow in its initialization instructions, so a connected model needs nothing else from this repository. It exposes `rfc_research`, `rfc_verify_citation`, `rfc_source_cache_status`, `rfc_source_cache_remove` and `rfc_auth_status`. The credential is outside the model-facing surface entirely: a model can ask whether one is configured and can never read, set, or remove it.
 
 [`packages/rfc/README.md`](packages/rfc/README.md) is the full reference for the CLI protocol, the MCP surface, credential handling, and configuration.
 
@@ -127,7 +129,7 @@ It is **off by default and ships with no credential**. That backend carries no d
 ```sh
 export RFC_SEARCH_API_KEY="<search-only key>"
 export RFC_SEARCH_API_URL="https://typesense.ietf.org/"   # optional, this is the default
-rfc research "How long should a client wait before retrying?" --search-term "Retry-After"
+rfc research -q "How long should a client wait before retrying?" --search-term "Retry-After"
 ```
 
 or per invocation:
@@ -142,7 +144,7 @@ If a search request fails for any reason — revoked key, rate limit, outage, bo
 
 Using this tool sends data to third parties. Specifically:
 
-- **To [TypeSafe](https://typesafe.ai)**, when semantic evaluation is required: research sends your question and selected candidate passages; citation verification sends your claim and quotation. Some fail-closed results, such as empty discovery or an absent quotation, return without contacting TypeSafe. Your API key is sent as a bearer credential.
+- **To [TypeSafe](https://typesafe.ai)**, when semantic evaluation is required: research sends your questions, candidate RFC titles and abstracts, section previews, and the paragraphs of selected sections; citation verification sends your claim and quotation. Some results, such as empty discovery or an absent quotation, return without contacting TypeSafe. Your API key is sent as a bearer credential.
 - **To the [IETF Datatracker](https://datatracker.ietf.org)**, for discovery: RFC identifiers, and — for topic search — **your search terms verbatim in the query URL**, where they may appear in upstream request logs. The tool never derives search terms on its own and never sends your full question as one unless you write it that way.
 - **To the IETF RFC search service**, only if you enable full-text topic search: the same search terms verbatim, to a different IETF host with its own access logs. Your search key is sent as a request header and never appears in URLs, diagnostics, or traces.
 - **To the [RFC Editor](https://www.rfc-editor.org)**, for source text: RFC numbers only.
@@ -153,15 +155,15 @@ Provider endpoint overrides must use `https` outside loopback, so the credential
 
 ## Repository layout
 
-| Path                     | What it is                                                                         |
-| ------------------------ | ---------------------------------------------------------------------------------- |
-| `packages/rfc`           | The published CLI and MCP server                                                   |
-| `packages/rfc-core`      | The published engine: discovery, currency, retrieval, evidence selection, citation |
-| `packages/rfc-pi`        | The published native Pi extension and RFC lookup skill                             |
-| `docs/adr`               | Architecture decision records                                                      |
-| `CONTEXT.md`             | Domain vocabulary                                                                  |
-| `skills/rfc-lookup`      | Claude Code plugin link to the lookup skill published from `packages/rfc-pi`       |
-| `docs/agents`, `.claude` | Tooling for AI agents working _on_ this repository — not product documentation     |
+| Path                     | What it is                                                                                 |
+| ------------------------ | ------------------------------------------------------------------------------------------ |
+| `packages/rfc`           | The published CLI and MCP server                                                           |
+| `packages/rfc-core`      | The published engine: discovery, currency, retrieval, ranking, passage selection, citation |
+| `packages/rfc-pi`        | The published native Pi extension and RFC lookup skill                                     |
+| `docs/adr`               | Architecture decision records                                                              |
+| `CONTEXT.md`             | Domain vocabulary                                                                          |
+| `skills/rfc-lookup`      | Claude Code plugin link to the lookup skill published from `packages/rfc-pi`               |
+| `docs/agents`, `.claude` | Tooling for AI agents working _on_ this repository — not product documentation             |
 
 ## Development
 
@@ -172,7 +174,7 @@ bun run lint
 bun test packages
 ```
 
-The test suite injects Datatracker, RFC Editor, provider, clock, and credential boundaries: it needs no API key, no credential manager, and no network. Live calibration is opt-in through `bun run evaluate:live`; unlike the test suite, it calls the provider, costs money, and requires a stored credential.
+The test suite injects Datatracker, RFC Editor, provider, clock, and credential boundaries: it needs no API key, no credential manager, and no network.
 
 ## License
 

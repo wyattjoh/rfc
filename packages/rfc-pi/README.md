@@ -1,6 +1,6 @@
 # `@wyattjoh/rfc-pi`
 
-Native [Pi](https://pi.dev) integration for the RFC Evidence Engine. The package registers the `rfc_research_known_rfc`, `rfc_research_topic`, and `rfc_verify_citation` tools, adds the bounded RFC lookup workflow to the system prompt, and includes the `/rfc-lookup` skill.
+Native [Pi](https://pi.dev) integration for the RFC Evidence Engine. The package registers the `rfc_research` and `rfc_verify_citation` tools, adds the RFC lookup workflow to the system prompt, and includes the `/rfc-lookup` skill.
 
 ## Install
 

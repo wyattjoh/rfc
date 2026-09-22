@@ -1,6 +1,6 @@
 # Gate automatic answers on a reviewed calibration
 
-**Status:** accepted
+**Status:** Superseded by [ADR 0005](./0005-jev-ranked-retrieval-without-research-statuses.md)
 
 The engine may return `answered` only when a locally present calibration report proves a passing release gate _and_ a human has recorded an accepting release decision _and_ automatic answering is explicitly enabled. Any weaker artifact — rejected, pending, missing, stale, expired, or tampered — fails closed to `needs_review`. Changing the model pin requires recertification on the same terms. The alternative, treating a passing gate as sufficient on its own, would let a calibration that nobody read switch on the one behaviour a precision-first tool cannot take back.
 
