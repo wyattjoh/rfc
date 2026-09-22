@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.2.2](https://github.com/wyattjoh/rfc/compare/rfc-pi-v0.2.1...rfc-pi-v0.2.2) (2026-09-22)
+
+
+### Bug Fixes
+
+* expose agent entry points ([#5](https://github.com/wyattjoh/rfc/issues/5)) ([5c6e5ef](https://github.com/wyattjoh/rfc/commit/5c6e5efd42f9e18e4e3b479cd9552db124ed7ace))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @wyattjoh/rfc bumped from 0.3.1 to 0.3.2
+    * @wyattjoh/rfc-core bumped from 0.1.1 to 0.1.2
+
 ## [0.2.1](https://github.com/wyattjoh/rfc/compare/rfc-pi-v0.2.0...rfc-pi-v0.2.1) (2026-09-22)
 
 
