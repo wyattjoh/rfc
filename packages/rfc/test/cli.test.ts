@@ -250,6 +250,20 @@ afterEach(() => {
 });
 
 describe("rfc process protocol", () => {
+  test("reports the published package version", async () => {
+    const manifest = (await Bun.file(join(import.meta.dir, "../package.json")).json()) as {
+      readonly version: string;
+    };
+    const result = Bun.spawnSync(
+      [process.execPath, join(import.meta.dir, "../src/bin.ts"), "--version"],
+      { cwd: repositoryRoot },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toBe(`rfc v${manifest.version}\n`);
+    expect(result.stderr.toString()).toBe("");
+  });
+
   test("registers only live retrieval commands", async () => {
     const result = await runCli(["catalog", "status"]);
 

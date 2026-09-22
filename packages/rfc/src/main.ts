@@ -9,6 +9,7 @@ import {
 import { NodeServices } from "@effect/platform-node";
 import { Console, Effect, Option } from "effect";
 import { Argument, CliError, Command, Flag } from "effect/unstable/cli";
+import packageMetadata from "../package.json" with { type: "json" };
 import { runRfcMcpServer } from "./mcp";
 import {
   executeAuthStatus,
@@ -839,7 +840,7 @@ export const run = async (
 
   try {
     const program = Command.runWith(makeApplication(dependencies), {
-      version: "0.1.0",
+      version: packageMetadata.version,
       renderErrors: false,
     })(argv);
 
