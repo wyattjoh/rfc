@@ -15,6 +15,7 @@ import {
 import { automaticAnswerActivationFor, type RfcCliConfig } from "../src/config";
 import type { CredentialStore } from "../src/credentials";
 import { makeDefaultCliDependencies, run, type RfcCliDependencies } from "../src/main";
+import { renderEvidenceBundle } from "../src/renderers";
 
 const servers: Array<ReturnType<typeof Bun.serve>> = [];
 
@@ -1316,5 +1317,44 @@ describe("rfc process protocol", () => {
       expect(result.stderr).not.toContain(marker);
       expect(JSON.parse(result.stderr).error.code).toBe("invalid_input");
     }
+  });
+});
+
+describe("evidence bundle rendering", () => {
+  const topicBundle = (candidates: {
+    readonly documentCandidates: number;
+    readonly acceptedDocuments: number;
+  }) =>
+    ({
+      ...stubEvidenceBundle,
+      status: "needs_review",
+      rfc: null,
+      diagnostics: {
+        ...stubEvidenceBundle.diagnostics,
+        candidates: {
+          sourceBlocks: 0,
+          passageCandidates: 0,
+          selectedPassages: 0,
+          discoveredDocuments: candidates.documentCandidates,
+          ...candidates,
+        },
+      },
+    }) as unknown as Parameters<typeof renderEvidenceBundle>[0];
+
+  test("renders why a topic bundle carries no RFC", () => {
+    // Discovery found nothing: the caller should change search terms.
+    const missed = renderEvidenceBundle(
+      topicBundle({ documentCandidates: 0, acceptedDocuments: 0 }),
+    );
+    expect(missed).toContain("no RFC matched the search terms");
+    expect(missed).not.toContain("none discovered");
+
+    // Discovery worked and selection rejected every candidate. Saying "none
+    // discovered" here is false, and it is all the caller sees.
+    const rejected = renderEvidenceBundle(
+      topicBundle({ documentCandidates: 3, acceptedDocuments: 0 }),
+    );
+    expect(rejected).toContain("3 candidate RFCs");
+    expect(rejected).not.toContain("none discovered");
   });
 });

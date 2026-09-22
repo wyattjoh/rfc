@@ -18,13 +18,42 @@ export const renderEstimatedUsd = (value: number | null): string =>
   value === null ? "unavailable" : `$${value.toFixed(9)}`;
 
 /**
+ * Explain why a bundle names no RFC, using the counts the bundle already carries.
+ *
+ * A bare "none discovered" is false whenever discovery returned candidates that
+ * selection then rejected, and it is the only line the caller sees. The two
+ * cases need different responses: different search terms, or a narrower
+ * question.
+ *
+ * @param result Version-two evidence bundle with no researched RFC.
+ * @returns A short reason suitable for the RFC line.
+ */
+const noRfcReason = (result: EvidenceBundle): string => {
+  const candidates = result.diagnostics.candidates?.documentCandidates;
+  if (candidates === undefined) return "none discovered";
+  if (candidates === 0) return "no RFC matched the search terms";
+  const best = (result.diagnostics.documentSelection ?? []).reduce<
+    { readonly candidateId: string; readonly probability: number } | undefined
+  >(
+    (leader, candidate) =>
+      leader === undefined || candidate.probability > leader.probability ? candidate : leader,
+    undefined,
+  );
+  const bestSuffix = best === undefined ? "" : `, best ${best.candidateId} at ${best.probability}`;
+  return `${candidates} candidate RFCs discovered, none accepted${bestSuffix}`;
+};
+
+/**
  * Render one evidence bundle for concise agent or human consumption.
  *
  * @param result Version-two evidence bundle.
  * @returns Multi-line text preserving statuses, qualifications, provenance, and cost.
  */
 export const renderEvidenceBundle = (result: EvidenceBundle): string => {
-  const lines = [`Status: ${result.status}`, `RFC: ${result.rfc?.identifier ?? "none discovered"}`];
+  const lines = [
+    `Status: ${result.status}`,
+    `RFC: ${result.rfc?.identifier ?? noRfcReason(result)}`,
+  ];
   for (const context of result.contexts ?? []) {
     lines.push(`Context: ${context.role} ${context.document.identifier} (${context.state})`);
   }
