@@ -283,7 +283,6 @@ describe("research rendering", () => {
     expect(JSON.parse(text)).toEqual({
       answers: [
         {
-          question: "What must the client send?",
           found: true,
           hits: [
             {

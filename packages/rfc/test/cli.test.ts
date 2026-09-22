@@ -1249,8 +1249,9 @@ describe("research result rendering", () => {
       bytes: [120, 193],
     });
     expect(json.answers[0].searched).toBeUndefined();
+    // Answers are positional: answers[i] answers questions[i], so the question is not echoed.
+    expect(json.answers[0].question).toBeUndefined();
     expect(json.answers[1]).toEqual({
-      question: "Does HTTP define a teapot?",
       found: false,
       searched: ["RFC9110", "RFC9999"],
       hits: [],

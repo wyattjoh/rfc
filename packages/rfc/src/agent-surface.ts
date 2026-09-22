@@ -96,7 +96,7 @@ export const rfcAgentToolMetadata = {
     name: "rfc_research",
     title: "Research RFCs",
     description:
-      "Inputs: questions (1-4) plus rfcs and/or searchTerms (1-4 each). Ranks the named RFCs, their current successors, and topic matches, then returns for each question the exact paragraphs that answer it with RFC, section, verdict (supports, partial, says_nothing, contradicts), and UTF-8 byte range, or the RFCs that did not contain an answer.",
+      "Inputs: questions (1-4) plus rfcs and/or searchTerms (1-4 each). Ranks the named RFCs, their current successors, and topic matches, then returns answers in question order (answers[i] is for questions[i]) with the exact paragraphs that answer it with RFC, section, verdict (supports, partial, says_nothing, contradicts), and UTF-8 byte range, or the RFCs that did not contain an answer.",
     annotations: rfcAgentToolAnnotations.semantic,
   },
   verifyCitation: {

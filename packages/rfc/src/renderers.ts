@@ -120,7 +120,9 @@ export const renderResearchResult = (
  * Project a research result onto the compact JSON an agent reads.
  *
  * Keeps per-question hits, verdicts, sections, exact quotes, and UTF-8 byte
- * ranges, plus any non-trivial currency report. Diagnostics, source hashes,
+ * ranges, plus any non-trivial currency report. Answers are positional:
+ * `answers[i]` answers the caller's `questions[i]`, so the question text the
+ * agent just sent is not echoed back. Diagnostics, source hashes,
  * and retrieval traces stay in the full structured result.
  *
  * @param result Version-three research result.
@@ -129,7 +131,6 @@ export const renderResearchResult = (
 export const researchResultAgentJson = (result: ResearchResult): string =>
   JSON.stringify({
     answers: result.answers.map((answer) => ({
-      question: answer.question,
       found: answer.found,
       ...(answer.found
         ? {}
