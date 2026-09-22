@@ -11,6 +11,7 @@ import {
 import { McpServer, type CallToolResult } from "@modelcontextprotocol/server";
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { Schema } from "effect";
+import { rfcAgentToolMetadata, rfcMcpAgentReferenceUri, rfcMcpInstructions } from "./agent-surface";
 import { AuthStatusSchema } from "./credentials";
 import {
   executeAuthStatus,
@@ -30,29 +31,7 @@ import {
   type RfcOperationWarning,
 } from "./operations";
 
-/**
- * Static URI for the complete model-facing RFC workflow reference.
- */
-export const rfcMcpAgentReferenceUri = "rfc://docs/agent-workflow" as const;
-
-/**
- * Cross-tool instructions advertised during MCP initialization.
- */
-export const rfcMcpInstructions = `For an ordinary known-RFC answer, call research_known_rfc exactly once, then answer and stop. Do not call verify_citation after research to re-check returned evidence, including when status is needs_review. Do not run preflight tools. Do not read the agent-workflow resource.
-
-Use this server as the complete backend for published IETF RFC questions. Do not answer RFC claims from memory or another provider. When the RFC identifier is unknown, call research_topic with { question, searchTerms } using one to four deliberate ordered technical terms. Use verify_citation only when the user supplied a quotation or explicitly requested a distinct paraphrase check.
-
-For one simple atomic question, call one research tool once. Only when that result contains neither usable accepted evidence nor a review candidate may you make at most one targeted follow-up research call. Do not rephrase valid results to chase answered status or higher confidence. For up to two explicit independent questions, keep them as separate research calls; do not invent a split for an ambiguous request.
-
-Topic search terms are transmitted verbatim in Datatracker URLs and may appear in upstream logs; never derive hidden terms or send the full question as a search term unless the user explicitly chose it.
-
-Preserve research status exactly: answered, partial, unsupported, needs_review, or needs_split. Accepted evidence may support an answer. A review candidate is canonical but unaccepted and must be quoted only as qualified review material. Keep requested and current RFC contexts distinct and never silently substitute a successor.
-
-Exact reproduction of accepted evidence needs no citation call. Verify at most two paraphrased claims once each with verify_citation, using the exact returned quote and its UTF-8 byte offset. If a direct verification verdict is fabricated, use at most one research call to locate current wording and one verification call for that replacement. Never guess wording or offsets. Unsupported, contradicted, or fabricated verdicts cannot support an unqualified claim.
-
-Operational tool errors are not research statuses. Preserve their typed error code and stop rather than substituting stale text, another provider, or memory. If a tool error reports a missing credential, ask the human operator to run rfc auth add; never request or accept the secret through MCP. A usage-accounting warning follows a successful paid operation and must not trigger a retry.
-
-Do not read the agent-workflow resource for ordinary research. Read ${rfcMcpAgentReferenceUri} only when handling a non-answer status, operational failure, citation-repair workflow, or a provenance, privacy, cost, or cache question.`;
+export { rfcAgentToolMetadata, rfcMcpAgentReferenceUri, rfcMcpInstructions } from "./agent-surface";
 
 /**
  * Complete Markdown reference exposed as a static MCP resource.
@@ -65,39 +44,39 @@ This MCP server is the complete RFC research backend. It owns live RFC discovery
 
 For one atomic question:
 
-1. Call \`research_known_rfc\` when the RFC is known, otherwise call \`research_topic\` with one to four deliberate ordered technical search terms.
+1. Call \`rfc_research_known_rfc\` when the RFC is known, otherwise call \`rfc_research_topic\` with one to four deliberate ordered technical search terms.
 2. Make at most one targeted follow-up research call, and only when the first result has neither usable accepted evidence nor a review candidate. Never loop by rephrasing a valid result to chase \`answered\` or higher confidence.
 3. When accepted evidence or a review candidate is returned, answer from that result and stop. Quote accepted evidence unchanged with provenance. Quote a review candidate only as explicitly unaccepted or \`needs_review\`.
-4. Never call \`verify_citation\` after research to re-check returned evidence, normalize formatting, or obtain alternate provenance. Use it only for a user-supplied quotation or an explicitly requested distinct paraphrase check, at most twice.
+4. Never call \`rfc_verify_citation\` after research to re-check returned evidence, normalize formatting, or obtain alternate provenance. Use it only for a user-supplied quotation or an explicitly requested distinct paraphrase check, at most twice.
 5. Stop after the budget. Preserve non-answer statuses and typed operational failures.
 
 For up to two explicit independently answerable questions, use one research call per question and keep their inputs and outputs separate. Do not invent a split for an ambiguous request; preserve \`needs_split\`.
 
 ## Tools
 
-### research_known_rfc
+### rfc_research_known_rfc
 
 Research one atomic question against a known published RFC. The server performs bounded live metadata lookup and currency traversal, researches requested and applicable current RFC contexts independently, and never silently substitutes a successor.
 
 Inputs are \`question\` and \`rfc\`. Use the exact RFC identifier, such as \`RFC9110\`.
 
-### research_topic
+### rfc_research_topic
 
 Discover and research published RFCs for one atomic topic question. Inputs are \`question\` and \`searchTerms\`. Supply one to four ordered non-empty terms, each no longer than ${datatrackerTopicSearchTermMaximumCharacters} characters. Terms are transmitted verbatim in Datatracker query URLs and may appear in diagnostics, errors, and upstream access logs. Do not generate hidden terms, rewrite the caller's phrases, or send the natural-language question upstream unless it was explicitly chosen as a term.
 
-### verify_citation
+### rfc_verify_citation
 
 Verify one factual claim against one exact RFC quotation. Inputs are \`rfc\`, \`claim\`, \`quote\`, and optional \`offset\`. The offset is an absolute UTF-8 byte offset into the exact source identified by \`sourceHash\`, not a JavaScript string index. Copy it from research provenance or omit it for a unique quotation. Never guess wording or offsets.
 
-### source_cache_status
+### rfc_source_cache_status
 
 Inspect one named RFC source-cache entry without network access.
 
-### source_cache_remove
+### rfc_source_cache_remove
 
 Remove one named RFC source-cache entry without network access. This destructive, idempotent tool requires \`confirm: true\`. There is no list-all, refresh-all, prefetch, bulk download, or bulk clear operation.
 
-### auth_status
+### rfc_auth_status
 
 Report only whether the stable TypeSafe credential identity is configured. The MCP never accepts, returns, adds, or removes credentials. If missing, ask the human operator to run \`rfc auth add\` outside MCP.
 
@@ -276,19 +255,13 @@ export const createRfcMcpServer = (
   );
 
   server.registerTool(
-    "research_known_rfc",
+    rfcAgentToolMetadata.researchKnownRfc.name,
     {
-      title: "Research a known RFC",
-      description:
-        "Inputs: question, rfc. Research one atomic question against a known published RFC. If evidence or a review candidate is returned, answer from it without a verification call. Includes bounded RFC currency traversal, provenance, status, and diagnostics.",
+      title: rfcAgentToolMetadata.researchKnownRfc.title,
+      description: rfcAgentToolMetadata.researchKnownRfc.description,
       inputSchema: toMcpSchema(KnownRfcResearchInputSchema),
       outputSchema: toMcpSchema(EvidenceBundleSchema),
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-        openWorldHint: true,
-      },
+      annotations: rfcAgentToolMetadata.researchKnownRfc.annotations,
     },
     async ({ question, rfc }) => {
       try {
@@ -303,19 +276,13 @@ export const createRfcMcpServer = (
   );
 
   server.registerTool(
-    "research_topic",
+    rfcAgentToolMetadata.researchTopic.name,
     {
-      title: "Discover and research RFCs",
-      description:
-        "Inputs: question, searchTerms (1-4). Research one atomic topic question. If evidence or a review candidate is returned, answer from it without a verification call. Terms are sent verbatim to Datatracker; results include provenance, status, and diagnostics.",
+      title: rfcAgentToolMetadata.researchTopic.title,
+      description: rfcAgentToolMetadata.researchTopic.description,
       inputSchema: toMcpSchema(TopicResearchInputSchema),
       outputSchema: toMcpSchema(EvidenceBundleSchema),
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-        openWorldHint: true,
-      },
+      annotations: rfcAgentToolMetadata.researchTopic.annotations,
     },
     async ({ question, searchTerms }) => {
       try {
@@ -334,19 +301,13 @@ export const createRfcMcpServer = (
   );
 
   server.registerTool(
-    "verify_citation",
+    rfcAgentToolMetadata.verifyCitation.name,
     {
-      title: "Verify an RFC citation",
-      description:
-        "Inputs: rfc, claim, quote; optional offset. Check one factual claim against one exact RFC quotation. Returns a verified, unsupported, contradicted, or fabricated verdict with canonical provenance.",
+      title: rfcAgentToolMetadata.verifyCitation.title,
+      description: rfcAgentToolMetadata.verifyCitation.description,
       inputSchema: toMcpSchema(CitationInputSchema),
       outputSchema: toMcpSchema(CitationVerificationResultSchema),
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-        openWorldHint: true,
-      },
+      annotations: rfcAgentToolMetadata.verifyCitation.annotations,
     },
     async ({ rfc, claim, quote, offset }) => {
       try {
@@ -365,19 +326,13 @@ export const createRfcMcpServer = (
   );
 
   server.registerTool(
-    "source_cache_status",
+    rfcAgentToolMetadata.sourceCacheStatus.name,
     {
-      title: "Inspect an RFC source cache entry",
-      description:
-        "Input: rfc. Inspect one named canonical RFC source-cache entry locally without network access.",
+      title: rfcAgentToolMetadata.sourceCacheStatus.title,
+      description: rfcAgentToolMetadata.sourceCacheStatus.description,
       inputSchema: toMcpSchema(RfcInputSchema),
       outputSchema: toMcpSchema(RfcSourceCacheStatusSchema),
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: rfcAgentToolMetadata.sourceCacheStatus.annotations,
     },
     async ({ rfc }) => {
       try {
@@ -392,19 +347,13 @@ export const createRfcMcpServer = (
   );
 
   server.registerTool(
-    "source_cache_remove",
+    rfcAgentToolMetadata.sourceCacheRemove.name,
     {
-      title: "Remove an RFC source cache entry",
-      description:
-        "Inputs: rfc, confirm=true. Remove one named canonical RFC source-cache entry locally without network access; never performs bulk removal.",
+      title: rfcAgentToolMetadata.sourceCacheRemove.title,
+      description: rfcAgentToolMetadata.sourceCacheRemove.description,
       inputSchema: toMcpSchema(SourceCacheRemoveInputSchema),
       outputSchema: toMcpSchema(RfcSourceCacheRemoveResultSchema),
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: true,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: rfcAgentToolMetadata.sourceCacheRemove.annotations,
     },
     async ({ rfc, confirm }) => {
       try {
@@ -427,19 +376,13 @@ export const createRfcMcpServer = (
   );
 
   server.registerTool(
-    "auth_status",
+    rfcAgentToolMetadata.authStatus.name,
     {
-      title: "Inspect RFC provider credential status",
-      description:
-        "No inputs. Report only whether the stable TypeSafe credential identity is configured. Never returns, accepts, adds, or removes the credential.",
+      title: rfcAgentToolMetadata.authStatus.title,
+      description: rfcAgentToolMetadata.authStatus.description,
       inputSchema: toMcpSchema(EmptyInputSchema),
       outputSchema: toMcpSchema(AuthStatusSchema),
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: rfcAgentToolMetadata.authStatus.annotations,
     },
     async () => {
       try {

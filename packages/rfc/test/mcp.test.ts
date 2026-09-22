@@ -221,7 +221,7 @@ describe("RFC MCP agent surface", () => {
     try {
       await client.connect(transport);
       expect((await client.listTools()).tools.map(({ name }) => name)).toContain(
-        "research_known_rfc",
+        "rfc_research_known_rfc",
       );
       expect((await client.listResources()).resources).toContainEqual(
         expect.objectContaining({ uri: rfcMcpAgentReferenceUri }),
@@ -236,46 +236,48 @@ describe("RFC MCP agent surface", () => {
     try {
       expect(connection.client.getInstructions()).toBe(rfcMcpInstructions);
       expect(rfcMcpInstructions).toStartWith(
-        "For an ordinary known-RFC answer, call research_known_rfc exactly once, then answer and stop.",
+        "For an ordinary known-RFC answer, call rfc_research_known_rfc exactly once, then answer and stop.",
       );
       expect(rfcMcpInstructions).toContain("at most one targeted follow-up research call");
       expect(rfcMcpInstructions).toContain("never request or accept the secret through MCP");
       expect(rfcMcpInstructions).toContain("Do not run preflight tools");
       expect(rfcMcpInstructions).toContain(
-        "Do not call verify_citation after research to re-check returned evidence",
+        "Do not call rfc_verify_citation after research to re-check returned evidence",
       );
       expect(rfcMcpInstructions).toContain("Do not read the agent-workflow resource");
       expect(
         rfcMcpInstructions.indexOf(
-          "Do not call verify_citation after research to re-check returned evidence",
+          "Do not call rfc_verify_citation after research to re-check returned evidence",
         ),
       ).toBeLessThan(300);
 
       const { tools } = await connection.client.listTools();
       expect(tools.map(({ name }) => name)).toEqual([
-        "research_known_rfc",
-        "research_topic",
-        "verify_citation",
-        "source_cache_status",
-        "source_cache_remove",
-        "auth_status",
+        "rfc_research_known_rfc",
+        "rfc_research_topic",
+        "rfc_verify_citation",
+        "rfc_source_cache_status",
+        "rfc_source_cache_remove",
+        "rfc_auth_status",
       ]);
       expect(tools.every(({ outputSchema }) => outputSchema !== undefined)).toBe(true);
-      expect(tools.find(({ name }) => name === "research_known_rfc")?.description).toStartWith(
+      expect(tools.find(({ name }) => name === "rfc_research_known_rfc")?.description).toStartWith(
         "Inputs: question, rfc.",
       );
-      expect(tools.find(({ name }) => name === "research_topic")?.description).toStartWith(
+      expect(tools.find(({ name }) => name === "rfc_research_topic")?.description).toStartWith(
         "Inputs: question, searchTerms (1-4).",
       );
-      expect(tools.find(({ name }) => name === "verify_citation")?.description).toStartWith(
+      expect(tools.find(({ name }) => name === "rfc_verify_citation")?.description).toStartWith(
         "Inputs: rfc, claim, quote; optional offset.",
       );
-      expect(tools.find(({ name }) => name === "source_cache_remove")?.annotations).toMatchObject({
+      expect(
+        tools.find(({ name }) => name === "rfc_source_cache_remove")?.annotations,
+      ).toMatchObject({
         destructiveHint: true,
         idempotentHint: true,
       });
       expect(
-        tools.find(({ name }) => name === "research_topic")?.inputSchema.properties,
+        tools.find(({ name }) => name === "rfc_research_topic")?.inputSchema.properties,
       ).toHaveProperty("searchTerms");
       expect(JSON.stringify(tools)).not.toContain("typesafeApiUrl");
       expect(JSON.stringify(tools)).not.toContain("datatrackerApiUrl");
@@ -332,12 +334,12 @@ describe("RFC MCP agent surface", () => {
       }) satisfies RfcClient) as RfcOperationDependencies["createClient"];
     const connection = await connect(makeDependencies({ createClient }));
     try {
-      const auth = await connection.client.callTool({ name: "auth_status", arguments: {} });
+      const auth = await connection.client.callTool({ name: "rfc_auth_status", arguments: {} });
       expect(auth.isError).not.toBe(true);
       expect(auth.structuredContent).toMatchObject({ kind: "auth_status", configured: true });
 
       const status = await connection.client.callTool({
-        name: "source_cache_status",
+        name: "rfc_source_cache_status",
         arguments: { rfc: "RFC9110" },
       });
       expect(status.isError).not.toBe(true);
@@ -349,14 +351,14 @@ describe("RFC MCP agent surface", () => {
       });
 
       const unconfirmed = await connection.client.callTool({
-        name: "source_cache_remove",
+        name: "rfc_source_cache_remove",
         arguments: { rfc: "RFC9110" },
       });
       expect(unconfirmed.isError).toBe(true);
       expect(operations).toEqual(["status:RFC9110"]);
 
       const removed = await connection.client.callTool({
-        name: "source_cache_remove",
+        name: "rfc_source_cache_remove",
         arguments: { rfc: "RFC9110", confirm: true },
       });
       expect(removed.isError).not.toBe(true);
@@ -404,7 +406,7 @@ describe("RFC MCP agent surface", () => {
     );
     try {
       const known = await connection.client.callTool({
-        name: "research_known_rfc",
+        name: "rfc_research_known_rfc",
         arguments: { question: "What does HTTP require?", rfc: "RFC9110" },
       });
       expect(known.isError).not.toBe(true);
@@ -417,7 +419,7 @@ describe("RFC MCP agent surface", () => {
       expect(textContent(known)).toContain("usage_accounting_failed");
 
       const topic = await connection.client.callTool({
-        name: "research_topic",
+        name: "rfc_research_topic",
         arguments: {
           question: "Which RFC defines HTTP caching?",
           searchTerms: ["HTTP caching", "cache control"],
@@ -485,7 +487,7 @@ describe("RFC MCP agent surface", () => {
 
     try {
       const withOffset = await connection.client.callTool({
-        name: "verify_citation",
+        name: "rfc_verify_citation",
         arguments: {
           rfc: "RFC9110",
           claim: "The client sends a request.",
@@ -508,7 +510,7 @@ describe("RFC MCP agent surface", () => {
       expect(rendered).toContain("Section: 1. Requirements");
 
       const withoutOffset = await connection.client.callTool({
-        name: "verify_citation",
+        name: "rfc_verify_citation",
         arguments: {
           rfc: "RFC9110",
           claim: "The client sends a request.",
@@ -577,7 +579,7 @@ describe("RFC MCP agent surface", () => {
 
       try {
         const result = await connection.client.callTool({
-          name: "verify_citation",
+          name: "rfc_verify_citation",
           arguments: {
             rfc: "RFC9110",
             claim: "The client sends a request.",
@@ -614,7 +616,7 @@ describe("RFC MCP agent surface", () => {
       ];
       for (const searchTerms of rejected) {
         const result = await connection.client.callTool({
-          name: "research_topic",
+          name: "rfc_research_topic",
           arguments: { question: "Which RFC defines HTTP caching?", searchTerms },
         });
         expect(result.isError).toBe(true);
@@ -624,7 +626,7 @@ describe("RFC MCP agent surface", () => {
       // The upper bounds themselves are accepted, so the guard rejects only
       // what is past them.
       const accepted = await connection.client.callTool({
-        name: "research_topic",
+        name: "rfc_research_topic",
         arguments: {
           question: "Which RFC defines HTTP caching?",
           searchTerms: Array.from({ length: datatrackerTopicSearchTermLimit }, () =>
@@ -649,7 +651,7 @@ describe("RFC MCP agent surface", () => {
     );
 
     try {
-      const auth = await connection.client.callTool({ name: "auth_status", arguments: {} });
+      const auth = await connection.client.callTool({ name: "rfc_auth_status", arguments: {} });
       expect(auth.isError).not.toBe(true);
       expect(auth.structuredContent).toMatchObject({
         schemaVersion: 2,
@@ -659,7 +661,7 @@ describe("RFC MCP agent surface", () => {
       expect(JSON.stringify(auth)).not.toContain("fixture-key");
 
       const unconfirmed = await connection.client.callTool({
-        name: "source_cache_remove",
+        name: "rfc_source_cache_remove",
         arguments: { rfc: "RFC9110" },
       });
       expect(unconfirmed.isError).toBe(true);
@@ -709,7 +711,7 @@ describe("RFC MCP agent surface", () => {
     );
     try {
       const result = await connection.client.callTool({
-        name: "research_known_rfc",
+        name: "rfc_research_known_rfc",
         arguments: { question: "What does HTTP require?", rfc: "RFC9110" },
       });
       expect(result.isError).toBe(true);

@@ -18,17 +18,17 @@ from memory or a second provider.
 Launch the local stdio server with `rfc mcp`. A model connected through MCP does
 not need this skill or direct CLI access: initialization instructions contain the
 bounded workflow, and `rfc://docs/agent-workflow` contains the complete agent
-reference. The typed tools are `research_known_rfc`, `research_topic`,
-`verify_citation`, `source_cache_status`, `source_cache_remove`, and
-`auth_status`.
+reference. The typed tools are `rfc_research_known_rfc`, `rfc_research_topic`,
+`rfc_verify_citation`, `rfc_source_cache_status`, `rfc_source_cache_remove`, and
+`rfc_auth_status`.
 
 Successful calls return concise text plus complete version-two structured
 content. Operational failures are MCP tool errors containing the same safe error
 envelope as the CLI. Research status and citation verdict remain domain results,
-not tool failures. `source_cache_remove` requires `confirm: true`.
+not tool failures. `rfc_source_cache_remove` requires `confirm: true`.
 
 The MCP deliberately excludes credential mutation and per-call cache or upstream
-URL overrides. If `auth_status` or a tool error reports a missing credential, ask
+URL overrides. If `rfc_auth_status` or a tool error reports a missing credential, ask
 the human operator to run `rfc auth add`; never solicit a key through MCP. Trusted
 cache and upstream overrides may be set only when the operator launches
 `rfc mcp`.
@@ -42,7 +42,7 @@ offsets.
 
 For each simple atomic user question, use this hard budget:
 
-1. Call `research_known_rfc` or `research_topic` once, or run one
+1. Call `rfc_research_known_rfc` or `rfc_research_topic` once, or run one
    `rfc research --format human` fallback call.
 2. Only when that result has no usable evidence, run at most one targeted
    follow-up research call. Do not repeatedly rephrase a valid result to chase
@@ -56,7 +56,7 @@ For each simple atomic user question, use this hard budget:
    Keep nearby protocol categories distinct rather than substituting one for
    another.
 
-A direct quote-verification request starts with one `verify_citation` tool call
+A direct quote-verification request starts with one `rfc_verify_citation` tool call
 or `rfc verify-citation` fallback call and needs no research preflight. If the
 quote is `fabricated`, use at most one research call to locate current wording
 and at most one verification call for the replacement. Never guess or

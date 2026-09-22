@@ -79,6 +79,22 @@ claude plugin validate . --strict
 claude --plugin-dir .
 ```
 
+## Install the Pi package
+
+The repository is also a Pi package. Its native extension registers the same six `rfc_*` tool names, labels, descriptions, input constraints, and bounded workflow instructions as the MCP server. It invokes the pinned published CLI directly for each tool call rather than running an MCP transport, so Bun 1.4.2 or newer must be available. It also includes the RFC lookup skill:
+
+```sh
+pi install git:github.com/wyattjoh/rfc
+```
+
+Load the checkout directly while developing:
+
+```sh
+pi -e .
+```
+
+Review the repository before installation: Pi extensions execute with the user's full system permissions. The extension retains the same credential boundary as the CLI and MCP server; it can inspect credential status but cannot add, reveal, or remove the key.
+
 ## Use it from another MCP host
 
 Run the server over stdio:
@@ -100,7 +116,7 @@ Claude Code, Claude Desktop, and other MCP hosts launch that command directly:
 }
 ```
 
-The server describes its own bounded workflow in its initialization instructions, so a connected model needs nothing else from this repository. It exposes `research_known_rfc`, `research_topic`, `verify_citation`, `source_cache_status`, `source_cache_remove` and `auth_status`. The credential is outside the model-facing surface entirely: a model can ask whether one is configured and can never read, set, or remove it.
+The server describes its own bounded workflow in its initialization instructions, so a connected model needs nothing else from this repository. It exposes `rfc_research_known_rfc`, `rfc_research_topic`, `rfc_verify_citation`, `rfc_source_cache_status`, `rfc_source_cache_remove` and `rfc_auth_status`. The credential is outside the model-facing surface entirely: a model can ask whether one is configured and can never read, set, or remove it.
 
 [`packages/rfc/README.md`](packages/rfc/README.md) is the full reference for the CLI protocol, the MCP surface, credential handling, and configuration.
 

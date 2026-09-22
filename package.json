@@ -1,6 +1,13 @@
 {
   "name": "rfc",
   "private": true,
+  "description": "Evidence-grounded IETF RFC research for CLIs and coding agents.",
+  "keywords": [
+    "ietf",
+    "mcp",
+    "pi-package",
+    "rfc"
+  ],
   "workspaces": [
     "packages/rfc-core",
     "packages/rfc"
@@ -17,9 +24,23 @@
     "hooks:install": "lefthook install"
   },
   "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.87.0",
     "lefthook": "^2.1.14",
     "oxfmt": "^0.70.0",
-    "oxlint": "^1.85.0"
+    "oxlint": "^1.85.0",
+    "typebox": "1.3.27"
   },
-  "packageManager": "bun@1.4.2"
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "packageManager": "bun@1.4.2",
+  "pi": {
+    "extensions": [
+      "./extensions/rfc.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  }
 }

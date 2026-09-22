@@ -14,14 +14,14 @@ An MCP host should launch that command directly and treat standard output as pro
 
 The model-facing tools are:
 
-- `research_known_rfc`
-- `research_topic`
-- `verify_citation`
-- `source_cache_status`
-- `source_cache_remove`
-- `auth_status`
+- `rfc_research_known_rfc`
+- `rfc_research_topic`
+- `rfc_verify_citation`
+- `rfc_source_cache_status`
+- `rfc_source_cache_remove`
+- `rfc_auth_status`
 
-Each successful tool call returns concise text plus the complete version-two result as validated structured content. Operational failures are MCP tool errors containing the same safe version-two error envelope as the CLI. Valid fail-closed research statuses and citation verdicts remain successful domain results. `source_cache_remove` requires `confirm: true` and is marked destructive and idempotent.
+Each successful tool call returns concise text plus the complete version-two result as validated structured content. Operational failures are MCP tool errors containing the same safe version-two error envelope as the CLI. Valid fail-closed research statuses and citation verdicts remain successful domain results. `rfc_source_cache_remove` requires `confirm: true` and is marked destructive and idempotent.
 
 Provider credentials are intentionally outside the model-facing mutation surface. The MCP can inspect safe credential status but can never accept, reveal, add, or remove a key. Configure the credential through `rfc auth add` before launching the server. The stored key is resolved separately for every semantic tool call.
 
