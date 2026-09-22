@@ -345,16 +345,19 @@ const citationStage = Effect.fnUntraced(function* (
       input: { claim, quote, context, section },
     }),
   );
-  const answer = yield* Effect.try({
-    try: () => Schema.decodeUnknownSync(citationAnswerSchema)(response.answers.citation_verdict),
+  const answer = yield* Schema.decodeUnknownEffect(citationAnswerSchema)(
+    response.answers.citation_verdict,
+  ).pipe(
     // The decode failure quotes the offending provider payload, so forwarding
     // its message would carry raw third-party text into the error envelope.
-    catch: () =>
-      new DecisionModelError({
-        stage: "citation",
-        reason: "The citation DecisionModel returned an unreadable verdict",
-      }),
-  });
+    Effect.mapError(
+      () =>
+        new DecisionModelError({
+          stage: "citation",
+          reason: "The citation DecisionModel returned an unreadable verdict",
+        }),
+    ),
+  );
   const probabilities = normalizeProbabilities(answer.probabilities);
   const probabilityValues = Object.values(probabilities);
   const probabilitySum = probabilityValues.reduce((sum, value) => sum + value, 0);

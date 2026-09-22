@@ -522,8 +522,6 @@ const DatatrackerRelationshipPageSchema = Schema.Struct({
   objects: Schema.Array(DatatrackerRelationshipSchema),
 });
 
-type DatatrackerRelationshipPage = Schema.Schema.Type<typeof DatatrackerRelationshipPageSchema>;
-
 const DatatrackerDocumentPageSchema = Schema.Struct({
   meta: Schema.Struct({
     next: Schema.NullOr(Schema.String.check(Schema.isMaxLength(4_096))),
@@ -531,8 +529,6 @@ const DatatrackerDocumentPageSchema = Schema.Struct({
   }),
   objects: Schema.Array(DatatrackerDocumentSchema),
 });
-
-type DatatrackerDocumentPage = Schema.Schema.Type<typeof DatatrackerDocumentPageSchema>;
 
 const TopicSearchDocumentSchema = Schema.Struct({
   rfcNumber: Schema.Natural,
@@ -548,8 +544,6 @@ const TopicSearchPageSchema = Schema.Struct({
   found: Schema.Natural,
   hits: Schema.Array(Schema.Struct({ document: TopicSearchDocumentSchema })),
 });
-
-type TopicSearchPage = Schema.Schema.Type<typeof TopicSearchPageSchema>;
 
 /**
  * Whether one search hit identifies a published RFC.
@@ -987,105 +981,55 @@ const fetchJson = Effect.fnUntraced(function* (
   return fetched;
 });
 
-const decodeDocument = (
-  value: unknown,
-  url: string,
-  attempts: number,
-): Effect.Effect<DatatrackerDocument, RfcDiscoveryError> =>
-  Effect.try({
-    try: () => {
-      const document = Schema.decodeUnknownSync(DatatrackerDocumentSchema)(value);
-      if (!isPublishedRfcDocument(document)) {
-        throw new Error("Datatracker metadata does not identify a published RFC");
-      }
-      return document;
-    },
-    catch: () =>
-      new RfcDiscoveryError({
-        stage: "decode",
-        url,
-        reason: "Datatracker returned incomplete exact RFC metadata",
-        attempts,
-      }),
-  });
+/**
+ * Decode a Datatracker payload and apply its bound and publication checks,
+ * failing with one `decode`-stage error for either kind of problem.
+ */
+const decodeBounded =
+  <S extends Schema.Decoder<unknown>>(
+    schema: S,
+    isValid: (value: S["Type"]) => boolean,
+    reason: string,
+  ) =>
+  (value: unknown, url: string, attempts: number): Effect.Effect<S["Type"], RfcDiscoveryError> => {
+    const failure = () => new RfcDiscoveryError({ stage: "decode", url, reason, attempts });
+    return Schema.decodeUnknownEffect(schema)(value).pipe(
+      Effect.mapError(failure),
+      Effect.filterOrFail(isValid, failure),
+    );
+  };
 
-const decodeRelationships = (
-  value: unknown,
-  url: string,
-  attempts: number,
-): Effect.Effect<DatatrackerRelationshipPage, RfcDiscoveryError> =>
-  Effect.try({
-    try: () => {
-      const page = Schema.decodeUnknownSync(DatatrackerRelationshipPageSchema)(value);
-      if (
-        page.objects.length > datatrackerSuccessorLimit ||
-        page.meta.total_count < page.objects.length
-      ) {
-        throw new Error("successor relationship response exceeded its bound");
-      }
-      return page;
-    },
-    catch: () =>
-      new RfcDiscoveryError({
-        stage: "decode",
-        url,
-        reason: "Datatracker returned malformed or unbounded successor relationships",
-        attempts,
-      }),
-  });
+const decodeDocument = decodeBounded(
+  DatatrackerDocumentSchema,
+  isPublishedRfcDocument,
+  "Datatracker returned incomplete exact RFC metadata",
+);
 
-const decodeDocumentPage = (
-  value: unknown,
-  url: string,
-  attempts: number,
-): Effect.Effect<DatatrackerDocumentPage, RfcDiscoveryError> =>
-  Effect.try({
-    try: () => {
-      const page = Schema.decodeUnknownSync(DatatrackerDocumentPageSchema)(value);
-      if (
-        page.objects.length > datatrackerTopicResultLimit ||
-        page.meta.total_count < page.objects.length
-      ) {
-        throw new Error("topic response exceeded its bound");
-      }
-      if (!page.objects.every(isPublishedRfcDocument)) {
-        throw new Error("Datatracker metadata does not identify a published RFC");
-      }
-      return page;
-    },
-    catch: () =>
-      new RfcDiscoveryError({
-        stage: "decode",
-        url,
-        reason: "Datatracker returned malformed or unbounded topic metadata",
-        attempts,
-      }),
-  });
+const decodeRelationships = decodeBounded(
+  DatatrackerRelationshipPageSchema,
+  (page) =>
+    page.objects.length <= datatrackerSuccessorLimit &&
+    page.meta.total_count >= page.objects.length,
+  "Datatracker returned malformed or unbounded successor relationships",
+);
 
-const decodeTopicPage = (
-  value: unknown,
-  url: string,
-  attempts: number,
-): Effect.Effect<TopicSearchPage, RfcDiscoveryError> =>
-  Effect.try({
-    try: () => {
-      const page = Schema.decodeUnknownSync(TopicSearchPageSchema)(value);
-      if (page.hits.length > datatrackerTopicResultLimit || page.found < page.hits.length) {
-        throw new Error("topic response exceeded its bound");
-      }
-      if (!page.hits.every(({ document }) => isPublishedRfcHit(document))) {
-        throw new Error("search metadata does not identify a published RFC");
-      }
-      return page;
-    },
-    catch: () =>
-      new RfcDiscoveryError({
-        stage: "decode",
-        url,
-        reason: "RFC search returned malformed or unbounded topic metadata",
-        attempts,
-      }),
-  });
+const decodeDocumentPage = decodeBounded(
+  DatatrackerDocumentPageSchema,
+  (page) =>
+    page.objects.length <= datatrackerTopicResultLimit &&
+    page.meta.total_count >= page.objects.length &&
+    page.objects.every(isPublishedRfcDocument),
+  "Datatracker returned malformed or unbounded topic metadata",
+);
+
+const decodeTopicPage = decodeBounded(
+  TopicSearchPageSchema,
+  (page) =>
+    page.hits.length <= datatrackerTopicResultLimit &&
+    page.found >= page.hits.length &&
+    page.hits.every(({ document }) => isPublishedRfcHit(document)),
+  "RFC search returned malformed or unbounded topic metadata",
+);
 
 /**
  * Normalize one topic-search hit into request-local RFC metadata.

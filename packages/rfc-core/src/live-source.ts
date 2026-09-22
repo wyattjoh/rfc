@@ -522,32 +522,26 @@ const readEntry = Effect.fnUntraced(function* (
     ),
   );
   if (contents === undefined) return { entry: undefined, corrupt: false };
+  const expectedUrl = makeRfcSourceUrl(defaultRfcEditorBaseUrl, document.rfcNumber);
+  const isValidEntry = (entry: LiveSourceCacheEntry): boolean => {
+    const fetchedAt = Date.parse(entry.fetchedAt);
+    const freshUntil = Date.parse(entry.freshUntil);
+    return (
+      entry.identifier === document.identifier &&
+      entry.rfcNumber === document.rfcNumber &&
+      entry.sourceUrl === expectedUrl &&
+      hashRfcSource(entry.text) === entry.contentHash &&
+      Number.isFinite(fetchedAt) &&
+      Number.isFinite(freshUntil) &&
+      freshUntil >= fetchedAt &&
+      freshUntil - fetchedAt <= maximumFreshnessMilliseconds &&
+      (entry.etag === null || validEtag(entry.etag))
+    );
+  };
   const decoded = yield* Effect.result(
-    Effect.try({
-      try: () => {
-        const entry = Schema.decodeUnknownSync(LiveSourceCacheEntrySchema)(
-          JSON.parse(contents) as unknown,
-        );
-        const expectedUrl = makeRfcSourceUrl(defaultRfcEditorBaseUrl, document.rfcNumber);
-        const fetchedAt = Date.parse(entry.fetchedAt);
-        const freshUntil = Date.parse(entry.freshUntil);
-        if (
-          entry.identifier !== document.identifier ||
-          entry.rfcNumber !== document.rfcNumber ||
-          entry.sourceUrl !== expectedUrl ||
-          hashRfcSource(entry.text) !== entry.contentHash ||
-          !Number.isFinite(fetchedAt) ||
-          !Number.isFinite(freshUntil) ||
-          freshUntil < fetchedAt ||
-          freshUntil - fetchedAt > maximumFreshnessMilliseconds ||
-          (entry.etag !== null && !validEtag(entry.etag))
-        ) {
-          throw new Error("invalid source cache entry");
-        }
-        return entry;
-      },
-      catch: () => new Error("corrupt source cache entry"),
-    }),
+    Schema.decodeUnknownEffect(Schema.fromJsonString(LiveSourceCacheEntrySchema))(contents).pipe(
+      Effect.filterOrFail(isValidEntry, () => new Error("invalid source cache entry")),
+    ),
   );
   return Result.isSuccess(decoded)
     ? { entry: decoded.success, corrupt: false }
