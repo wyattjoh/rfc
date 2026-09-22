@@ -20,8 +20,13 @@ import {
   writeFreshMetadata,
 } from "./metadata-cache";
 import type { RfcMetadata } from "./metadata";
+import { datatrackerTopicSearchTermLimit } from "./protocol";
 
 export type { RfcMetadata } from "./metadata";
+export {
+  datatrackerTopicSearchTermLimit,
+  datatrackerTopicSearchTermMaximumCharacters,
+} from "./protocol";
 
 /**
  * Default anonymous Datatracker v1 API root.
@@ -57,16 +62,6 @@ export const datatrackerSuccessorLimit = 64;
  * Maximum number of rows requested for one topic-search stream.
  */
 export const datatrackerTopicResultLimit = 20;
-
-/**
- * Maximum number of caller-supplied terms in one topic request.
- */
-export const datatrackerTopicSearchTermLimit = 4;
-
-/**
- * Maximum length of one caller-supplied topic term.
- */
-export const datatrackerTopicSearchTermMaximumCharacters = 200;
 
 /**
  * Maximum Datatracker requests issued by one topic discovery.
