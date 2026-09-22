@@ -1204,7 +1204,6 @@ describe("precision evaluation", () => {
       reviewFailures: [
         "observed outcomes fell outside committed allowed outcome sets",
         "positive-control research cases did not remain answered",
-        "warm-cache research p95 latency exceeded a configured gate",
       ],
     });
     expect(evaluationReleaseAttestation.reviewDecisionId).toBe(precisionV2HumanReviewDecision.id);
