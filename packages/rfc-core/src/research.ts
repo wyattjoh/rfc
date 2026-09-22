@@ -1242,27 +1242,39 @@ export const shortlistPassageCandidates = (
     .map(({ block }) => block);
 };
 
+/**
+ * Whether an atomicity judgment is decisive enough to act on.
+ *
+ * Atomicity is a binary property of the question text alone, so the label
+ * probability already states how sure the provider is. The separate
+ * self-reported confidence was ANDed against the same threshold, which
+ * double-counted the same judgment and discarded well-classified questions: an
+ * 0.8 atomic label carrying 0.5 confidence selected no passage at all. Passage
+ * relation keeps its own confidence check, because there the confidence
+ * describes passage ambiguity rather than the question.
+ *
+ * @param atomicity The atomicity judgment for the question.
+ * @param policy Acceptance policy supplying the probability threshold.
+ * @returns Whether the judged label may be acted on.
+ */
+const isDecisiveAtomicity = (atomicity: AtomicityResult, policy: ResearchPolicy): boolean =>
+  (atomicity.probabilities[atomicity.label] ?? 0) >= policy.relationConfidenceThreshold;
+
 const isConfidentAtomic = (atomicity: AtomicityResult, policy: ResearchPolicy): boolean =>
-  atomicity.label === "atomic" &&
-  (atomicity.probabilities.atomic ?? 0) >= policy.relationConfidenceThreshold &&
-  atomicity.confidence !== undefined &&
-  atomicity.confidence >= policy.relationConfidenceThreshold;
+  atomicity.label === "atomic" && isDecisiveAtomicity(atomicity, policy);
 
 /**
- * Whether a question was confidently judged to ask more than one thing.
+ * Whether a question was decisively judged to ask more than one thing.
  *
  * Mirrors {@link isConfidentAtomic} so both document selection and relation
  * scoring reach the same verdict for the same classification.
  *
  * @param atomicity The atomicity judgment for the question.
- * @param policy Acceptance policy supplying the confidence threshold.
+ * @param policy Acceptance policy supplying the probability threshold.
  * @returns Whether the compound label may be acted on.
  */
 const isConfidentCompound = (atomicity: AtomicityResult, policy: ResearchPolicy): boolean =>
-  atomicity.label === "compound" &&
-  (atomicity.probabilities.compound ?? 0) >= policy.relationConfidenceThreshold &&
-  atomicity.confidence !== undefined &&
-  atomicity.confidence >= policy.relationConfidenceThreshold;
+  atomicity.label === "compound" && isDecisiveAtomicity(atomicity, policy);
 
 const documentDecisionKey = (index: number): string => `document_${index}`;
 
@@ -1978,10 +1990,7 @@ const statusFromRelations = (
   policy: ResearchPolicy,
 ): ResearchStatus => {
   if (atomicity === undefined) return "needs_review";
-  const atomicityConfident =
-    atomicity.confidence !== undefined &&
-    atomicity.confidence >= policy.relationConfidenceThreshold &&
-    (atomicity.probabilities[atomicity.label] ?? 0) >= policy.relationConfidenceThreshold;
+  const atomicityConfident = isDecisiveAtomicity(atomicity, policy);
   if (atomicity.label === "compound" && atomicityConfident) {
     return "needs_split";
   }

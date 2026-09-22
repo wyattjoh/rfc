@@ -562,6 +562,55 @@ describe("known RFC research", () => {
     expect(result.status).toBe("needs_review");
   });
 
+  test("accepts passages when the atomicity probability is decisive but self-reported confidence is not", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    // Atomicity is a binary judgment, so the label probability already states
+    // how sure the provider is. ANDing a second self-reported confidence with
+    // the same threshold discarded well-classified questions: a 0.8 atomic
+    // judgment carrying 0.5 confidence selected no passage at all.
+    const base = makeDecisionModel([]);
+    const model = {
+      [DecisionModel.TypeId]: DecisionModel.TypeId,
+      decide: (...args: Parameters<typeof base.decide>) =>
+        Effect.map(base.decide(...args), (response) => {
+          const answers = (response as { readonly answers: Record<string, unknown> }).answers;
+          if (!("question_atomicity" in answers)) return response;
+          return {
+            ...response,
+            answers: {
+              ...answers,
+              question_atomicity: {
+                label: "atomic",
+                probabilities: { atomic: 0.8, compound: 0.2 },
+                confidence: 0.5,
+              },
+            },
+          };
+        }),
+    } as unknown as DecisionModel.DecisionModel;
+    const client = await createRfcClient({
+      cacheDirectory,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      metadataSource: async () => [rfcDocument],
+      rfcSourceFetcher: makeSourceFetcher(sourceText),
+      decisionModel: model,
+      policyPreset: "precision-v2",
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+    clients.push(client);
+
+    const result = await client.research({
+      schemaVersion: 2,
+      question: "What must the client send?",
+      rfc: "RFC9110",
+    });
+
+    expect(result.diagnostics.candidates?.selectedPassages ?? 0).toBeGreaterThan(0);
+    expect(result.evidence.length).toBeGreaterThan(0);
+  });
+
   test("retrieves request-local metadata, caches source text, and runs two semantic stages", async () => {
     const cacheDirectory = await makeCacheDirectory();
     const calls: Array<unknown> = [];
