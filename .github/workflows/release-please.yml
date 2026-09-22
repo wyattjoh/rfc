@@ -22,6 +22,7 @@ jobs:
       releases_created: ${{ steps.release.outputs.releases_created }}
       rfc_core_release_created: ${{ steps.release.outputs['packages/rfc-core--release_created'] }}
       rfc_release_created: ${{ steps.release.outputs['packages/rfc--release_created'] }}
+      rfc_pi_release_created: ${{ steps.release.outputs['packages/rfc-pi--release_created'] }}
     steps:
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         id: release
@@ -58,3 +59,6 @@ jobs:
       - name: Publish @wyattjoh/rfc
         if: ${{ needs.release-please.outputs.rfc_release_created == 'true' }}
         run: npm publish --workspace packages/rfc --access public
+      - name: Publish @wyattjoh/rfc-pi
+        if: ${{ needs.release-please.outputs.rfc_pi_release_created == 'true' }}
+        run: npm publish --workspace packages/rfc-pi --access public

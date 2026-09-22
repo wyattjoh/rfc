@@ -128,7 +128,7 @@ export interface CredentialStore {
 }
 
 /**
- * The public identity of the credential used by auth status and mutation
+ * The public identity of the credential used by auth inspection and mutation
  * results. It contains no credential value or derivative.
  */
 export interface CredentialStoreIdentity {
@@ -339,7 +339,7 @@ export const AuthAddResultSchema = Schema.Struct({
 export type AuthAddResult = Schema.Schema.Type<typeof AuthAddResultSchema>;
 
 /**
- * Versioned result emitted by auth status.
+ * Versioned result emitted by the bare auth command.
  */
 export const AuthStatusSchema = Schema.Struct({
   schemaVersion: Schema.Literal(authSchemaVersion),

@@ -9,19 +9,15 @@ It is precision-first: when the evidence does not support an answer, it returns 
 >
 > Automatic answering is disabled in published configurations because the latest precision calibration was rejected. The retrieval, provenance, and citation machinery is tested, but the engine returns evidence and a non-answer status until a calibration passes review. See [ADR 0004](docs/adr/0004-gate-automatic-answers-on-a-reviewed-calibration.md) and the [recorded release decision](packages/rfc-core/src/precision-v2-release-decision.ts).
 
-## Install
+## Run
 
-Requires [Bun](https://bun.sh) 1.4.2 or newer. The packages ship raw TypeScript and Bun executes it directly.
-
-```sh
-bun add --global @wyattjoh/rfc
-```
+Requires [Bun](https://bun.sh) 1.4.2 or newer. The packages ship raw TypeScript and Bun executes it directly. Run the latest published CLI through `bunx`; no global installation is required.
 
 Store a [TypeSafe](https://typesafe.ai) API key in your OS credential manager — macOS Keychain, Linux Secret Service, or Windows Credential Manager. The key is never accepted as a command-line argument.
 
 ```sh
-rfc auth add        # prompts, or use --stdin for automation
-rfc auth status
+bunx @wyattjoh/rfc@latest auth login # prompts, or use --stdin for automation
+bunx @wyattjoh/rfc@latest auth
 ```
 
 ## Quickstart
@@ -29,15 +25,15 @@ rfc auth status
 Human invocations accept positional arguments and print readable output by default:
 
 ```sh
-rfc research "What must a client send in a request?" RFC9110
-rfc research "Which RFC defines HTTP caching?" \
+bunx @wyattjoh/rfc@latest research "What must a client send in a request?" RFC9110
+bunx @wyattjoh/rfc@latest research "Which RFC defines HTTP caching?" \
   --search-term "HTTP caching" \
   --search-term "cache control"
-rfc verify-citation RFC9110 \
+bunx @wyattjoh/rfc@latest verify-citation RFC9110 \
   "A client must send a target resource." \
   "The client MUST send a request containing the target resource."
-rfc cache status RFC9110
-rfc costs
+bunx @wyattjoh/rfc@latest cache status RFC9110
+bunx @wyattjoh/rfc@latest costs
 ```
 
 The equivalent long flags remain available, including `--question`, `--rfc`, `--claim`, and `--quote`. Pass `--format json` when a human-style invocation needs machine-readable output.
@@ -46,20 +42,20 @@ Agents and programs can continue sending the unchanged version-two JSON protocol
 
 ```sh
 echo '{"schemaVersion":2,"question":"What must a client send in a request?","rfc":"RFC9110"}' \
-  | rfc research
+  | bunx @wyattjoh/rfc@latest research
 
 echo '{"schemaVersion":2,"question":"Which RFC defines HTTP caching?","rfc":null,"searchTerms":["HTTP caching","cache control"]}' \
-  | rfc research
+  | bunx @wyattjoh/rfc@latest research
 
 echo '{"schemaVersion":2,"rfc":"RFC9110","claim":"A client must send a target resource.","quote":"The client MUST send a request containing the target resource.","offset":null}' \
-  | rfc verify-citation
+  | bunx @wyattjoh/rfc@latest verify-citation
 ```
 
 Errors remain versioned JSON envelopes on standard error for both input styles.
 
 ## Install the Claude Code plugin
 
-The repository is a Claude Code marketplace containing the `rfc` plugin. The plugin bundles the RFC lookup skill and starts the pinned published MCP server through `bunx`, so Bun 1.4.2 or newer must be available:
+The repository is a Claude Code marketplace containing the `rfc` plugin. The plugin bundles the RFC lookup skill and starts the latest published MCP server through `bunx`, so Bun 1.4.2 or newer must be available:
 
 ```sh
 claude plugin marketplace add wyattjoh/rfc
@@ -69,7 +65,7 @@ claude plugin install rfc@wyattjoh-rfc --scope user
 Authenticate once outside Claude Code, then start a fresh session:
 
 ```sh
-bunx @wyattjoh/rfc@0.1.0 auth add
+bunx @wyattjoh/rfc@latest auth login
 ```
 
 The plugin exposes the MCP tools automatically and registers the skill as `/rfc:rfc-lookup`. For local development, validate and load the checkout directly:
@@ -81,10 +77,10 @@ claude --plugin-dir .
 
 ## Install the Pi package
 
-The repository is also a Pi package. Its native extension registers the same six `rfc_*` tool names, labels, descriptions, input constraints, and bounded workflow instructions as the MCP server. It invokes the pinned published CLI directly for each tool call rather than running an MCP transport, so Bun 1.4.2 or newer must be available. It also includes the RFC lookup skill:
+The published `@wyattjoh/rfc-pi` Pi package registers the same six `rfc_*` tool names, labels, descriptions, input constraints, and bounded workflow instructions as the MCP server. It invokes the latest published CLI directly for each tool call rather than running an MCP transport, so Bun 1.4.2 or newer must be available. It also includes the RFC lookup skill:
 
 ```sh
-pi install git:github.com/wyattjoh/rfc
+pi install npm:@wyattjoh/rfc-pi@latest
 ```
 
 Load the checkout directly while developing:
@@ -100,7 +96,7 @@ Review the repository before installation: Pi extensions execute with the user's
 Run the server over stdio:
 
 ```sh
-rfc mcp
+bunx @wyattjoh/rfc@latest mcp
 ```
 
 Claude Code, Claude Desktop, and other MCP hosts launch that command directly:
@@ -109,8 +105,8 @@ Claude Code, Claude Desktop, and other MCP hosts launch that command directly:
 {
   "mcpServers": {
     "rfc": {
-      "command": "rfc",
-      "args": ["mcp"]
+      "command": "bunx",
+      "args": ["@wyattjoh/rfc@latest", "mcp"]
     }
   }
 }
@@ -134,13 +130,15 @@ Provider endpoint overrides must use `https` outside loopback, so the credential
 
 ## Repository layout
 
-| Path                               | What it is                                                                                                        |
-| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `packages/rfc`                     | The published CLI and MCP server                                                                                  |
-| `packages/rfc-core`                | The published engine: discovery, currency, retrieval, evidence selection, citation                                |
-| `docs/adr`                         | Architecture decision records                                                                                     |
-| `CONTEXT.md`                       | Domain vocabulary                                                                                                 |
-| `docs/agents`, `skills`, `.claude` | Tooling for AI agents working _on_ this repository — not product documentation, and not shipped in either package |
+| Path                     | What it is                                                                         |
+| ------------------------ | ---------------------------------------------------------------------------------- |
+| `packages/rfc`           | The published CLI and MCP server                                                   |
+| `packages/rfc-core`      | The published engine: discovery, currency, retrieval, evidence selection, citation |
+| `packages/rfc-pi`        | The published native Pi extension and RFC lookup skill                             |
+| `docs/adr`               | Architecture decision records                                                      |
+| `CONTEXT.md`             | Domain vocabulary                                                                  |
+| `skills/rfc-lookup`      | Claude Code plugin link to the lookup skill published from `packages/rfc-pi`       |
+| `docs/agents`, `.claude` | Tooling for AI agents working _on_ this repository — not product documentation     |
 
 ## Development
 

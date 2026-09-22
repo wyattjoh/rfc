@@ -13,7 +13,7 @@ Every expected semantic outcome is exact while `precision-v2` remains uncalibrat
 ## Running one
 
 ```sh
-rfc auth status
+rfc auth
 bun run evaluate:live
 ```
 

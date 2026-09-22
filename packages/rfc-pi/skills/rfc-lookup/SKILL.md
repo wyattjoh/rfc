@@ -29,7 +29,7 @@ not tool failures. `rfc_source_cache_remove` requires `confirm: true`.
 
 The MCP deliberately excludes credential mutation and per-call cache or upstream
 URL overrides. If `rfc_auth_status` or a tool error reports a missing credential, ask
-the human operator to run `rfc auth add`; never solicit a key through MCP. Trusted
+the human operator to run `rfc auth login`; never solicit a key through MCP. Trusted
 cache and upstream overrides may be set only when the operator launches
 `rfc mcp`.
 
@@ -94,13 +94,13 @@ The TypeSafe key is stored only through Bun's OS credential manager. It is never
 an argv value, environment-variable authority, repository file, or output.
 
 ```sh
-rfc auth status
-rfc auth add
+rfc auth
+rfc auth login
 rfc auth remove
 ```
 
-`auth add` uses a masked TTY prompt. Automation may pipe one protected,
-single-line key through `rfc auth add --stdin`. If the credential store is
+`auth login` uses a masked TTY prompt. Automation may pipe one protected,
+single-line key through `rfc auth login --stdin`. If the credential store is
 unavailable or denied, report the typed error; do not bypass `Bun.secrets` with
 a plaintext fallback.
 
@@ -243,7 +243,7 @@ and stop. Common recovery actions:
 | Code                                                                         | Recovery                                                                                          |
 | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
 | `invalid_input`                                                              | Correct the version-two JSON, RFC, or ordered search terms.                                       |
-| `credential_missing`                                                         | Run `rfc auth add` or `rfc auth add --stdin`.                                                     |
+| `credential_missing`                                                         | Run `rfc auth login` or `rfc auth login --stdin`.                                                 |
 | `credential_store_unavailable` / `credential_access_denied`                  | Unlock or authorize the OS store; never use plaintext fallback.                                   |
 | `discovery_failed`                                                           | Report the Datatracker failure and URL; do not use stale or invented metadata.                    |
 | `source_cache_failed` / `source_fetch_failed` / `source_revalidation_failed` | Retry the authoritative source operation; do not substitute another representation or stale text. |

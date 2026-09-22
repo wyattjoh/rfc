@@ -1,0 +1,53 @@
+{
+  "name": "@wyattjoh/rfc-pi",
+  "version": "0.1.0",
+  "description": "Native Pi extension and lookup skill for evidence-grounded IETF RFC research.",
+  "keywords": [
+    "ietf",
+    "pi-extension",
+    "pi-package",
+    "rfc"
+  ],
+  "license": "MIT",
+  "author": "Wyatt Johnson",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wyattjoh/rfc.git",
+    "directory": "packages/rfc-pi"
+  },
+  "files": [
+    "extensions",
+    "skills"
+  ],
+  "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "test": "bun test test",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@wyattjoh/rfc": "0.2.1",
+    "@wyattjoh/rfc-core": "0.1.0"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.2",
+    "typescript": "7.0.2"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "engines": {
+    "bun": ">=1.4.2"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/rfc.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  }
+}

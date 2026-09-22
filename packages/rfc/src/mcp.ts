@@ -78,7 +78,7 @@ Remove one named RFC source-cache entry without network access. This destructive
 
 ### rfc_auth_status
 
-Report only whether the stable TypeSafe credential identity is configured. The MCP never accepts, returns, adds, or removes credentials. If missing, ask the human operator to run \`rfc auth add\` outside MCP.
+Report only whether the stable TypeSafe credential identity is configured. The MCP never accepts, returns, adds, or removes credentials. If missing, ask the human operator to run \`rfc auth login\` outside MCP.
 
 ## Research statuses
 
@@ -108,7 +108,7 @@ Preserve exact quotes, RFC identifiers, requested/current context roles, relatio
 Operational failures are returned as MCP tool errors containing the safe version-two RFC error envelope. Report the code and stop. In particular:
 
 - \`invalid_input\`: correct the bounded tool input.
-- \`credential_missing\`: ask the human to run \`rfc auth add\`.
+- \`credential_missing\`: ask the human to run \`rfc auth login\`.
 - \`credential_store_unavailable\` or \`credential_access_denied\`: ask the human to unlock or authorize the OS credential store; never use plaintext fallback.
 - \`discovery_failed\`: report the Datatracker failure; do not invent or use stale metadata.
 - \`source_cache_failed\`, \`source_fetch_failed\`, or \`source_revalidation_failed\`: report the authoritative source failure; never serve stale text or substitute another representation.

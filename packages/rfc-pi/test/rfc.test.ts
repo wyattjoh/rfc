@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import rfcExtension from "../../../extensions/rfc";
-import { rfcAgentToolMetadata, rfcMcpInstructions } from "../src";
+import { rfcAgentToolMetadata, rfcMcpInstructions } from "@wyattjoh/rfc";
+import rfcExtension from "../extensions/rfc";
 
 describe("Pi RFC extension", () => {
   test("registers the MCP tool surface with shared names and descriptions", () => {

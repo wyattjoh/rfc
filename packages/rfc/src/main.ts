@@ -629,8 +629,8 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
     ]),
   );
 
-  const authAddCommand = Command.make(
-    "add",
+  const authLoginCommand = Command.make(
+    "login",
     {
       format,
       stdin: credentialFromStdin,
@@ -661,20 +661,6 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
     }),
   ).pipe(Command.withDescription("Store or replace the TypeSafe API key"));
 
-  const authStatusCommand = Command.make(
-    "status",
-    { format },
-    Effect.fn(function* ({ format }) {
-      const result = yield* Effect.tryPromise({
-        try: () => executeAuthStatus(dependencies),
-        catch: (error) => error,
-      });
-      yield* writeStdout(
-        resolveOutputFormat(format) === "human" ? renderAuthStatus(result) : JSON.stringify(result),
-      );
-    }),
-  ).pipe(Command.withDescription("Inspect TypeSafe credential configuration without revealing it"));
-
   const authRemoveCommand = Command.make(
     "remove",
     { format },
@@ -697,9 +683,21 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
     }),
   ).pipe(Command.withDescription("Remove the stored TypeSafe API key"));
 
-  const authCommand = Command.make("auth").pipe(
-    Command.withDescription("Manage the TypeSafe API key in the OS credential manager"),
-    Command.withSubcommands([authAddCommand, authStatusCommand, authRemoveCommand]),
+  const authCommand = Command.make(
+    "auth",
+    { format },
+    Effect.fn(function* ({ format }) {
+      const result = yield* Effect.tryPromise({
+        try: () => executeAuthStatus(dependencies),
+        catch: (error) => error,
+      });
+      yield* writeStdout(
+        resolveOutputFormat(format) === "human" ? renderAuthStatus(result) : JSON.stringify(result),
+      );
+    }),
+  ).pipe(
+    Command.withDescription("Inspect or manage the TypeSafe API key in the OS credential manager"),
+    Command.withSubcommands([authLoginCommand, authRemoveCommand]),
   );
 
   const costsCommand = Command.make(

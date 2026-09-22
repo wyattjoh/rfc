@@ -18,7 +18,7 @@ Preserve research status exactly: answered, partial, unsupported, needs_review, 
 
 Exact reproduction of accepted evidence needs no citation call. Verify at most two paraphrased claims once each with rfc_verify_citation, using the exact returned quote and its UTF-8 byte offset. If a direct verification verdict is fabricated, use at most one research call to locate current wording and one verification call for that replacement. Never guess wording or offsets. Unsupported, contradicted, or fabricated verdicts cannot support an unqualified claim.
 
-Operational tool errors are not research statuses. Preserve their typed error code and stop rather than substituting stale text, another provider, or memory. If a tool error reports a missing credential, ask the human operator to run rfc auth add; never request or accept the secret through MCP. A usage-accounting warning follows a successful paid operation and must not trigger a retry.
+Operational tool errors are not research statuses. Preserve their typed error code and stop rather than substituting stale text, another provider, or memory. If a tool error reports a missing credential, ask the human operator to run rfc auth login; never request or accept the secret through MCP. A usage-accounting warning follows a successful paid operation and must not trigger a retry.
 
 Do not read the agent-workflow resource for ordinary research. Read ${rfcMcpAgentReferenceUri} only when handling a non-answer status, operational failure, citation-repair workflow, or a provenance, privacy, cost, or cache question.`;
 

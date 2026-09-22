@@ -201,7 +201,7 @@ describe("authentication process protocol", () => {
     };
     const secret = "stdin-secret-value";
     const result = await runAuth(
-      ["auth", "add", "--stdin", "--format", "json"],
+      ["auth", "login", "--stdin", "--format", "json"],
       `${secret}\n`,
       store,
     );
@@ -220,13 +220,18 @@ describe("authentication process protocol", () => {
     expect(stored as string | null).toBe(secret);
   });
 
-  test("uses the injected prompt for interactive add and rejects non-TTY prompt fallback", async () => {
+  test("uses the injected prompt for interactive login and rejects non-TTY prompt fallback", async () => {
     const store = makeCredentialStore(makeNativeSecrets());
-    const prompted = await runAuth(["auth", "add"], undefined, store, async () => "prompt-secret");
+    const prompted = await runAuth(
+      ["auth", "login"],
+      undefined,
+      store,
+      async () => "prompt-secret",
+    );
     expect(prompted.exitCode).toBe(0);
     expect(prompted.stdout).not.toContain("prompt-secret");
 
-    const rejected = await runAuth(["auth", "add"], "piped-secret\n", store, async () => {
+    const rejected = await runAuth(["auth", "login"], "piped-secret\n", store, async () => {
       throw new CredentialInputError({
         reason: "Interactive credential input requires a TTY; use --stdin for automation",
       });
@@ -239,9 +244,9 @@ describe("authentication process protocol", () => {
     expect(rejected.stderr).not.toContain("piped-secret");
   });
 
-  test("status and remove expose only safe metadata and deterministic absence", async () => {
+  test("bare auth and remove expose only safe metadata and deterministic absence", async () => {
     const store = makeCredentialStore(makeNativeSecrets("hidden-secret"));
-    const status = await runAuth(["auth", "status", "--format", "json"], undefined, store);
+    const status = await runAuth(["auth", "--format", "json"], undefined, store);
     expect(status.exitCode).toBe(0);
     expect(status.stdout).not.toContain("hidden-secret");
     expect(JSON.parse(status.stdout)).toMatchObject({ configured: true });
@@ -252,9 +257,23 @@ describe("authentication process protocol", () => {
     expect(JSON.parse(absent.stdout)).toMatchObject({ removed: false, configured: false });
   });
 
+  test("rejects the retired auth add and auth status subcommands", async () => {
+    const store = makeCredentialStore(makeNativeSecrets("hidden-secret"));
+
+    for (const args of [
+      ["auth", "add"],
+      ["auth", "status"],
+    ]) {
+      const result = await runAuth(args, undefined, store);
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(JSON.parse(result.stderr)).toMatchObject({ error: { code: "invalid_input" } });
+    }
+  });
+
   test("maps credential-store failures and rejects argv secrets without redaction leaks", async () => {
     const secret = "argv-secret-value";
-    const argv = await runAuth(["auth", "add", `--api-key=${secret}`], undefined, {
+    const argv = await runAuth(["auth", "login", `--api-key=${secret}`], undefined, {
       get: async () => null,
       set: async () => undefined,
       delete: async () => false,
@@ -270,7 +289,7 @@ describe("authentication process protocol", () => {
       },
       delete: async () => false,
     };
-    const result = await runAuth(["auth", "add", "--stdin"], `${secret}\n`, failing);
+    const result = await runAuth(["auth", "login", "--stdin"], `${secret}\n`, failing);
     expect(result.exitCode).toBe(1);
     expect(result.stderr).not.toContain(secret);
     expect(JSON.parse(result.stderr)).toMatchObject({
@@ -294,7 +313,7 @@ describe("authentication process protocol", () => {
       `--credential=${secret}`,
       "--api-token",
     ]) {
-      const result = await runAuth(["auth", "add", argument], undefined, store);
+      const result = await runAuth(["auth", "login", argument], undefined, store);
       expect(result.exitCode).toBe(1);
       expect(result.stdout).toBe("");
       expect(result.stderr).not.toContain(secret);
@@ -319,8 +338,8 @@ describe("authentication process protocol", () => {
       "--search-term=tokenizer",
       "--policy-preset=balanced",
     ]) {
-      const result = await runAuth(["auth", "status", argument], undefined, store);
-      // The flag is not valid for `auth status`, but it must fail as an
+      const result = await runAuth(["auth", argument], undefined, store);
+      // The flag is not valid for bare `auth`, but it must fail as an
       // ordinary parse error rather than as a rejected credential argument.
       expect(result.stderr).not.toContain("must be supplied through --stdin");
     }

@@ -18,7 +18,7 @@
     },
     "packages/rfc": {
       "name": "@wyattjoh/rfc",
-      "version": "0.1.0",
+      "version": "0.2.1",
       "bin": {
         "rfc": "./src/bin.ts",
       },
@@ -45,6 +45,22 @@
       "devDependencies": {
         "@types/bun": "1.4.2",
         "typescript": "7.0.2",
+      },
+    },
+    "packages/rfc-pi": {
+      "name": "@wyattjoh/rfc-pi",
+      "version": "0.1.0",
+      "dependencies": {
+        "@wyattjoh/rfc": "0.2.1",
+        "@wyattjoh/rfc-core": "0.1.0",
+      },
+      "devDependencies": {
+        "@types/bun": "1.4.2",
+        "typescript": "7.0.2",
+      },
+      "peerDependencies": {
+        "@earendil-works/pi-coding-agent": "*",
+        "typebox": "*",
       },
     },
   },
@@ -340,6 +356,8 @@
     "@wyattjoh/rfc": ["@wyattjoh/rfc@workspace:packages/rfc"],
 
     "@wyattjoh/rfc-core": ["@wyattjoh/rfc-core@workspace:packages/rfc-core"],
+
+    "@wyattjoh/rfc-pi": ["@wyattjoh/rfc-pi@workspace:packages/rfc-pi"],
 
     "agent-base": ["agent-base@9.0.0", "", {}, "sha512-TQf59BsZnytt8GdJKLPfUZ54g/iaUL2OWDSFCCvMOhsHduDQxO8xC4PNeyIkVcA5KwL2phPSv0douC0fgWzmnA=="],
 

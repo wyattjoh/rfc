@@ -23,7 +23,7 @@ The model-facing tools are:
 
 Each successful tool call returns concise text plus the complete version-two result as validated structured content. Operational failures are MCP tool errors containing the same safe version-two error envelope as the CLI. Valid fail-closed research statuses and citation verdicts remain successful domain results. `rfc_source_cache_remove` requires `confirm: true` and is marked destructive and idempotent.
 
-Provider credentials are intentionally outside the model-facing mutation surface. The MCP can inspect safe credential status but can never accept, reveal, add, or remove a key. Configure the credential through `rfc auth add` before launching the server. The stored key is resolved separately for every semantic tool call.
+Provider credentials are intentionally outside the model-facing mutation surface. The MCP can inspect safe credential status but can never accept, reveal, add, or remove a key. Configure the credential through `rfc auth login` before launching the server. The stored key is resolved separately for every semantic tool call.
 
 Trusted operators may select the same deterministic test or self-hosted boundaries at process startup:
 
@@ -98,23 +98,23 @@ The TypeSafe API key is stored by Bun's experimental `Bun.secrets` API under thi
 - service: `com.wyattjoh.rfc`
 - name: `typesafe-api-key`
 
-Add it interactively with a masked prompt:
+Store it interactively with a masked login prompt:
 
 ```sh
-rfc auth add
+rfc auth login
 ```
 
 For automation, explicitly pipe the key through standard input. It is never accepted as an argv value:
 
 ```sh
-cat /path/to/a-protected-key-input | rfc auth add --stdin
+cat /path/to/a-protected-key-input | rfc auth login --stdin
 ```
 
-`auth status` reports only whether a key is configured and the service/name identity. `auth remove` is deterministic: its versioned JSON result reports `removed: true` when a key existed and `removed: false` when it was already absent. Human output is the default for auth commands; add `--format json` for the versioned process result. The key is not included in command output, diagnostics, snapshots, or error envelopes.
+Bare `auth` reports only whether a key is configured and the service/name identity. `auth remove` is deterministic: its versioned JSON result reports `removed: true` when a key existed and `removed: false` when it was already absent. Human output is the default for auth commands; add `--format json` for the versioned process result. The key is not included in command output, diagnostics, snapshots, or error envelopes.
 
 Bun maps the store to the host credential service: macOS Keychain, Linux Secret Service (libsecret, such as GNOME Keyring or KWallet), or Windows Credential Manager. Linux requires a running and unlocked Secret Service daemon; macOS requires Keychain access; Windows requires Credential Manager. This repository pins Bun `1.4.2` in `package.json` and tests against that version because `Bun.secrets` is experimental and may change.
 
-To migrate an existing setup, run `rfc auth add`, verify with `rfc auth status`, then delete the obsolete plaintext, `.env`, Varlock, dotenv, or 1Password-backed TypeSafe API-key configuration. Research, citation verification, and live evaluation all resolve this same credential lazily before constructing the provider.
+To migrate an existing setup, run `rfc auth login`, verify with `rfc auth`, then delete the obsolete plaintext, `.env`, Varlock, dotenv, or 1Password-backed TypeSafe API-key configuration. Research, citation verification, and live evaluation all resolve this same credential lazily before constructing the provider.
 
 ## Precision calibration
 
@@ -123,7 +123,7 @@ Automatic answering is off. `answered` requires a locally present calibration re
 Run a calibration against the live provider only through the explicit evaluator, after storing a credential. It costs money and reaches the network:
 
 ```sh
-rfc auth status
+rfc auth
 bun run evaluate:live
 ```
 

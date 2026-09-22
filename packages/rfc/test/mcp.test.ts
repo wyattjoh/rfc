@@ -720,7 +720,7 @@ describe("RFC MCP agent surface", () => {
         kind: "error",
         error: {
           code: "credential_missing",
-          message: "No TypeSafe API key is configured; run `rfc auth add`",
+          message: "No TypeSafe API key is configured; run `rfc auth login`",
         },
       });
       expect(result.structuredContent).toBeUndefined();

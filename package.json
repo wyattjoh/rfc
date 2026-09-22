@@ -10,7 +10,8 @@
   ],
   "workspaces": [
     "packages/rfc-core",
-    "packages/rfc"
+    "packages/rfc",
+    "packages/rfc-pi"
   ],
   "scripts": {
     "build": "bun run --cwd packages/rfc-core build && bun run --cwd packages/rfc build",
@@ -20,7 +21,7 @@
     "benchmark:topic": "bun run --cwd packages/rfc-core benchmark:topic",
     "evaluate:live": "bun run packages/rfc/src/live-evaluation-bin.ts",
     "test": "bun test packages",
-    "typecheck": "bun run --cwd packages/rfc-core typecheck && bun run --cwd packages/rfc typecheck",
+    "typecheck": "bun run --cwd packages/rfc-core typecheck && bun run --cwd packages/rfc typecheck && bun run --cwd packages/rfc-pi typecheck",
     "hooks:install": "lefthook install"
   },
   "devDependencies": {
@@ -37,10 +38,10 @@
   "packageManager": "bun@1.4.2",
   "pi": {
     "extensions": [
-      "./extensions/rfc.ts"
+      "./packages/rfc-pi/extensions/rfc.ts"
     ],
     "skills": [
-      "./skills"
+      "./packages/rfc-pi/skills"
     ]
   }
 }
