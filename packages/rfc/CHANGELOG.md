@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.1](https://github.com/wyattjoh/rfc/compare/rfc-v0.3.0...rfc-v0.3.1) (2026-09-22)
+
+
+### Bug Fixes
+
+* expose agent entry points ([56dd351](https://github.com/wyattjoh/rfc/commit/56dd3510b439f59c5580cdf777114eebd8faf546))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @wyattjoh/rfc-core bumped from 0.1.0 to 0.1.1
+
 ## [0.3.0](https://github.com/wyattjoh/rfc/compare/rfc-v0.2.1...rfc-v0.3.0) (2026-09-22)
 
 
