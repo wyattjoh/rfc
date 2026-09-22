@@ -984,9 +984,9 @@ export const evaluationPolicyDigest = sha256(evaluationPolicy);
 /**
  * Release-bound calibration attestation.
  *
- * Live discovery changed the candidate distribution. The current reviewed
- * report is rejected, so activation remains disabled until a new passing report
- * and authoritative source manifest are accepted.
+ * The current reviewed report passed every gate and is accepted. Activation
+ * still requires the explicit opt-in and the exact local report artifact, and
+ * lapses when the report expires.
  */
 export type EvaluationReleaseAttestation = {
   readonly status: "pending_live_calibration" | "accepted" | "rejected";
@@ -1020,10 +1020,11 @@ export const evaluationReleaseAttestation: EvaluationReleaseAttestation = Object
     RFC6749: ["f204fc8661d6c92d2ec6e0b54808f961a9ad26e792f57f312d9528335519bd71"],
     RFC7230: ["c7fdc8bebdf1f8195f731592c47f5ea822b489436fd905b01b55ef531fca4120"],
     RFC7235: ["abfb45a43fdebffc640b51fae46f480e65fc01238f244f94b1bcf2c20da0b862"],
-    RFC7486: ["e12f86ba32e7501945ff7c796107e47503a2ece45cd9309486117fd9e94bd65a"],
     RFC7615: ["496983fa766685c2d253a6094aed1f343152f4d3ab3367264e132264cbe4c4c7"],
     RFC7616: ["65e4770b3c3bfe129cdaaca358454118a6c10fd261dd3822e07ca786199e907b"],
     RFC7617: ["bc941321da9912fbb1bc92ad1820848ddfd3283dbfbc30f26ea2800bdaf541db"],
+    RFC7804: ["a9bf19825ab06a0d3c6d6770c9074ab1dfe9819932530f360da1a82262c84059"],
+    RFC8053: ["1b15253bce813d1417d253214fa6580c71b811dfc11604fe68c24e385c1f86be"],
     RFC8252: ["4233c0650ec7e7918c20e0fde2dc565f85e2aa2d4c18123e3cd834295c2f68d0"],
     RFC8446: ["47871bc8820a2c3b6ea89f061055577058862cf543686b82d10131239702b3bd"],
     RFC8615: ["02d45caeb86c00197d30428472102bb558881fa61937804330c1242a0be5b5dc"],

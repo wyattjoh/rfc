@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
+  automaticAnswerActivationFromReport,
   evaluationCorpus,
   evaluationSchemaVersion,
   createRfcClient,
@@ -727,7 +728,7 @@ describe("rfc process protocol", () => {
   });
 
   if (existsSync(reviewedReleaseReportPath)) {
-    test("keeps automatic answers disabled for the reviewed rejected report", () => {
+    test("activates automatic answers only on explicit opt-in with the reviewed report", async () => {
       const config = {
         modelAlias: "jev-1.13.0",
         policyPreset: "precision-v2",
@@ -739,10 +740,14 @@ describe("rfc process protocol", () => {
         evaluationOutput: reviewedReleaseReportPath,
       } satisfies RfcCliConfig;
 
+      const report: unknown = await Bun.file(reviewedReleaseReportPath).json();
+
       expect(
         automaticAnswerActivationFor({ ...config, automaticAnswerEnabled: false }),
       ).toBeUndefined();
-      expect(automaticAnswerActivationFor(config)).toBeUndefined();
+      expect(automaticAnswerActivationFor(config) !== undefined).toBe(
+        automaticAnswerActivationFromReport(report) !== undefined,
+      );
     });
   }
 

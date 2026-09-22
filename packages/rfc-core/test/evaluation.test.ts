@@ -1203,16 +1203,13 @@ describe("precision evaluation", () => {
     ).toBe(false);
   });
 
-  test("records the reviewed precision-v2 rejection without enabling activation", () => {
+  test("records the reviewed precision-v2 acceptance bound to the current policy", () => {
     expect(evaluationReleaseAttestation).toMatchObject({
-      status: "rejected",
+      status: "accepted",
       buildId: "rfc-evidence-precision-v2",
       corpusDigest: evaluationCorpusDigest,
       policyDigest: evaluationPolicyDigest,
-      reviewFailures: [
-        "observed outcomes fell outside committed allowed outcome sets",
-        "positive-control research cases did not remain answered",
-      ],
+      reviewFailures: [],
     });
     expect(evaluationReleaseAttestation.reviewDecisionId).toBe(precisionV2HumanReviewDecision.id);
     expect(evaluationReleaseAttestation.status).toBe(precisionV2HumanReviewDecision.decision);
@@ -1246,10 +1243,7 @@ describe("precision evaluation", () => {
   test("does not activate a rejected attestation with a stable release identity", () => {
     const { report, attestation } = acceptedFixtureReport();
 
-    expect(evaluationReleaseAttestation).toMatchObject({
-      status: "rejected",
-      buildId: "rfc-evidence-precision-v2",
-    });
+    expect(evaluationReleaseAttestation.buildId).toBe("rfc-evidence-precision-v2");
     expect(
       isAcceptedEvaluationReportForAttestation(
         report,
@@ -1500,14 +1494,17 @@ describe("precision evaluation", () => {
 
   // The reviewed report remains ignored; validate it when present in a release workspace.
   if (existsSync(reviewedReleaseReportPath)) {
-    test("only binds the exact reviewed rejection when its report is present", async () => {
+    test("only activates the exact reviewed acceptance when its report is present", async () => {
       const report = await Bun.file(reviewedReleaseReportPath).json();
       const reportDigest = evaluationReportDigest(report);
 
-      expect(isAcceptedEvaluationReport(report)).toBe(false);
-      if (reportDigest !== evaluationReleaseAttestation.reportDigest) return;
+      if (reportDigest !== evaluationReleaseAttestation.reportDigest) {
+        expect(isAcceptedEvaluationReport(report)).toBe(false);
+        return;
+      }
 
-      expect(report.gate.passed).toBe(false);
+      expect(isAcceptedEvaluationReport(report)).toBe(Date.now() < Date.parse(report.expiresAt));
+      expect(report.gate.passed).toBe(true);
       expect(report.gate.failures).toEqual(evaluationReleaseAttestation.reviewFailures);
       expect(report.expiresAt).toBe(evaluationReleaseAttestation.expiresAt);
       expect(report.authoritativeSourceHashes).toEqual(
