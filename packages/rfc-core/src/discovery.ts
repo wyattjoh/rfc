@@ -34,6 +34,81 @@ export {
 export const defaultDatatrackerApiUrl = "https://datatracker.ietf.org/api/v1/";
 
 /**
+ * Default anonymous RFC search root backing topic discovery.
+ *
+ * This is the search backend the RFC Editor site itself queries. Datatracker's
+ * document API can only filter a title or abstract by literal substring, which
+ * finds an RFC only for a caller who already knows its title; this index also
+ * covers keywords and the published RFC body, so a caller can search for the
+ * protocol element they actually want.
+ */
+export const defaultRfcSearchApiUrl = "https://typesense.ietf.org/";
+
+/**
+ * Search collection holding indexed IETF documents.
+ */
+const rfcSearchCollection = "docs";
+
+/**
+ * Indexed fields searched for one topic term, widest match last.
+ */
+const rfcSearchQueryFields = "title,abstract,keywords,content";
+
+/**
+ * Document fields requested for one topic hit.
+ *
+ * The indexed body is deliberately excluded: topic discovery needs only enough
+ * metadata to identify a candidate, and canonical text is retrieved from the
+ * RFC Editor later so that every quotation has a verifiable source.
+ */
+const rfcSearchIncludeFields = "rfcNumber,title,abstract,stream,type";
+
+/**
+ * Caller-supplied configuration enabling full-text topic search.
+ *
+ * No credential ships with this package. The search backend belongs to the
+ * IETF, carries no documented contract for programmatic use, and sits behind
+ * bot management, so a published package must not depend on it: discovery
+ * falls back to Datatracker whenever it is absent or failing.
+ */
+export interface RfcSearchConfig {
+  /**
+   * RFC full-text search API base URL.
+   */
+  readonly baseUrl: string;
+  /**
+   * Search-only API key supplied by the operator.
+   */
+  readonly apiKey: string;
+}
+
+/**
+ * Build topic-search configuration from caller-supplied settings.
+ *
+ * @param baseUrl Optional search API base URL, defaulting to the public host.
+ * @param apiKey Search-only API key; search stays off when it is absent.
+ * @returns Search configuration, or undefined when search is not enabled.
+ */
+export const makeRfcSearchConfig = (
+  baseUrl: string | undefined,
+  apiKey: string | undefined,
+): RfcSearchConfig | undefined =>
+  apiKey === undefined || apiKey.length === 0
+    ? undefined
+    : { baseUrl: baseUrl ?? defaultRfcSearchApiUrl, apiKey };
+
+const rfcSearchHeaders = (apiKey: string): Headers.Input => ({ "x-typesense-api-key": apiKey });
+
+/**
+ * Upstream named in topic-discovery failures.
+ *
+ * Topic discovery no longer reaches Datatracker, so a failure here must not
+ * describe itself as one: an agent is told to report the failing upstream, and
+ * naming the wrong service sends whoever reads that report to the wrong place.
+ */
+const rfcSearchUpstreamName = "RFC search";
+
+/**
  * One RFC admitted to semantic document selection for a topic request.
  */
 export type DocumentCandidate = RfcMetadata;
@@ -65,11 +140,29 @@ export const datatrackerTopicResultLimit = 20;
 
 /**
  * Maximum Datatracker requests issued by one topic discovery.
+ *
+ * Datatracker spends one request per term per searched field. This is the whole
+ * budget for the default configuration, where full-text search is not enabled.
  */
-export const datatrackerTopicRequestLimit = datatrackerTopicSearchTermLimit * 2;
+export const topicDatatrackerRequestLimit = datatrackerTopicSearchTermLimit * 2;
 
 /**
- * Maximum simultaneous Datatracker requests issued by topic discovery.
+ * Maximum full-text search requests issued by one topic discovery.
+ *
+ * One search request covers every indexed field for one term.
+ */
+export const topicSearchRequestLimit = datatrackerTopicSearchTermLimit;
+
+/**
+ * Maximum upstream requests issued by one topic discovery in any configuration.
+ *
+ * The worst case is a term that attempts full-text search and then falls back to
+ * both Datatracker field queries, so three requests per caller-supplied term.
+ */
+export const datatrackerTopicRequestLimit = topicSearchRequestLimit + topicDatatrackerRequestLimit;
+
+/**
+ * Maximum simultaneous upstream requests issued by topic discovery.
  */
 export const datatrackerTopicConcurrencyLimit = 4;
 
@@ -164,6 +257,8 @@ export const LiveRetrievalTraceSchema = Schema.Struct({
   semanticCandidates: Schema.optionalKey(Schema.Natural),
   selectedSources: Schema.optionalKey(Schema.Natural),
   topicTruncated: Schema.optionalKey(Schema.Boolean),
+  topicSearchFallback: Schema.optionalKey(Schema.Boolean),
+  topicSearchFallbackReason: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(512))),
   traversalComplete: Schema.optionalKey(Schema.Boolean),
   traversalContexts: Schema.optionalKey(Schema.Natural),
   traversalDepth: Schema.optionalKey(Schema.Natural),
@@ -326,6 +421,14 @@ export interface LiveTopicDiscovery {
    */
   readonly truncated: boolean;
   /**
+   * Why topic search degraded to Datatracker, when it did.
+   *
+   * Present only when full-text search was configured and failed. Degraded
+   * discovery matches only RFC titles and abstracts, so a caller who searched
+   * for a protocol element may legitimately find nothing.
+   */
+  readonly searchFallbackReason: string | undefined;
+  /**
    * Total time spent retrieving and merging candidates.
    */
   readonly metadataMs: number;
@@ -431,6 +534,33 @@ const DatatrackerDocumentPageSchema = Schema.Struct({
 
 type DatatrackerDocumentPage = Schema.Schema.Type<typeof DatatrackerDocumentPageSchema>;
 
+const TopicSearchDocumentSchema = Schema.Struct({
+  rfcNumber: Schema.Natural,
+  title: Schema.String.check(Schema.isMaxLength(2_000)),
+  abstract: Schema.String.check(Schema.isMaxLength(100_000)),
+  type: Schema.String.check(Schema.isMaxLength(64)),
+  stream: Schema.Struct({ slug: Schema.String.check(Schema.isMaxLength(256)) }),
+});
+
+type TopicSearchDocument = Schema.Schema.Type<typeof TopicSearchDocumentSchema>;
+
+const TopicSearchPageSchema = Schema.Struct({
+  found: Schema.Natural,
+  hits: Schema.Array(Schema.Struct({ document: TopicSearchDocumentSchema })),
+});
+
+type TopicSearchPage = Schema.Schema.Type<typeof TopicSearchPageSchema>;
+
+/**
+ * Whether one search hit identifies a published RFC.
+ *
+ * `Schema.Natural` admits zero and the collection also indexes drafts, so both
+ * the document type and the RFC number are verified before the hit is admitted
+ * as a candidate.
+ */
+const isPublishedRfcHit = (document: TopicSearchDocument): boolean =>
+  document.type === "rfc" && Number.isSafeInteger(document.rfcNumber) && document.rfcNumber > 0;
+
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : "The upstream operation failed";
 
@@ -477,7 +607,11 @@ const makeExactDocumentUrl = (baseUrl: string, name: string): string => {
   return url.toString();
 };
 
-const makeTopicUrl = (baseUrl: string, term: string, field: "title" | "abstract"): string => {
+const makeDatatrackerTopicUrl = (
+  baseUrl: string,
+  term: string,
+  field: "title" | "abstract",
+): string => {
   const base = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
   const url = new URL("doc/document/", base);
   url.searchParams.set("format", "json");
@@ -488,6 +622,20 @@ const makeTopicUrl = (baseUrl: string, term: string, field: "title" | "abstract"
   url.searchParams.set("order_by", "-id");
   url.searchParams.set("type__slug", "rfc");
   url.searchParams.set(`${field}__icontains`, term);
+  return url.toString();
+};
+
+const makeTopicSearchUrl = (searchBaseUrl: string, term: string): string => {
+  const base = searchBaseUrl.endsWith("/") ? searchBaseUrl : `${searchBaseUrl}/`;
+  const url = new URL(`collections/${rfcSearchCollection}/documents/search`, base);
+  url.searchParams.set("q", term);
+  url.searchParams.set("query_by", rfcSearchQueryFields);
+  url.searchParams.set("include_fields", rfcSearchIncludeFields);
+  // Match highlights would repeat body text this request has no use for.
+  url.searchParams.set("highlight_fields", "none");
+  url.searchParams.set("filter_by", "type:=rfc");
+  url.searchParams.set("per_page", String(datatrackerTopicResultLimit));
+  url.searchParams.set("page", "1");
   return url.toString();
 };
 
@@ -550,6 +698,7 @@ const readBoundedJson = Effect.fnUntraced(function* (
   response: HttpClientResponse.HttpClientResponse,
   url: string,
   attempts: number,
+  upstream: string,
 ): Effect.fn.Return<unknown, RfcDiscoveryError> {
   const contentLengthValue = Option.getOrUndefined(Headers.get("content-length")(response.headers));
   if (contentLengthValue !== undefined) {
@@ -558,7 +707,7 @@ const readBoundedJson = Effect.fnUntraced(function* (
       return yield* new RfcDiscoveryError({
         stage: "decode",
         url,
-        reason: "Datatracker returned an invalid Content-Length",
+        reason: `${upstream} returned an invalid Content-Length`,
         attempts,
       });
     }
@@ -566,7 +715,7 @@ const readBoundedJson = Effect.fnUntraced(function* (
       return yield* new RfcDiscoveryError({
         stage: "decode",
         url,
-        reason: `Datatracker metadata exceeds ${datatrackerMaximumResponseBytes} bytes`,
+        reason: `${upstream} metadata exceeds ${datatrackerMaximumResponseBytes} bytes`,
         attempts,
       });
     }
@@ -582,7 +731,7 @@ const readBoundedJson = Effect.fnUntraced(function* (
             new RfcDiscoveryError({
               stage: "decode",
               url,
-              reason: `Datatracker metadata exceeds ${datatrackerMaximumResponseBytes} bytes`,
+              reason: `${upstream} metadata exceeds ${datatrackerMaximumResponseBytes} bytes`,
               attempts,
             }),
           );
@@ -615,7 +764,7 @@ const readBoundedJson = Effect.fnUntraced(function* (
       new RfcDiscoveryError({
         stage: "decode",
         url,
-        reason: "Datatracker returned malformed JSON metadata",
+        reason: `${upstream} returned malformed JSON metadata`,
         attempts,
       }),
   });
@@ -626,6 +775,8 @@ const fetchJsonWithinDeadline = Effect.fnUntraced(function* (
   url: string,
   kind: "metadata" | "relationships",
   state: FetchState,
+  headers: Headers.Input | undefined,
+  upstream: string,
 ): Effect.fn.Return<FetchedJson, RfcDiscoveryError> {
   const operationStartedAt = yield* Clock.currentTimeMillis;
   let scheduledDelay = 0;
@@ -644,7 +795,7 @@ const fetchJsonWithinDeadline = Effect.fnUntraced(function* (
       return yield* new RfcDiscoveryError({
         stage: "request",
         url,
-        reason: "Datatracker request deadline was exhausted before the next attempt",
+        reason: `${upstream} request deadline was exhausted before the next attempt`,
         attempts: attempt - 1,
       });
     }
@@ -659,7 +810,7 @@ const fetchJsonWithinDeadline = Effect.fnUntraced(function* (
     );
     const requestResult = yield* Effect.result(
       Effect.gen(function* () {
-        const response = yield* http.get(url);
+        const response = yield* http.get(url, headers === undefined ? undefined : { headers });
         const responseUrl = response.url || url;
         const responseOrigin = yield* Effect.try({
           try: () => new URL(responseUrl).origin,
@@ -667,7 +818,7 @@ const fetchJsonWithinDeadline = Effect.fnUntraced(function* (
             new RfcDiscoveryError({
               stage: "request",
               url: responseUrl,
-              reason: "Datatracker returned an invalid response URL",
+              reason: `${upstream} returned an invalid response URL`,
               attempts: attempt,
             }),
         });
@@ -675,7 +826,7 @@ const fetchJsonWithinDeadline = Effect.fnUntraced(function* (
           return yield* new RfcDiscoveryError({
             stage: "request",
             url: responseUrl,
-            reason: "Datatracker redirected outside the configured API origin",
+            reason: `${upstream} redirected outside the configured API origin`,
             attempts: attempt,
           });
         }
@@ -683,7 +834,7 @@ const fetchJsonWithinDeadline = Effect.fnUntraced(function* (
           return { response, value: undefined } as const;
         }
 
-        const value = yield* readBoundedJson(response, url, attempt);
+        const value = yield* readBoundedJson(response, url, attempt, upstream);
         return { response, value } as const;
       }).pipe(Effect.timeout(Duration.millis(attemptDeadline))),
     );
@@ -699,7 +850,7 @@ const fetchJsonWithinDeadline = Effect.fnUntraced(function* (
           stage: transient ? "request" : "decode",
           url,
           reason: transient
-            ? `Datatracker retry budget exhausted after ${attempt} attempts`
+            ? `${upstream} retry budget exhausted after ${attempt} attempts`
             : errorMessage(failure),
           attempts: attempt,
         });
@@ -714,7 +865,7 @@ const fetchJsonWithinDeadline = Effect.fnUntraced(function* (
         return yield* new RfcDiscoveryError({
           stage: "request",
           url,
-          reason: `Datatracker retry deadline exhausted after ${attempt} attempts`,
+          reason: `${upstream} retry deadline exhausted after ${attempt} attempts`,
           attempts: attempt,
         });
       }
@@ -741,7 +892,7 @@ const fetchJsonWithinDeadline = Effect.fnUntraced(function* (
         return yield* new RfcDiscoveryError({
           stage: "request",
           url,
-          reason: `Datatracker retry budget exhausted after ${attempt} attempts (HTTP ${response.status})`,
+          reason: `${upstream} retry budget exhausted after ${attempt} attempts (HTTP ${response.status})`,
           attempts: attempt,
         });
       }
@@ -755,7 +906,7 @@ const fetchJsonWithinDeadline = Effect.fnUntraced(function* (
       return yield* new RfcDiscoveryError({
         stage: "request",
         url,
-        reason: `Datatracker returned HTTP ${response.status}`,
+        reason: `${upstream} returned HTTP ${response.status}`,
         attempts: attempt,
       });
     }
@@ -782,7 +933,7 @@ const fetchJsonWithinDeadline = Effect.fnUntraced(function* (
   return yield* new RfcDiscoveryError({
     stage: "request",
     url,
-    reason: `Datatracker retry policy ended after ${datatrackerMaxAttempts} attempts (HTTP ${lastStatus ?? "unknown"})`,
+    reason: `${upstream} retry policy ended after ${datatrackerMaxAttempts} attempts (HTTP ${lastStatus ?? "unknown"})`,
     attempts: datatrackerMaxAttempts,
   });
 });
@@ -792,6 +943,8 @@ const fetchJson = Effect.fnUntraced(function* (
   url: string,
   kind: "metadata" | "relationships",
   metadataDirectory: string | undefined,
+  headers: Headers.Input | undefined = undefined,
+  upstream: string = "Datatracker",
 ): Effect.fn.Return<FetchedJson, RfcDiscoveryError, FileSystem.FileSystem | Path.Path> {
   const startedAt = yield* Clock.currentTimeMillis;
   // A response still inside the window Datatracker declared for it is reused
@@ -817,10 +970,14 @@ const fetchJson = Effect.fnUntraced(function* (
       };
     }
   }
-  const fetched = yield* fetchJsonWithinDeadline(http, url, kind, {
-    attempts: 0,
-    deadline: { startedAt, elapsedFloor: 0 },
-  });
+  const fetched = yield* fetchJsonWithinDeadline(
+    http,
+    url,
+    kind,
+    { attempts: 0, deadline: { startedAt, elapsedFloor: 0 } },
+    headers,
+    upstream,
+  );
   if (metadataDirectory !== undefined && fetched.headers !== undefined) {
     const freshness = metadataFreshnessMilliseconds(fetched.headers);
     if (freshness !== undefined) {
@@ -904,6 +1061,55 @@ const decodeDocumentPage = (
         attempts,
       }),
   });
+
+const decodeTopicPage = (
+  value: unknown,
+  url: string,
+  attempts: number,
+): Effect.Effect<TopicSearchPage, RfcDiscoveryError> =>
+  Effect.try({
+    try: () => {
+      const page = Schema.decodeUnknownSync(TopicSearchPageSchema)(value);
+      if (page.hits.length > datatrackerTopicResultLimit || page.found < page.hits.length) {
+        throw new Error("topic response exceeded its bound");
+      }
+      if (!page.hits.every(({ document }) => isPublishedRfcHit(document))) {
+        throw new Error("search metadata does not identify a published RFC");
+      }
+      return page;
+    },
+    catch: () =>
+      new RfcDiscoveryError({
+        stage: "decode",
+        url,
+        reason: "RFC search returned malformed or unbounded topic metadata",
+        attempts,
+      }),
+  });
+
+/**
+ * Normalize one topic-search hit into request-local RFC metadata.
+ *
+ * The status stays unreported: the exact-lookup path derives it from a
+ * Datatracker payload that carries only numeric state references and therefore
+ * answers "unknown" for these same RFCs, and a topic candidate must not claim a
+ * status its own exact lookup would refuse to confirm. Relationships are left
+ * empty for the same reason — currency is resolved by traversal once a document
+ * has been selected, not from a search index.
+ */
+const normalizeTopicDocument = (document: TopicSearchDocument): RfcMetadata => ({
+  identifier: `RFC${document.rfcNumber}`,
+  rfcNumber: document.rfcNumber,
+  title: document.title,
+  abstract: document.abstract,
+  status: "unknown",
+  stream: document.stream.slug || "unknown",
+  canonicalUrl: `https://datatracker.ietf.org/doc/rfc${document.rfcNumber}/`,
+  updates: [],
+  updatedBy: [],
+  obsoletes: [],
+  obsoletedBy: [],
+});
 
 const normalizeDocument = (
   document: DatatrackerDocument,
@@ -1158,36 +1364,120 @@ const lookupKnownRfc = Effect.fnUntraced(function* (
   };
 });
 
+type TopicStream = {
+  readonly documents: ReadonlyArray<RfcMetadata>;
+  readonly trace: RetrievalRequestTrace;
+  readonly truncated: boolean;
+};
+
+type TopicTermResult = {
+  /**
+   * Request streams this term produced, in the order they are merged.
+   */
+  readonly streams: ReadonlyArray<TopicStream>;
+  /**
+   * Why this term fell back to Datatracker, when it did.
+   */
+  readonly fallbackReason: string | undefined;
+};
+
+const discoverTopicTermByDatatracker = Effect.fnUntraced(function* (
+  http: HttpClient.HttpClient,
+  baseUrl: string,
+  term: string,
+  metadataDirectory: string | undefined,
+): Effect.fn.Return<
+  ReadonlyArray<TopicStream>,
+  RfcDiscoveryError,
+  FileSystem.FileSystem | Path.Path
+> {
+  // The title and abstract queries stay distinct streams so the deterministic
+  // merge interleaves them exactly as it did before search existed.
+  return yield* Effect.forEach(
+    ["title", "abstract"] as const,
+    Effect.fnUntraced(function* (field) {
+      const url = makeDatatrackerTopicUrl(baseUrl, term, field);
+      const response = yield* fetchJson(http, url, "metadata", metadataDirectory);
+      const page = yield* decodeDocumentPage(response.value, url, response.trace.attempts);
+      const documents = yield* Effect.forEach(page.objects, (document) =>
+        normalizeDocument(document, [], url, response.trace.attempts),
+      );
+      return {
+        documents,
+        trace: response.trace,
+        truncated: page.meta.next !== null || page.meta.total_count > page.objects.length,
+      };
+    }),
+    { concurrency: 2 },
+  );
+});
+
+const discoverTopicTermBySearch = Effect.fnUntraced(function* (
+  http: HttpClient.HttpClient,
+  search: RfcSearchConfig,
+  term: string,
+  metadataDirectory: string | undefined,
+): Effect.fn.Return<
+  ReadonlyArray<TopicStream>,
+  RfcDiscoveryError,
+  FileSystem.FileSystem | Path.Path
+> {
+  const url = makeTopicSearchUrl(search.baseUrl, term);
+  const response = yield* fetchJson(
+    http,
+    url,
+    "metadata",
+    metadataDirectory,
+    rfcSearchHeaders(search.apiKey),
+    rfcSearchUpstreamName,
+  );
+  const page = yield* decodeTopicPage(response.value, url, response.trace.attempts);
+  return [
+    {
+      documents: page.hits.map(({ document }) => normalizeTopicDocument(document)),
+      trace: response.trace,
+      truncated: page.found > page.hits.length,
+    },
+  ];
+});
+
+const discoverTopicTerm = Effect.fnUntraced(function* (
+  http: HttpClient.HttpClient,
+  baseUrl: string,
+  search: RfcSearchConfig | undefined,
+  term: string,
+  metadataDirectory: string | undefined,
+): Effect.fn.Return<TopicTermResult, RfcDiscoveryError, FileSystem.FileSystem | Path.Path> {
+  if (search === undefined) {
+    const streams = yield* discoverTopicTermByDatatracker(http, baseUrl, term, metadataDirectory);
+    return { streams, fallbackReason: undefined };
+  }
+  const attempted = yield* Effect.result(
+    discoverTopicTermBySearch(http, search, term, metadataDirectory),
+  );
+  if (Result.isSuccess(attempted)) return { streams: attempted.success, fallbackReason: undefined };
+  // Full-text search is an optional accelerator over infrastructure this
+  // package does not own and has no contract with. A rotated key, a bot
+  // challenge, or an index change must degrade discovery to the substring path
+  // rather than remove the tool from a caller who depends on it.
+  const streams = yield* discoverTopicTermByDatatracker(http, baseUrl, term, metadataDirectory);
+  return { streams, fallbackReason: attempted.failure.reason };
+});
+
 const discoverTopic = Effect.fnUntraced(function* (
   http: HttpClient.HttpClient,
   baseUrl: string,
+  search: RfcSearchConfig | undefined,
   searchTerms: ReadonlyArray<string>,
   metadataDirectory: string | undefined,
 ): Effect.fn.Return<LiveTopicDiscovery, RfcDiscoveryError, FileSystem.FileSystem | Path.Path> {
   const startedAt = yield* Clock.currentTimeMillis;
-  const termStreams = yield* Effect.forEach(
+  const termResults = yield* Effect.forEach(
     searchTerms,
-    (term) =>
-      Effect.forEach(
-        ["title", "abstract"] as const,
-        Effect.fnUntraced(function* (field) {
-          const url = makeTopicUrl(baseUrl, term, field);
-          const response = yield* fetchJson(http, url, "metadata", metadataDirectory);
-          const page = yield* decodeDocumentPage(response.value, url, response.trace.attempts);
-          const documents = yield* Effect.forEach(page.objects, (document) =>
-            normalizeDocument(document, [], url, response.trace.attempts),
-          );
-          return {
-            documents,
-            trace: response.trace,
-            truncated: page.meta.next !== null || page.meta.total_count > page.objects.length,
-          };
-        }),
-        { concurrency: 2 },
-      ),
+    (term) => discoverTopicTerm(http, baseUrl, search, term, metadataDirectory),
     { concurrency: datatrackerTopicConcurrencyLimit / 2 },
   );
-  const streams = termStreams.flat();
+  const streams = termResults.flatMap(({ streams: termStreams }) => termStreams);
 
   const merged: Array<RfcMetadata> = [];
   const seen = new Set<string>();
@@ -1212,6 +1502,8 @@ const discoverTopic = Effect.fnUntraced(function* (
     uniqueCandidates: seen.size,
     truncated:
       streams.some(({ truncated }) => truncated) || seen.size > datatrackerDocumentCandidateLimit,
+    searchFallbackReason: termResults.find(({ fallbackReason }) => fallbackReason !== undefined)
+      ?.fallbackReason,
     metadataMs: Math.max(0, finishedAt - startedAt),
   };
 });
@@ -1222,6 +1514,8 @@ const discoverTopic = Effect.fnUntraced(function* (
  * @param http HTTP client used for anonymous Datatracker requests.
  * @param baseUrl Datatracker v1 API base URL.
  * @param currencyDepthLimit Optional lower successor depth limit for deterministic tests.
+ * @param metadataDirectory Optional directory holding cached upstream metadata.
+ * @param search Optional full-text search configuration; Datatracker is used without it.
  * @returns A request-local RFC discovery service layer.
  */
 export const makeRfcDiscoveryHttpLayer = (
@@ -1229,6 +1523,7 @@ export const makeRfcDiscoveryHttpLayer = (
   baseUrl: string,
   currencyDepthLimit: number | undefined = undefined,
   metadataDirectory: string | undefined = undefined,
+  search: RfcSearchConfig | undefined = undefined,
 ): Layer.Layer<RfcDiscovery> =>
   Layer.succeed(
     RfcDiscovery,
@@ -1236,7 +1531,8 @@ export const makeRfcDiscoveryHttpLayer = (
       lookupExactRfc: (identifier) => lookupExactRfc(http, baseUrl, identifier, metadataDirectory),
       lookupKnownRfc: (identifier) =>
         lookupKnownRfc(http, baseUrl, identifier, currencyDepthLimit, metadataDirectory),
-      discoverTopic: (searchTerms) => discoverTopic(http, baseUrl, searchTerms, metadataDirectory),
+      discoverTopic: (searchTerms) =>
+        discoverTopic(http, baseUrl, search, searchTerms, metadataDirectory),
     }),
   );
 
@@ -1244,11 +1540,14 @@ export const makeRfcDiscoveryHttpLayer = (
  * Build the default live RFC discovery layer.
  *
  * @param baseUrl Datatracker v1 API base URL.
+ * @param metadataDirectory Optional directory holding cached upstream metadata.
+ * @param search Optional full-text search configuration; Datatracker is used without it.
  * @returns An RFC discovery layer requiring an Effect HTTP client.
  */
 export const makeDefaultRfcDiscoveryLayer = (
   baseUrl: string = defaultDatatrackerApiUrl,
   metadataDirectory: string | undefined = undefined,
+  search: RfcSearchConfig | undefined = undefined,
 ): Layer.Layer<RfcDiscovery, never, HttpClient.HttpClient> =>
   Layer.effect(
     RfcDiscovery,
@@ -1260,7 +1559,7 @@ export const makeDefaultRfcDiscoveryLayer = (
         lookupKnownRfc: (identifier) =>
           lookupKnownRfc(http, baseUrl, identifier, undefined, metadataDirectory),
         discoverTopic: (searchTerms) =>
-          discoverTopic(http, baseUrl, searchTerms, metadataDirectory),
+          discoverTopic(http, baseUrl, search, searchTerms, metadataDirectory),
       });
     }),
   );

@@ -880,6 +880,7 @@ const EvaluationRetrievalLimitsSchema = Schema.Struct({
   maxSearchTerms: Schema.Natural,
   maxSearchTermCharacters: Schema.Natural,
   maxTopicRequests: Schema.Natural,
+  maxDatatrackerTopicRequests: Schema.Natural,
   maxConcurrentDatatrackerRequests: Schema.Natural,
   maxRowsPerTopicRequest: Schema.Natural,
   maxUpstreamTopicRows: Schema.Natural,
@@ -2012,7 +2013,7 @@ const retrievalObservationHasEvidence = (
     case "candidate_fan_out":
       return (
         observation.traces.every((trace) => topicTraceWithinPolicy(trace, policy)) &&
-        finalTrace.datatrackerRequestCount === policy.retrievalLimits.maxTopicRequests &&
+        finalTrace.datatrackerRequestCount === policy.retrievalLimits.maxDatatrackerTopicRequests &&
         (finalTrace.uniqueCandidates ?? 0) > policy.candidateLimits.maxMergedDocumentCandidates &&
         finalTrace.semanticCandidates === policy.candidateLimits.maxMergedDocumentCandidates &&
         finalTrace.selectedSources === policy.candidateLimits.maxSourceRetrievalCandidates

@@ -27,6 +27,8 @@ const operationOptions: RfcOperationOptions = {
   cacheDirectory: "/tmp/rfc-mcp-test-cache",
   datatrackerApiUrl: "https://datatracker.example/api/v1",
   typeSafeApiUrl: "https://typesafe.example/api",
+  rfcSearchApiUrl: undefined,
+  rfcSearchApiKey: undefined,
 };
 
 const makeCredentialStore = (initial: string | null = "fixture-key"): CredentialStore => {

@@ -38,6 +38,7 @@ import {
   RfcDiscoveryError,
   RfcIdentifierError,
   defaultDatatrackerApiUrl,
+  makeRfcSearchConfig,
   datatrackerCurrencyContextLimit,
   datatrackerDocumentCandidateLimit,
   datatrackerSuccessorLimit,
@@ -213,7 +214,25 @@ export interface RfcClientOptions {
    */
   readonly datatrackerApiUrl?: string | undefined;
   /**
+   * RFC full-text search API base URL used for topic discovery.
+   *
+   * Ignored unless {@link RfcClientOptions.rfcSearchApiKey} is also supplied.
+   */
+  readonly rfcSearchApiUrl?: string | undefined;
+  /**
+   * Search-only API key enabling full-text topic discovery.
+   *
+   * Topic discovery matches only RFC titles and abstracts through Datatracker
+   * unless this is supplied. No key ships with this package: the search backend
+   * belongs to the IETF and carries no contract for programmatic use, so
+   * enabling it is the operator's decision and their credential to rotate.
+   */
+  readonly rfcSearchApiKey?: string | undefined;
+  /**
    * Optional HTTP service used by deterministic live-discovery tests.
+   *
+   * It serves both the Datatracker and the RFC search origins, so a test that
+   * injects it dispatches on the request URL.
    */
   readonly datatrackerHttpClient?: HttpClient.HttpClient | undefined;
   /**
@@ -691,17 +710,19 @@ const platformLayer = (options: RfcClientOptions) => {
 
 const clientLayer = (options: RfcClientOptions) => {
   const datatrackerBaseUrl = options.datatrackerApiUrl ?? defaultDatatrackerApiUrl;
+  const rfcSearch = makeRfcSearchConfig(options.rfcSearchApiUrl, options.rfcSearchApiKey);
   // Sits beside the source cache under the same root so one cache directory
   // still describes everything this client retains.
   const metadataDirectory = join(options.cacheDirectory ?? defaultCacheDirectory, "metadata");
   const discoveryLayer =
     options.datatrackerHttpClient === undefined
-      ? makeDefaultRfcDiscoveryLayer(datatrackerBaseUrl, metadataDirectory)
+      ? makeDefaultRfcDiscoveryLayer(datatrackerBaseUrl, metadataDirectory, rfcSearch)
       : makeRfcDiscoveryHttpLayer(
           options.datatrackerHttpClient,
           datatrackerBaseUrl,
           options.currencyTraversalDepthLimit,
           metadataDirectory,
+          rfcSearch,
         );
   const liveRfcSourceLayer =
     options.rfcSourceFetcher !== undefined
@@ -915,6 +936,23 @@ const liveKnownResearchProgram = Effect.fnUntraced(function* (
   });
 });
 
+/**
+ * Diagnostics describing a topic search that degraded to Datatracker.
+ *
+ * Reported only when it happened, so a caller can tell a term that genuinely
+ * matches nothing from one that went unmatched because discovery was running
+ * on titles and abstracts alone.
+ */
+const topicSearchFallbackDiagnostics = (discovered: {
+  readonly searchFallbackReason: string | undefined;
+}): Record<string, unknown> =>
+  discovered.searchFallbackReason === undefined
+    ? {}
+    : {
+        topicSearchFallback: true,
+        topicSearchFallbackReason: discovered.searchFallbackReason.slice(0, 512),
+      };
+
 const liveTopicResearchProgram = Effect.fnUntraced(function* (
   options: RfcClientOptions,
   request: LiveTopicResearchRequest,
@@ -971,6 +1009,7 @@ const liveTopicResearchProgram = Effect.fnUntraced(function* (
           semanticCandidates: 0,
           selectedSources: 0,
           topicTruncated: discovered.truncated,
+          ...topicSearchFallbackDiagnostics(discovered),
           requests: discovered.requests,
         },
         candidates: {
@@ -1020,6 +1059,7 @@ const liveTopicResearchProgram = Effect.fnUntraced(function* (
     semanticCandidates: discovered.documents.length,
     selectedSources: sourceLoads.length,
     topicTruncated: discovered.truncated,
+    ...topicSearchFallbackDiagnostics(discovered),
     requests,
   };
 

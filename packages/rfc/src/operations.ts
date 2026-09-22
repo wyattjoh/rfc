@@ -51,6 +51,16 @@ export interface RfcOperationOptions {
    * Optional TypeSafe API URL selected by the process operator.
    */
   readonly typeSafeApiUrl: string | undefined;
+  /**
+   * Optional RFC full-text search API base URL selected by the process operator.
+   */
+  readonly rfcSearchApiUrl: string | undefined;
+  /**
+   * Optional search-only key enabling full-text topic discovery.
+   *
+   * Topic discovery stays on Datatracker titles and abstracts without it.
+   */
+  readonly rfcSearchApiKey: string | undefined;
 }
 
 /**
@@ -200,6 +210,8 @@ const createSemanticClient = async (
     automaticAnswerActivation: automaticAnswerActivationFor(cliConfig),
     typeSafeApiKey: apiKey,
     typeSafeApiUrl: options.typeSafeApiUrl,
+    rfcSearchApiUrl: options.rfcSearchApiUrl,
+    rfcSearchApiKey: options.rfcSearchApiKey,
   });
 };
 
