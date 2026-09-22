@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { Duration, Effect } from "effect";
 import * as AiError from "effect/unstable/ai/AiError";
-import type * as Decision from "effect/unstable/ai/Decision";
 import * as DecisionModel from "effect/unstable/ai/DecisionModel";
 import { TestClock } from "effect/testing";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
@@ -507,29 +506,40 @@ describe("researchQuestions sections and paragraphs", () => {
   });
 
   test("rejects an invalid provider distribution as a typed failure", async () => {
-    const broken = {
-      [DecisionModel.TypeId]: DecisionModel.TypeId,
-      decide: (definition: { readonly decisions: Readonly<Record<string, Decision.Any>> }) =>
-        Effect.succeed({
-          answers: Object.fromEntries(
-            Object.entries(definition.decisions).map(([key, decision]) => [
-              key,
-              decision._tag === "Probability"
-                ? { probability: 0.9 }
-                : {
-                    label: Object.keys(decision.criteria)[0],
-                    probabilities: Object.fromEntries(
-                      Object.keys(decision.criteria).map((label) => [label, 0.9]),
-                    ),
-                  },
-            ]),
-          ),
-          usage: {},
-        }),
-    } as unknown as DecisionModel.DecisionModel;
+    // Built with DecisionModel.make so validation happens where production validates it.
+    const broken = await Effect.runPromise(
+      DecisionModel.make({
+        decide: ({ decisions }) =>
+          Effect.succeed({
+            answers: Object.fromEntries(
+              Object.entries(decisions).map(
+                ([key, decision]): [string, DecisionModel.ProviderAnswer] => [
+                  key,
+                  decision._tag === "Probability"
+                    ? { _tag: "Probability", probability: 0.9 }
+                    : {
+                        _tag: "Classify",
+                        label: Object.keys(decision.criteria)[0] ?? "none",
+                        probabilities: Object.fromEntries(
+                          Object.keys(decision.criteria).map((label) => [label, 0.9]),
+                        ),
+                      },
+                ],
+              ),
+            ),
+            usage: { inputTokens: undefined, outputTokens: undefined },
+          }),
+      }),
+    );
     await expect(
       runPipeline(["What?"], [candidate(makeRfc(9110), "requested", "RFC9110")], broken),
-    ).rejects.toMatchObject({ _tag: "DecisionModelError", stage: "section" });
+    ).rejects.toMatchObject({
+      _tag: "DecisionModelError",
+      stage: "section",
+      // InvalidOutputError is retryable, so it is retried up to the attempt cap.
+      reason: `DecisionModel retry budget exhausted after ${retrievalPolicy.providerMaxAttempts} attempts (InvalidOutputError)`,
+      attempts: retrievalPolicy.providerMaxAttempts,
+    });
   });
 });
 

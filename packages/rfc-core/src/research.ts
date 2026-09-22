@@ -1,4 +1,4 @@
-import { Clock, Context, Effect, FileSystem, Path, Predicate, Ref, Result, Schema } from "effect";
+import { Clock, Context, Effect, FileSystem, Path, Ref, Result, Schema } from "effect";
 import * as AiError from "effect/unstable/ai/AiError";
 import * as Decision from "effect/unstable/ai/Decision";
 import * as DecisionModel from "effect/unstable/ai/DecisionModel";
@@ -270,8 +270,6 @@ export { DecisionModelError };
 
 type DecisionStage = "rank" | "section" | "paragraph";
 
-const ProbabilityMapSchema = Schema.Record(Schema.String, Schema.Finite);
-
 const providerErrorTag = (error: unknown): string =>
   AiError.isAiError(error) ? error.reason._tag : "UnknownProviderError";
 
@@ -291,101 +289,6 @@ const researchRetryPolicy = (stage: DecisionStage) => ({
       `DecisionModel retry budget exhausted after ${attempts} attempts (${providerErrorTag(error)})`,
   },
 });
-
-const decodeProbabilityMap = (
-  stage: DecisionStage,
-  candidateId: string,
-  value: unknown,
-  labels: ReadonlyArray<string>,
-): Effect.Effect<Readonly<Record<string, number>>, DecisionModelError> =>
-  Effect.try({
-    try: () => {
-      const probabilities = Schema.decodeUnknownSync(ProbabilityMapSchema)(value);
-      const keys = Object.keys(probabilities);
-      const total = labels.reduce((sum, label) => sum + (probabilities[label] ?? Number.NaN), 0);
-      const hasExpectedLabels =
-        keys.length === labels.length &&
-        labels.every((label) => Object.prototype.hasOwnProperty.call(probabilities, label));
-      const hasUnitValues = labels.every((label) => {
-        const probability = probabilities[label];
-        return probability !== undefined && probability >= 0 && probability <= 1;
-      });
-      if (!hasExpectedLabels || !hasUnitValues || Math.abs(total - 1) > 1e-6) {
-        throw new Error("invalid probability distribution");
-      }
-      return probabilities;
-    },
-    catch: () =>
-      new DecisionModelError({
-        stage,
-        reason: `Provider returned an invalid probability distribution for ${candidateId}`,
-      }),
-  });
-
-const decodeProbability = (
-  stage: DecisionStage,
-  candidateId: string,
-  value: unknown,
-): Effect.Effect<number, DecisionModelError> =>
-  Effect.try({
-    try: () => {
-      const probability = Schema.decodeUnknownSync(Schema.Finite)(value);
-      if (probability < 0 || probability > 1) {
-        throw new Error("invalid probability");
-      }
-      return probability;
-    },
-    catch: () =>
-      new DecisionModelError({
-        stage,
-        reason: `Provider returned an invalid probability for ${candidateId}`,
-      }),
-  });
-
-const decodeUsage = (
-  stage: DecisionStage,
-  value: unknown,
-): Effect.Effect<DecisionModel.DecisionUsage, DecisionModelError> =>
-  Effect.try({
-    try: () => {
-      const usage = Schema.decodeUnknownSync(
-        Schema.Struct({
-          inputTokens: Schema.optionalKey(Schema.Finite),
-          outputTokens: Schema.optionalKey(Schema.Finite),
-        }),
-      )(value);
-      if (
-        (usage.inputTokens !== undefined && usage.inputTokens < 0) ||
-        (usage.outputTokens !== undefined && usage.outputTokens < 0)
-      ) {
-        throw new Error("invalid token usage");
-      }
-      return new DecisionModel.DecisionUsage(usage);
-    },
-    catch: () =>
-      new DecisionModelError({
-        stage,
-        reason: "Provider returned invalid token usage",
-      }),
-  });
-
-const providerAnswers = (
-  stage: DecisionStage,
-  response: unknown,
-): Effect.Effect<Readonly<Record<string, unknown>>, DecisionModelError> =>
-  Effect.try({
-    try: () => {
-      if (!Predicate.isObject(response) || !Predicate.isObject(response.answers)) {
-        throw new Error("missing answers");
-      }
-      return response.answers;
-    },
-    catch: () =>
-      new DecisionModelError({
-        stage,
-        reason: "Provider returned a response without answers",
-      }),
-  });
 
 type Usage = {
   readonly inputTokens: number | undefined;
@@ -410,7 +313,7 @@ const combineUsages = (usages: ReadonlyArray<Usage>): Usage =>
 const noUsage: Usage = { inputTokens: undefined, outputTokens: undefined };
 
 type DecisionBatch = {
-  readonly answers: Readonly<Record<string, unknown>>;
+  readonly answers: Decision.Answers<Record<string, Decision.Any>>;
   readonly usage: Usage;
 };
 
@@ -432,11 +335,8 @@ const decide = Effect.fnUntraced(function* <S extends Schema.Codec<any, any, nev
     researchRetryPolicy(stage),
     Effect.suspend(() => model.decide(definition, { input: state })),
   );
-  const answers = yield* providerAnswers(stage, response);
-  const usage = yield* decodeUsage(
-    stage,
-    Predicate.isObject(response) ? response.usage : undefined,
-  );
+  // DecisionModel has already validated every answer against its decision.
+  const { answers, usage } = response;
   return { answers, usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens } };
 });
 
@@ -445,40 +345,29 @@ type ChoiceResult = {
   readonly probabilities: Readonly<Record<string, number>>;
 };
 
+// Research only reads keys it put in the definition, so a missing or mismatched
+// answer is a wiring bug; it is still reported as a typed failure.
 const choiceAnswer = (
   stage: DecisionStage,
-  answers: Readonly<Record<string, unknown>>,
+  answers: DecisionBatch["answers"],
   key: string,
-  labels: ReadonlyArray<string>,
-): Effect.Effect<ChoiceResult, DecisionModelError> =>
-  Effect.gen(function* () {
-    const answer = answers[key];
-    if (!Predicate.isObject(answer)) {
-      return yield* new DecisionModelError({ stage, reason: `Provider omitted ${key}` });
-    }
-    const label = answer.label;
-    if (!Predicate.isString(label) || !labels.includes(label)) {
-      return yield* new DecisionModelError({
-        stage,
-        reason: `Provider returned an unknown label for ${key}`,
-      });
-    }
-    const probabilities = yield* decodeProbabilityMap(stage, key, answer.probabilities, labels);
-    return { label, probabilities };
-  });
+): Effect.Effect<ChoiceResult, DecisionModelError> => {
+  const answer = answers[key];
+  return answer !== undefined && "label" in answer
+    ? Effect.succeed({ label: answer.label, probabilities: answer.probabilities })
+    : Effect.fail(new DecisionModelError({ stage, reason: `Provider omitted ${key}` }));
+};
 
 const noulAnswer = (
   stage: DecisionStage,
-  answers: Readonly<Record<string, unknown>>,
+  answers: DecisionBatch["answers"],
   key: string,
-): Effect.Effect<number, DecisionModelError> =>
-  Effect.gen(function* () {
-    const answer = answers[key];
-    if (!Predicate.isObject(answer)) {
-      return yield* new DecisionModelError({ stage, reason: `Provider omitted ${key}` });
-    }
-    return yield* decodeProbability(stage, key, answer.probability);
-  });
+): Effect.Effect<number, DecisionModelError> => {
+  const answer = answers[key];
+  return answer !== undefined && "probability" in answer
+    ? Effect.succeed(answer.probability)
+    : Effect.fail(new DecisionModelError({ stage, reason: `Provider omitted ${key}` }));
+};
 
 /**
  * Keep options in probability order until they cover the policy's share of
@@ -858,15 +747,9 @@ const rankStage = Effect.fnUntraced(function* (
     rankDecisions(questions, pool),
   );
 
-  const labels = [...pool.map((_, index) => candidateKey(index)), noneLabel];
   const kept: Array<ReadonlyArray<RankedCandidate>> = [];
   for (const [questionIndex] of questions.entries()) {
-    const choice = yield* choiceAnswer(
-      "rank",
-      batch.answers,
-      `rank_${questionKey(questionIndex)}`,
-      labels,
-    );
+    const choice = yield* choiceAnswer("rank", batch.answers, `rank_${questionKey(questionIndex)}`);
     const scored: Array<{
       readonly candidate: PoolCandidate;
       readonly index: number;
@@ -1032,7 +915,6 @@ const pickSections = Effect.fnUntraced(function* (
         "section",
         batch.answers,
         `section_${questionKey(questionIndex)}`,
-        [...labels, noneLabel],
       );
       const byKey = new Map(sections.map((section) => [sectionKey(section), section]));
       picked.set(
@@ -1119,8 +1001,6 @@ const verdictCriteria = {
   contradicts:
     "The paragraph states the opposite of what the question presumes or implies it is false",
 } as const satisfies Record<Verdict, string>;
-
-const verdictLabels = Object.keys(verdictCriteria) as ReadonlyArray<Verdict>;
 
 type JudgedPassage = {
   readonly paragraph: RfcParagraph;
@@ -1256,10 +1136,7 @@ const judgeParagraphs = Effect.fnUntraced(function* (
   for (const [questionIndex, paragraphs] of answerable) {
     const key = questionKey(questionIndex);
     const labels = paragraphs.map(paragraphKey);
-    const choice = yield* choiceAnswer("paragraph", batch.answers, `paragraph_${key}`, [
-      ...labels,
-      noneLabel,
-    ]);
+    const choice = yield* choiceAnswer("paragraph", batch.answers, `paragraph_${key}`);
     const exists = yield* noulAnswer("paragraph", batch.answers, `exists_${key}`);
     const byKey = new Map(paragraphs.map((paragraph) => [paragraphKey(paragraph), paragraph]));
     const passages: Array<JudgedPassage> = [];
@@ -1270,12 +1147,7 @@ const judgeParagraphs = Effect.fnUntraced(function* (
     )) {
       const paragraph = byKey.get(label);
       if (paragraph === undefined) continue;
-      const verdict = yield* choiceAnswer(
-        "paragraph",
-        batch.answers,
-        `verdict_${key}_${label}`,
-        verdictLabels,
-      );
+      const verdict = yield* choiceAnswer("paragraph", batch.answers, `verdict_${key}_${label}`);
       passages.push({ paragraph, probability, verdict: verdict.label as Verdict });
     }
     judged.set(questionIndex, { exists, passages });
