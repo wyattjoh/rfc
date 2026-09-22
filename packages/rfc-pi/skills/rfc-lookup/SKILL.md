@@ -159,9 +159,10 @@ JSON
 ```
 
 The short form accepts the question positionally or through `--question`, then
-uses repeatable `--search-term` flags. Preserve the caller's order. Do not generate hidden terms, rewrite phrases, infer a broad
-query from the question, or run a catalog preflight: each supplied term appears
-in Datatracker query URLs and can be retained in upstream access logs.
+uses repeatable `--search-term` flags. Preserve the caller's order. Never put private or user-specific
+details in a term, infer a broad query from the whole question, or run a catalog preflight: each supplied
+term appears in Datatracker query URLs and can be retained in upstream access logs. Standard technical
+terms, including title words of an RFC you expect to match, are fine.
 
 The result is a version-two `evidence_bundle` containing `status`, exact
 `evidence`, optional exact `reviewCandidates`, optional requested/current

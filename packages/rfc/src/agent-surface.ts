@@ -56,7 +56,7 @@ export const rfcAgentParameterDescriptions = {
   topicQuestion: "One independently answerable topic question",
   rfc: "Exact published RFC identifier, for example RFC9110",
   searchTerms:
-    "One to four ordered topic-discovery terms; preserve caller order. Never derive hidden terms or send the full question as a term unless the user explicitly chose it.",
+    "One to four ordered topic-discovery terms; preserve caller order. Terms reach upstream logs, so never include private or user-specific details. Standard technical terms, including title words of an RFC you expect to match, are fine; never send the full question as a term unless the user explicitly chose it.",
   searchTerm:
     'Deliberate topic-discovery term sent verbatim in Datatracker query URLs and upstream logs. Matched as a literal case-insensitive substring of an RFC title or abstract, so use a short noun phrase such as "DNS over TLS"; a sentence fragment such as "DNS over TLS default port" matches nothing.',
   citationRfc: "Exact published RFC identifier containing the quotation",
