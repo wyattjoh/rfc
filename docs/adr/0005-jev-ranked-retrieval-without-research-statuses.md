@@ -30,4 +30,3 @@ The atomicity gate, lexical shortlist, research statuses, `precision-v2` calibra
 - Recall now depends on Jev's section and paragraph choices rather than on lexical overlap. A section Jev does not pick is never read.
 - Without a status to downgrade, an unresolved successor or a traversal cut off by its bound is reported only as `currency[].complete: false`. The caller must notice it and qualify any claim that an RFC is current.
 - An RFC with more than 250 sections needs two sequential section requests, adding latency for the largest documents.
-- Currency no longer gates a status. A bounded or unresolved traversal is reported only through `currency[].complete` and the retrieval trace, so callers must read it before treating the listed successors as exhaustive.
