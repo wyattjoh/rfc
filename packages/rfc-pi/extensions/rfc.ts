@@ -1,6 +1,15 @@
 import { spawn } from "node:child_process";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type {
+  CitationVerificationResult,
+  EvidenceBundle,
+  RfcSourceCacheRemoveResult,
+  RfcSourceCacheStatus,
+} from "@wyattjoh/rfc-core";
+import type { AuthStatus } from "@wyattjoh/rfc";
 import {
+  datatrackerTopicSearchTermLimit,
+  datatrackerTopicSearchTermMaximumCharacters,
   renderAuthStatus,
   renderCitationVerification,
   renderEvidenceBundle,
@@ -8,17 +17,8 @@ import {
   renderSourceCacheStatus,
   rfcAgentToolMetadata,
   rfcMcpInstructions,
-  type AuthStatus,
-} from "@wyattjoh/rfc";
-import {
-  datatrackerTopicSearchTermLimit,
-  datatrackerTopicSearchTermMaximumCharacters,
   schemaVersion,
-  type CitationVerificationResult,
-  type EvidenceBundle,
-  type RfcSourceCacheRemoveResult,
-  type RfcSourceCacheStatus,
-} from "@wyattjoh/rfc-core";
+} from "@wyattjoh/rfc/agent";
 import { Type } from "typebox";
 
 const rfcPackageSpec = "@wyattjoh/rfc@latest";

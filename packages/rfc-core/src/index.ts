@@ -40,8 +40,6 @@ import {
   datatrackerCurrencyContextLimit,
   datatrackerDocumentCandidateLimit,
   datatrackerSuccessorLimit,
-  datatrackerTopicSearchTermLimit,
-  datatrackerTopicSearchTermMaximumCharacters,
   makeDefaultRfcDiscoveryLayer,
   makeRfcDiscoveryHttpLayer,
   type RfcMetadata,
@@ -74,6 +72,11 @@ import {
 } from "./source";
 import type { RfcSourceFetcher } from "./source";
 import { estimateInputTokenCost } from "./pricing";
+import {
+  datatrackerTopicSearchTermLimit,
+  datatrackerTopicSearchTermMaximumCharacters,
+  schemaVersion,
+} from "./protocol";
 
 export {
   CitationOffsetMismatchError,
@@ -93,12 +96,12 @@ export {
   type CitationVerificationResult,
   type CitationVerdict,
 } from "./citation";
+export { RfcDiscoveryError, RfcDocumentSchema } from "./discovery";
 export {
-  RfcDiscoveryError,
-  RfcDocumentSchema,
   datatrackerTopicSearchTermLimit,
   datatrackerTopicSearchTermMaximumCharacters,
-} from "./discovery";
+  schemaVersion,
+} from "./protocol";
 export type { LiveRetrievalTrace, RetrievalRequestTrace, RfcDocument } from "./discovery";
 export * from "./evaluation";
 export { RfcSourceRevalidationError } from "./live-source";
@@ -190,11 +193,6 @@ const defaultCacheDirectoryRoot = (() => {
 
   return join(homedir(), ".cache");
 })();
-
-/**
- * The version of the public JSON contracts exposed by the RFC evidence engine.
- */
-export const schemaVersion = 2 as const;
 
 /**
  * The default directory containing cached canonical RFC sources.
