@@ -44,6 +44,18 @@ const noRfcReason = (result: EvidenceBundle): string => {
 };
 
 /**
+ * Say what to do with a `needs_split` bundle rather than only naming it.
+ *
+ * A bare `Status: needs_split` reads as a failure, so callers retried the same
+ * compound request or refused it outright while the passages they needed were
+ * already in the bundle below. The caller holds the question and can parse it,
+ * so the split is its work; this line says to do that work and names the
+ * material it already has.
+ */
+const splitGuidance =
+  "Next step: this request asks for more than one fact. Split it into one atomic question per requested fact and research each in its own call against the RFC named above. The passages below are review candidates, not accepted evidence; reuse them rather than researching this RFC again.";
+
+/**
  * Render one evidence bundle for concise agent or human consumption.
  *
  * @param result Version-two evidence bundle.
@@ -53,6 +65,7 @@ export const renderEvidenceBundle = (result: EvidenceBundle): string => {
   const lines = [
     `Status: ${result.status}`,
     `RFC: ${result.rfc?.identifier ?? noRfcReason(result)}`,
+    ...(result.status === "needs_split" ? [splitGuidance] : []),
   ];
   for (const context of result.contexts ?? []) {
     lines.push(`Context: ${context.role} ${context.document.identifier} (${context.state})`);

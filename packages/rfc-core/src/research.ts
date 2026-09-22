@@ -107,6 +107,16 @@ export const ResearchStatusSchema = Schema.Literals([
 export type ResearchStatus = Schema.Schema.Type<typeof ResearchStatusSchema>;
 
 /**
+ * How many canonical passages a `needs_split` bundle surfaces for review.
+ *
+ * A compound request needs one follow-up call per part, and each part is
+ * usually carried by a different passage. Returning a single candidate made
+ * the caller re-retrieve the same source for every part. This is a bound on
+ * returned material, not an acceptance threshold, so it is not policy state.
+ */
+const splitReviewCandidateLimit = 4;
+
+/**
  * The role of an RFC in a currency-aware research result.
  */
 export const RfcContextRoleSchema = Schema.Literals(["requested", "current"]);
@@ -2063,19 +2073,19 @@ const reviewCandidatesFromSelection = (
   sourceForCandidate: (candidateId: string) => PassageSource | undefined,
   excludedCandidateIds: ReadonlySet<string>,
   selectionProbabilityThreshold: number,
+  limit: number,
 ): ReadonlyArray<ReviewCandidate> => {
   const blocks = new Map(candidates.map((candidate) => [candidate.id, candidate]));
   const available = diagnostics.filter(
     (candidate) => !excludedCandidateIds.has(candidate.candidateId),
   );
-  const strongestSemanticCandidate = [...available].sort(
-    (left, right) => right.probability - left.probability,
-  )[0];
+  const qualified = [...available]
+    .sort((left, right) => right.probability - left.probability)
+    .filter((candidate) => candidate.probability >= selectionProbabilityThreshold);
+  // Nothing cleared the semantic threshold, so one weak passage is the most
+  // that can honestly be offered for review.
   const reviewable =
-    strongestSemanticCandidate !== undefined &&
-    strongestSemanticCandidate.probability >= selectionProbabilityThreshold
-      ? [strongestSemanticCandidate]
-      : available.slice(0, 1);
+    qualified.length > 0 ? qualified.slice(0, Math.max(1, limit)) : available.slice(0, 1);
   return reviewable.flatMap((candidate) => {
     const block = blocks.get(candidate.candidateId);
     const context = sourceForCandidate(candidate.candidateId);
@@ -2291,6 +2301,7 @@ const researchContext = Effect.fnUntraced(function* (
           }),
           new Set(evidence.map((passage) => passage.id)),
           policy.selectionProbabilityThreshold,
+          status === "needs_split" ? splitReviewCandidateLimit : 1,
         )
       : [];
   const diagnostics = {
@@ -2697,7 +2708,10 @@ export const researchKnownRfc = Effect.fnUntraced(function* (
           : passage,
       ),
     )
-    .slice(0, 1);
+    // A compound request is researched once per part, and each part usually
+    // lands in a different passage. Capping the bundle at one candidate forced
+    // the caller to re-retrieve the same source for every follow-up.
+    .slice(0, status === "needs_split" ? splitReviewCandidateLimit : 1);
   const sourceDiagnostics = allResults.map((result) => ({
     context: result.context.role,
     source: sourceDiagnostic(result.source),
@@ -2876,16 +2890,17 @@ export const researchTopic = Effect.fnUntraced(function* (
     const resolvedModels =
       observedResolvedModels.length === 0 ? [fallbackResolvedModel] : observedResolvedModels;
     const diagnostics = makeEmptyDiagnostics(finishedAt, resolvedModel, resolvedModels);
+    // A confidently compound question is reported as such even when no
+    // document was accepted. needs_review tells the caller nothing it can act
+    // on, and the relation path already returns needs_split for this exact
+    // classification.
+    const emptyStatus = isConfidentCompound(documentSelection.atomicity, policy)
+      ? "needs_split"
+      : "needs_review";
     return Schema.decodeUnknownSync(InternalEvidenceBundleSchema)({
       schemaVersion: 2,
       kind: "evidence_bundle",
-      // A confidently compound question is reported as such even when no
-      // document was accepted. needs_review tells the caller nothing it can act
-      // on, and the relation path already returns needs_split for this exact
-      // classification.
-      status: isConfidentCompound(documentSelection.atomicity, policy)
-        ? "needs_split"
-        : "needs_review",
+      status: emptyStatus,
       question,
       rfc: null,
       evidence: [],
@@ -2987,6 +3002,7 @@ export const researchTopic = Effect.fnUntraced(function* (
           (candidateId) => blockSources.get(candidateId),
           new Set(evidence.map((passage) => passage.id)),
           policy.selectionProbabilityThreshold,
+          status === "needs_split" ? splitReviewCandidateLimit : 1,
         )
       : [];
   const diagnostics = {

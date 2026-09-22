@@ -899,10 +899,12 @@ const liveKnownResearchProgram = Effect.fnUntraced(function* (
           issues: [...new Set([...result.currency.issues, "traversal_limit" as const])],
         };
 
+  const status = lookup.traversalComplete ? result.status : "needs_review";
+
   return Schema.decodeUnknownSync(EvidenceBundleSchema)({
     ...result,
     schemaVersion: 2,
-    status: lookup.traversalComplete ? result.status : "needs_review",
+    status,
     currency,
     diagnostics: {
       ...result.diagnostics,
@@ -1021,11 +1023,13 @@ const liveTopicResearchProgram = Effect.fnUntraced(function* (
     requests,
   };
 
+  const status =
+    discovered.documents.length === 0 || discovered.truncated ? "needs_review" : result.status;
+
   return Schema.decodeUnknownSync(EvidenceBundleSchema)({
     ...result,
     schemaVersion: 2,
-    status:
-      discovered.documents.length === 0 || discovered.truncated ? "needs_review" : result.status,
+    status,
     contexts: result.contexts,
     currency: result.currency,
     diagnostics: {
