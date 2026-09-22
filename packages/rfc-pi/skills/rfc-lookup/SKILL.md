@@ -236,7 +236,11 @@ Report research status exactly:
 - `unsupported`: bounded research found no accepted answering evidence.
 - `needs_review`: confidence is low, evidence conflicts, discovery is empty, or
   RFC currency is uncertain.
-- `needs_split`: the question is compound and requires atomic questions.
+- `needs_split`: the question is compound and requires atomic questions. The
+  result carries `subQuestions` naming each part, the RFC it selected, and the
+  canonical review candidates it already retrieved. Research each listed
+  sub-question in its own call against that RFC and answer every part; never
+  rephrase and resubmit the compound request.
 
 Keep requested and current RFC contexts distinct. Follow returned
 `relationshipPath`, `isCurrent`, and currency diagnostics; never silently
@@ -274,7 +278,7 @@ production.
 2. **Topic discovery:** pass one to four explicit search terms and report evidence
    only when the returned status permits it.
 3. **Compound request:** split only explicit independent subquestions; otherwise
-   preserve `needs_split`.
+   preserve `needs_split` and research the `subQuestions` it returns.
 4. **Updated RFC:** show requested and current contexts and relationship paths.
 5. **Unsupported question:** report the evidence gap without recall.
 6. **Provider or upstream failure:** preserve the typed nonzero error and stop.

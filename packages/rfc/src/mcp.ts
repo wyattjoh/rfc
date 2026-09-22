@@ -52,6 +52,8 @@ For one atomic question:
 
 For up to two explicit independently answerable questions, use one research call per question and keep their inputs and outputs separate. Do not invent a split for an ambiguous request; preserve \`needs_split\`.
 
+When a result is \`needs_split\`, act on it rather than retrying or refusing. Research each question in its \`subQuestions\` array in its own call, against the RFC the result already names, and treat the returned review candidates as material you already hold. The at-most-one-follow-up budget applies per sub-question. Never rephrase and resubmit the compound request, and never re-research an RFC already researched in this session.
+
 ## Tools
 
 ### rfc_research_known_rfc
@@ -86,7 +88,7 @@ Report only whether the stable TypeSafe credential identity is configured. The M
 - \`partial\`: only part of the question or RFC currency coverage is established.
 - \`unsupported\`: bounded research found no accepted answering evidence.
 - \`needs_review\`: confidence is low, evidence conflicts, discovery is empty, or RFC currency is uncertain.
-- \`needs_split\`: the question is compound and requires atomic questions.
+- \`needs_split\`: the question is compound and requires atomic questions. The result carries \`subQuestions\` naming each atomic question, the RFC selected for the request, and the canonical review candidates already retrieved.
 
 A valid non-answer status is a successful tool result, not an operational failure. Review candidates are canonical source passages surfaced for bounded review but are not accepted evidence. Never turn them into unqualified claims.
 

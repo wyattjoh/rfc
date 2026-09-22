@@ -1357,4 +1357,18 @@ describe("evidence bundle rendering", () => {
     expect(rejected).toContain("3 candidate RFCs");
     expect(rejected).not.toContain("none discovered");
   });
+
+  test("tells the caller what to do with a needs_split bundle", () => {
+    // `Status: needs_split` alone reads as a failure, so callers retried or
+    // refused instead of researching each part against the same bundle.
+    const split = renderEvidenceBundle({
+      ...stubEvidenceBundle,
+      status: "needs_split",
+      subQuestions: ["What must the client send?", "What must the server return?"],
+    } as unknown as Parameters<typeof renderEvidenceBundle>[0]);
+
+    expect(split).toContain("Next step:");
+    expect(split).toContain("Sub-question 1: What must the client send?");
+    expect(split).toContain("Sub-question 2: What must the server return?");
+  });
 });

@@ -63,6 +63,7 @@ import {
   RfcNotFoundError,
   researchKnownRfc,
   researchTopic,
+  subQuestionsForStatus,
 } from "./research";
 import type { EvidenceBundle } from "./research";
 import {
@@ -133,6 +134,8 @@ export {
   precisionV2Policy,
   researchPolicyPresets,
   shortlistPassageCandidates,
+  splitCompoundQuestion,
+  subQuestionsForStatus,
   type AnswerRelation,
   type EvidenceBundle,
   type EvidencePassage,
@@ -899,10 +902,15 @@ const liveKnownResearchProgram = Effect.fnUntraced(function* (
           issues: [...new Set([...result.currency.issues, "traversal_limit" as const])],
         };
 
+  const status = lookup.traversalComplete ? result.status : "needs_review";
+
   return Schema.decodeUnknownSync(EvidenceBundleSchema)({
     ...result,
     schemaVersion: 2,
-    status: lookup.traversalComplete ? result.status : "needs_review",
+    status,
+    // An incomplete traversal downgrades the status, and sub-questions belong
+    // only to a status that actually asks the caller to split.
+    subQuestions: subQuestionsForStatus(status, request.question),
     currency,
     diagnostics: {
       ...result.diagnostics,
@@ -1021,11 +1029,16 @@ const liveTopicResearchProgram = Effect.fnUntraced(function* (
     requests,
   };
 
+  const status =
+    discovered.documents.length === 0 || discovered.truncated ? "needs_review" : result.status;
+
   return Schema.decodeUnknownSync(EvidenceBundleSchema)({
     ...result,
     schemaVersion: 2,
-    status:
-      discovered.documents.length === 0 || discovered.truncated ? "needs_review" : result.status,
+    status,
+    // Truncated discovery downgrades the status, and sub-questions belong only
+    // to a status that actually asks the caller to split.
+    subQuestions: subQuestionsForStatus(status, request.question),
     contexts: result.contexts,
     currency: result.currency,
     diagnostics: {

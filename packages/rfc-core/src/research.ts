@@ -107,6 +107,94 @@ export const ResearchStatusSchema = Schema.Literals([
 export type ResearchStatus = Schema.Schema.Type<typeof ResearchStatusSchema>;
 
 /**
+ * How many canonical passages a `needs_split` bundle surfaces for review.
+ *
+ * A compound request needs one follow-up call per part, and each part is
+ * usually carried by a different passage. Returning a single candidate made
+ * the caller re-retrieve the same source for every part. This is a bound on
+ * returned material, not an acceptance threshold, so it is not policy state.
+ */
+const splitReviewCandidateLimit = 4;
+
+const subQuestionLead =
+  /^(?:what|when|where|which|who|whom|whose|why|how|does|do|did|is|are|was|were|can|could|must|should|shall|may|might|will|would|has|have|had|list|name|describe|explain|define|state)\b/i;
+
+const subQuestionBoundary = /([?;,])\s*(?:and\s+|or\s+|then\s+)?|\s+(?:and|as well as)\s+/gi;
+
+const minimumSubQuestionWords = 3;
+
+const normalizeSubQuestion = (clause: string): string => {
+  const trimmed = clause
+    .trim()
+    .replace(/[,;]+$/, "")
+    .trim();
+  const capitalized = trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
+  return /[?.]$/.test(capitalized) ? capitalized : `${capitalized}?`;
+};
+
+/**
+ * Split a confidently compound request into the atomic questions it bundles.
+ *
+ * `needs_split` used to report only that a request asked for too much, so the
+ * caller had to guess where the seams were and often retried the whole request
+ * instead. This derives the seams from the request text alone: the decision
+ * model exposes only classify, rate, and probability answers and cannot return
+ * free text, so asking it for the parts would mean a second provider of a
+ * different shape for a result the question already determines.
+ *
+ * The split is deliberately fail-closed. A boundary counts only when the text
+ * after it opens a new interrogative clause, and a split that produces any
+ * clause shorter than three words is discarded entirely rather than handing
+ * back a fragment the caller cannot research.
+ *
+ * @param question The compound request as the caller phrased it.
+ * @returns One normalized question per part, or an empty array when no
+ * reliable split exists.
+ */
+export const splitCompoundQuestion = (question: string): ReadonlyArray<string> => {
+  const normalized = question.trim().replace(/\s+/g, " ");
+  if (normalized.length === 0) return [];
+  const boundary = new RegExp(subQuestionBoundary.source, subQuestionBoundary.flags);
+  const clauses: Array<string> = [];
+  let clauseStart = 0;
+  let match = boundary.exec(normalized);
+  while (match !== null) {
+    const punctuation = match[1];
+    const clauseEnd = match.index + (punctuation === undefined ? 0 : punctuation.length);
+    const nextStart = match.index + match[0].length;
+    if (subQuestionLead.test(normalized.slice(nextStart))) {
+      const clause = normalized.slice(clauseStart, clauseEnd).trim();
+      if (clause.length > 0) clauses.push(clause);
+      clauseStart = nextStart;
+    }
+    match = boundary.exec(normalized);
+  }
+  const tail = normalized.slice(clauseStart).trim();
+  if (tail.length > 0) clauses.push(tail);
+  if (clauses.length < 2) return [];
+  const subQuestions = clauses.map(normalizeSubQuestion);
+  return subQuestions.every((clause) => clause.split(" ").length >= minimumSubQuestionWords)
+    ? subQuestions
+    : [];
+};
+
+/**
+ * Derive the sub-questions a bundle carries for its final status.
+ *
+ * Only `needs_split` names parts; every other status either answers the
+ * request or refuses it for a reason a split would not address.
+ *
+ * @param status The status the bundle reports.
+ * @param question The request as the caller phrased it.
+ * @returns The atomic questions to research next, or undefined.
+ */
+export const subQuestionsForStatus = (
+  status: ResearchStatus,
+  question: string,
+): ReadonlyArray<string> | undefined =>
+  status === "needs_split" ? splitCompoundQuestion(question) : undefined;
+
+/**
  * The role of an RFC in a currency-aware research result.
  */
 export const RfcContextRoleSchema = Schema.Literals(["requested", "current"]);
@@ -541,6 +629,9 @@ const InternalEvidenceBundleSchema = Schema.Struct({
   rfc: Schema.NullOr(RfcMetadataSchema),
   contexts: Schema.optionalKey(Schema.Array(InternalRfcResearchContextSchema)),
   currency: Schema.optionalKey(RfcCurrencyReportSchema),
+  subQuestions: Schema.optionalKey(
+    Schema.Union([Schema.Array(Schema.NonEmptyString), Schema.Undefined]),
+  ),
   evidence: Schema.Array(EvidencePassageSchema),
   reviewCandidates: Schema.optionalKey(Schema.Array(ReviewCandidateSchema)),
   diagnostics: InternalResearchDiagnosticsSchema,
@@ -634,6 +725,12 @@ export const EvidenceBundleSchema = Schema.Struct({
     Schema.Union([Schema.Array(RfcResearchContextSchema), Schema.Undefined]),
   ),
   currency: Schema.optionalKey(Schema.Union([RfcCurrencyReportSchema, Schema.Undefined])),
+  /**
+   * The atomic questions to research next when the status is `needs_split`.
+   */
+  subQuestions: Schema.optionalKey(
+    Schema.Union([Schema.Array(Schema.NonEmptyString), Schema.Undefined]),
+  ),
   evidence: Schema.Array(EvidencePassageSchema),
   reviewCandidates: Schema.optionalKey(
     Schema.Union([Schema.Array(ReviewCandidateSchema), Schema.Undefined]),
@@ -2063,19 +2160,19 @@ const reviewCandidatesFromSelection = (
   sourceForCandidate: (candidateId: string) => PassageSource | undefined,
   excludedCandidateIds: ReadonlySet<string>,
   selectionProbabilityThreshold: number,
+  limit: number,
 ): ReadonlyArray<ReviewCandidate> => {
   const blocks = new Map(candidates.map((candidate) => [candidate.id, candidate]));
   const available = diagnostics.filter(
     (candidate) => !excludedCandidateIds.has(candidate.candidateId),
   );
-  const strongestSemanticCandidate = [...available].sort(
-    (left, right) => right.probability - left.probability,
-  )[0];
+  const qualified = [...available]
+    .sort((left, right) => right.probability - left.probability)
+    .filter((candidate) => candidate.probability >= selectionProbabilityThreshold);
+  // Nothing cleared the semantic threshold, so one weak passage is the most
+  // that can honestly be offered for review.
   const reviewable =
-    strongestSemanticCandidate !== undefined &&
-    strongestSemanticCandidate.probability >= selectionProbabilityThreshold
-      ? [strongestSemanticCandidate]
-      : available.slice(0, 1);
+    qualified.length > 0 ? qualified.slice(0, Math.max(1, limit)) : available.slice(0, 1);
   return reviewable.flatMap((candidate) => {
     const block = blocks.get(candidate.candidateId);
     const context = sourceForCandidate(candidate.candidateId);
@@ -2291,6 +2388,7 @@ const researchContext = Effect.fnUntraced(function* (
           }),
           new Set(evidence.map((passage) => passage.id)),
           policy.selectionProbabilityThreshold,
+          status === "needs_split" ? splitReviewCandidateLimit : 1,
         )
       : [];
   const diagnostics = {
@@ -2697,7 +2795,10 @@ export const researchKnownRfc = Effect.fnUntraced(function* (
           : passage,
       ),
     )
-    .slice(0, 1);
+    // A compound request is researched once per part, and each part usually
+    // lands in a different passage. Capping the bundle at one candidate forced
+    // the caller to re-retrieve the same source for every follow-up.
+    .slice(0, status === "needs_split" ? splitReviewCandidateLimit : 1);
   const sourceDiagnostics = allResults.map((result) => ({
     context: result.context.role,
     source: sourceDiagnostic(result.source),
@@ -2777,6 +2878,7 @@ export const researchKnownRfc = Effect.fnUntraced(function* (
     rfc: requested,
     contexts,
     currency: report,
+    subQuestions: subQuestionsForStatus(status, question),
     evidence,
     reviewCandidates,
     diagnostics,
@@ -2876,18 +2978,20 @@ export const researchTopic = Effect.fnUntraced(function* (
     const resolvedModels =
       observedResolvedModels.length === 0 ? [fallbackResolvedModel] : observedResolvedModels;
     const diagnostics = makeEmptyDiagnostics(finishedAt, resolvedModel, resolvedModels);
+    // A confidently compound question is reported as such even when no
+    // document was accepted. needs_review tells the caller nothing it can act
+    // on, and the relation path already returns needs_split for this exact
+    // classification.
+    const emptyStatus = isConfidentCompound(documentSelection.atomicity, policy)
+      ? "needs_split"
+      : "needs_review";
     return Schema.decodeUnknownSync(InternalEvidenceBundleSchema)({
       schemaVersion: 2,
       kind: "evidence_bundle",
-      // A confidently compound question is reported as such even when no
-      // document was accepted. needs_review tells the caller nothing it can act
-      // on, and the relation path already returns needs_split for this exact
-      // classification.
-      status: isConfidentCompound(documentSelection.atomicity, policy)
-        ? "needs_split"
-        : "needs_review",
+      status: emptyStatus,
       question,
       rfc: null,
+      subQuestions: subQuestionsForStatus(emptyStatus, question),
       evidence: [],
       reviewCandidates: [],
       diagnostics,
@@ -2987,6 +3091,7 @@ export const researchTopic = Effect.fnUntraced(function* (
           (candidateId) => blockSources.get(candidateId),
           new Set(evidence.map((passage) => passage.id)),
           policy.selectionProbabilityThreshold,
+          status === "needs_split" ? splitReviewCandidateLimit : 1,
         )
       : [];
   const diagnostics = {
@@ -3035,6 +3140,7 @@ export const researchTopic = Effect.fnUntraced(function* (
     status,
     question,
     rfc: primaryDocument,
+    subQuestions: subQuestionsForStatus(status, question),
     evidence,
     reviewCandidates,
     diagnostics,
