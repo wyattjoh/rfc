@@ -156,6 +156,64 @@ const successResult = (
   details: { structuredContent, warnings } satisfies RfcToolDetails,
 });
 
+/**
+ * Environment variable that replaces the published CLI for a session.
+ */
+const rfcCliCommandVariable = "RFC_CLI_COMMAND";
+
+/**
+ * The executable and leading arguments used to run the RFC CLI.
+ */
+type RfcCliInvocation = {
+  /**
+   * Executable resolved through PATH, or an absolute path.
+   */
+  readonly command: string;
+  /**
+   * Arguments placed before the per-tool arguments.
+   */
+  readonly prefixArguments: ReadonlyArray<string>;
+};
+
+/**
+ * Resolve how to run the RFC CLI, honouring a development override.
+ *
+ * `RFC_CLI_COMMAND` accepts a JSON array for a command with arguments, for
+ * example `["bun","/path/to/packages/rfc/src/bin.ts"]`, or a bare executable
+ * path. It exists so a working-tree CLI can be exercised without publishing;
+ * unset, the pinned published package is used. The variable selects an
+ * executable, which is no more exposure than PATH already carries for `bunx`.
+ *
+ * Read per call rather than at module load so a session can set it late.
+ *
+ * @returns The command and leading arguments to spawn.
+ */
+const resolveRfcInvocation = (): RfcCliInvocation => {
+  const override = process.env[rfcCliCommandVariable]?.trim();
+  if (override === undefined || override.length === 0) {
+    return { command: "bunx", prefixArguments: [rfcPackageSpec] };
+  }
+  if (!override.startsWith("[")) return { command: override, prefixArguments: [] };
+
+  const parsed: unknown = ((): unknown => {
+    try {
+      return JSON.parse(override);
+    } catch {
+      return undefined;
+    }
+  })();
+  if (
+    !Array.isArray(parsed) ||
+    parsed.length === 0 ||
+    !parsed.every((entry) => typeof entry === "string" && entry.length > 0)
+  ) {
+    throw new Error(
+      `${rfcCliCommandVariable} must be a non-empty executable path or a JSON array of non-empty strings`,
+    );
+  }
+  return { command: parsed[0] as string, prefixArguments: (parsed as Array<string>).slice(1) };
+};
+
 const parseJsonObject = (value: string): object | undefined => {
   try {
     const parsed: unknown = JSON.parse(value);
@@ -175,7 +233,8 @@ const runRfcCommand = <A extends object>(
   new Promise((resolve, reject) => {
     signal?.throwIfAborted();
 
-    const child = spawn("bunx", [rfcPackageSpec, ...args], {
+    const invocation = resolveRfcInvocation();
+    const child = spawn(invocation.command, [...invocation.prefixArguments, ...args], {
       stdio: ["pipe", "pipe", "pipe"],
     });
     const stdout: Array<Buffer> = [];

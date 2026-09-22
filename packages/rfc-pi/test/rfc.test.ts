@@ -67,11 +67,29 @@ const withStubBunx = async <A>(script: string, run: () => Promise<A>): Promise<A
   const directory = await mkdtemp(join(tmpdir(), "rfc-pi-stub-bunx-"));
   await writeFile(join(directory, "bunx"), script, { mode: 0o755 });
   const originalPath = process.env.PATH;
+  // A developer override in the ambient environment would bypass the stub.
+  const originalCommand = process.env.RFC_CLI_COMMAND;
   process.env.PATH = `${directory}:${originalPath ?? ""}`;
+  delete process.env.RFC_CLI_COMMAND;
   try {
     return await run();
   } finally {
     process.env.PATH = originalPath;
+    if (originalCommand !== undefined) process.env.RFC_CLI_COMMAND = originalCommand;
+  }
+};
+
+/**
+ * Run with `RFC_CLI_COMMAND` set to the supplied value, restoring it afterwards.
+ */
+const withCliCommand = async <A>(value: string, run: () => Promise<A>): Promise<A> => {
+  const original = process.env.RFC_CLI_COMMAND;
+  process.env.RFC_CLI_COMMAND = value;
+  try {
+    return await run();
+  } finally {
+    if (original === undefined) delete process.env.RFC_CLI_COMMAND;
+    else process.env.RFC_CLI_COMMAND = original;
   }
 };
 
@@ -219,6 +237,41 @@ describe("CLI package spec", () => {
     // The argv contract below replays against the in-repo CLI, so that CLI must
     // be the one the extension actually spawns.
     expect(spec).toBe(`@wyattjoh/rfc@${cliManifest.version}`);
+  });
+});
+
+describe("RFC_CLI_COMMAND override", () => {
+  test("runs the local CLI end to end instead of the published package", async () => {
+    const { tools } = registerExtension();
+    const tool = findTool(tools, rfcAgentToolMetadata.authStatus.name);
+
+    // A bunx that always fails sits on PATH, so this only succeeds if the
+    // override took effect and the working-tree CLI ran instead.
+    const error = await withStubBunx(
+      ["#!/bin/sh", "printf 'bunx was used\\n' >&2", "exit 1"].join("\n"),
+      () =>
+        withCliCommand(JSON.stringify(["bun", rfcCliEntry]), () => runTool(tool, "override-1", {})),
+    );
+
+    expect(error?.message).toBeUndefined();
+  });
+
+  test("accepts a bare executable and reports an unusable value", async () => {
+    const { tools } = registerExtension();
+    const tool = findTool(tools, rfcAgentToolMetadata.authStatus.name);
+    const directory = await mkdtemp(join(tmpdir(), "rfc-pi-override-"));
+    const stub = join(directory, "rfc-stub");
+    await writeFile(stub, ["#!/bin/sh", "printf 'stub failure\\n' >&2", "exit 9"].join("\n"), {
+      mode: 0o755,
+    });
+
+    const bare = await withCliCommand(stub, () => runTool(tool, "override-2", {}));
+    expect(bare).toBeInstanceOf(Error);
+    expect(bare?.message).toContain("exit 9");
+    expect(bare?.message).toContain("stub failure");
+
+    const unusable = await withCliCommand("[]", () => runTool(tool, "override-3", {}));
+    expect(unusable?.message).toContain("RFC_CLI_COMMAND");
   });
 });
 

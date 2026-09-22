@@ -17,6 +17,16 @@ bunx @wyattjoh/rfc@latest auth login
 bunx @wyattjoh/rfc@latest auth
 ```
 
-The extension runs `bunx @wyattjoh/rfc@latest` for each tool call. Credentials remain in the OS credential manager and are never exposed to Pi or accepted through tool input.
+Each tool call runs the CLI through `bunx`, pinned to the exact `@wyattjoh/rfc` version this package depends on rather than a dist-tag, so a call never re-resolves against the registry and never runs a CLI this package was not tested against. Credentials remain in the OS credential manager and are never exposed to Pi or accepted through tool input.
+
+## Running a local CLI
+
+Set `RFC_CLI_COMMAND` to exercise a working-tree CLI without publishing it. Accepts a JSON array for a command with arguments, or a bare executable path:
+
+```sh
+export RFC_CLI_COMMAND='["bun","/path/to/rfc/packages/rfc/src/bin.ts"]'
+```
+
+Unset, the pinned published package is used. The variable chooses an executable, so treat it the way you treat `PATH`.
 
 Review the package before installation: Pi extensions execute with the user's full system permissions.
