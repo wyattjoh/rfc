@@ -7,7 +7,7 @@ Native [Pi](https://pi.dev) integration for the RFC Evidence Engine. The package
 Requires Bun 1.4.2 or newer:
 
 ```sh
-pi install npm:@wyattjoh/rfc-pi@latest
+pi install npm:@wyattjoh/rfc-pi
 ```
 
 Authenticate the latest published CLI once before using semantic tools:
