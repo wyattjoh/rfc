@@ -720,9 +720,14 @@ const answerRelationCriteria = {
 } as const;
 
 const atomicityCriteria = {
-  atomic: "The request contains one independently answerable question.",
-  compound: "The request contains multiple independently answerable questions.",
+  atomic:
+    "Exactly one fact is requested. Asking to also cite where that fact appears, whether by section, RFC number, or quotation, is part of the same request and is never a second fact.",
+  compound:
+    "Two or more unrelated facts are requested, each one a different passage would answer, such as two different header fields, two different protocols, or two different parameters.",
 } as const;
+
+const atomicityInstructions =
+  "Count the distinct facts the request asks for, then choose a label. Naming the section or RFC that carries a fact is part of requesting that fact, not an extra one.";
 
 type AtomicityLabel = keyof typeof atomicityCriteria;
 
@@ -1323,8 +1328,7 @@ const documentSelectionStage = Effect.fnUntraced(function* (
     [
       "question_atomicity",
       Decision.classify({
-        instructions:
-          "Determine whether the request contains one atomic question or multiple questions.",
+        instructions: atomicityInstructions,
         criteria: atomicityCriteria,
       }),
     ],
@@ -1441,8 +1445,7 @@ const selectionStage = Effect.fnUntraced(function* (
           [
             "question_atomicity",
             Decision.classify({
-              instructions:
-                "Determine whether the request contains one atomic question or multiple questions.",
+              instructions: atomicityInstructions,
               criteria: atomicityCriteria,
             }),
           ],
