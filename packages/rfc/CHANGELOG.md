@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/wyattjoh/rfc/compare/rfc-v0.2.1...rfc-v0.3.0) (2026-09-22)
+
+
+### Features
+
+* publish Pi integration package ([83dd266](https://github.com/wyattjoh/rfc/commit/83dd2664f241fd0476d7fda8aa06268b7b2b0440))
+
 ## [0.2.1](https://github.com/wyattjoh/rfc/compare/rfc-v0.2.0...rfc-v0.2.1) (2026-09-22)
 
 

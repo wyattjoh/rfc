@@ -1,6 +1,6 @@
 {
   "name": "@wyattjoh/rfc-pi",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Native Pi extension and lookup skill for evidence-grounded IETF RFC research.",
   "keywords": [
     "ietf",
@@ -28,7 +28,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@wyattjoh/rfc": "0.2.1",
+    "@wyattjoh/rfc": "0.3.0",
     "@wyattjoh/rfc-core": "0.1.0"
   },
   "devDependencies": {
