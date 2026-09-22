@@ -89,7 +89,7 @@ const topicResearchParameters = Type.Object(
     searchTerms: Type.Array(
       Type.String({
         description:
-          "Deliberate topic-discovery term sent verbatim in Datatracker query URLs and upstream logs",
+          'Deliberate topic-discovery term sent verbatim in Datatracker query URLs and upstream logs. Matched as a literal case-insensitive substring of an RFC title or abstract, so use a short noun phrase such as "DNS over TLS"; a sentence fragment such as "DNS over TLS default port" matches nothing.',
         minLength: 1,
         maxLength: datatrackerTopicSearchTermMaximumCharacters,
       }),

@@ -135,6 +135,11 @@ search terms. Supply the technical phrases intentionally; they are transmitted
 verbatim in Datatracker query URLs and may appear in upstream access logs. The
 full natural-language question is not sent to Datatracker.
 
+Datatracker matches each term as a literal case-insensitive substring of an RFC
+title or abstract. A short noun phrase such as `DNS over TLS` finds documents; a
+sentence fragment such as `DNS over TLS default port` matches nothing, because
+no title or abstract contains that exact string.
+
 ```sh
 cat <<'JSON' | rfc research --format human
 {
