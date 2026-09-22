@@ -12,7 +12,7 @@ export {
 export {
   renderAuthStatus,
   renderCitationVerification,
-  renderEvidenceBundle,
+  renderResearchResult,
   renderSourceCacheRemove,
   renderSourceCacheStatus,
 } from "./renderers";

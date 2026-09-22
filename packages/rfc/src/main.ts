@@ -19,7 +19,7 @@ import {
   executeSourceCacheStatus,
   renderAuthStatus,
   renderCitationVerification,
-  renderEvidenceBundle,
+  renderResearchResult,
   renderEstimatedUsd,
   renderSourceCacheRemove,
   renderSourceCacheStatus,
@@ -117,20 +117,21 @@ const rfcSearchApiKey = Flag.String("rfc-search-api-key").pipe(
   Flag.optional,
 );
 
-const question = Flag.String("question").pipe(
+const questions = Flag.String("question").pipe(
   Flag.withAlias("q"),
-  Flag.withDescription("Short question used when standard input is not supplied"),
-  Flag.optional,
+  Flag.withDescription("Question to research; repeat one to four times, one per fact"),
+  Flag.between(0, 4),
 );
 
-const questionArgument = Argument.String("question").pipe(
-  Argument.withDescription("Question to research when standard input is not supplied"),
-  Argument.optional,
+const researchRfcs = Flag.String("rfc").pipe(
+  Flag.withAlias("r"),
+  Flag.withDescription("Published RFC identifier to search; repeat up to four times"),
+  Flag.between(0, 4),
 );
 
 const rfc = Flag.String("rfc").pipe(
   Flag.withAlias("r"),
-  Flag.withDescription("Known RFC identifier for a short interactive request"),
+  Flag.withDescription("Published RFC identifier containing the quotation"),
   Flag.optional,
 );
 
@@ -146,7 +147,7 @@ const rfcArgument = Argument.String("rfc").pipe(
 );
 
 const searchTerms = Flag.String("search-term").pipe(
-  Flag.withDescription("Ordered topic-discovery term; repeat one to four times"),
+  Flag.withDescription("Ordered topic-discovery term; repeat up to four times"),
   Flag.between(0, 4),
 );
 
@@ -339,7 +340,9 @@ const decodeCitationRequest = (input: unknown) => {
   try {
     return decodeCitationVerificationRequest(input);
   } catch {
-    throw new InvalidInputError({ reason: "Citation input must use schema version 2" });
+    throw new InvalidInputError({
+      reason: `Citation input must use schema version ${schemaVersion}`,
+    });
   }
 };
 
@@ -545,7 +548,7 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
                 flags.quoteArgument,
               );
               return decodeCitationRequest({
-                schemaVersion: 2,
+                schemaVersion,
                 rfc: selectedRfc,
                 claim: selectedClaim,
                 quote: selectedQuote,
@@ -600,10 +603,8 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
       rfcSearchApiUrl,
       rfcSearchApiKey,
       format,
-      question,
-      questionArgument,
-      rfc,
-      rfcArgument,
+      questions,
+      rfcs: researchRfcs,
       searchTerms,
       typeSafeApiUrl,
     },
@@ -616,27 +617,12 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
       const request =
         standardInput.trim().length > 0
           ? decodeResearchInput(standardInput)
-          : (() => {
-              const selectedQuestion = resolveRequiredArgumentInput(
-                "--question",
-                flags.question,
-                flags.questionArgument,
-              );
-              const selectedRfc = resolveArgumentInput("--rfc", flags.rfc, flags.rfcArgument);
-              return selectedRfc === undefined
-                ? decodeResearchRequest({
-                    schemaVersion,
-                    question: selectedQuestion,
-                    rfc: null,
-                    searchTerms: flags.searchTerms,
-                  })
-                : decodeResearchRequest({
-                    schemaVersion,
-                    question: selectedQuestion,
-                    rfc: selectedRfc,
-                    searchTerms: flags.searchTerms.length === 0 ? undefined : flags.searchTerms,
-                  });
-            })();
+          : decodeResearchRequest({
+              schemaVersion,
+              questions: flags.questions,
+              ...(flags.rfcs.length === 0 ? {} : { rfcs: flags.rfcs }),
+              ...(flags.searchTerms.length === 0 ? {} : { searchTerms: flags.searchTerms }),
+            });
 
       const result = yield* Effect.tryPromise({
         try: () =>
@@ -656,20 +642,21 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
       yield* writeWarnings(result.warnings);
       yield* writeStdout(
         resolveOutputFormat(flags.format, standardInput.trim().length > 0) === "human"
-          ? renderEvidenceBundle(result.value)
+          ? renderResearchResult(result.value)
           : JSON.stringify(result.value),
       );
     }),
   ).pipe(
-    Command.withDescription("Research an RFC question from versioned JSON input"),
+    Command.withDescription("Research RFC questions from flags or versioned JSON input"),
     Command.withExamples([
       {
         command: "rfc research < question.json",
         description: "Use canonical JSON from standard input",
       },
       {
-        command: 'rfc research "What does RFC 9110 require?" RFC9110',
-        description: "Use human-friendly positional arguments when standard input is empty",
+        command:
+          'rfc research -q "What does the 429 status code mean?" -q "Which header says how long to wait?" -r RFC6585 -r RFC9110',
+        description: "Research several questions against named RFCs when standard input is empty",
       },
     ]),
   );

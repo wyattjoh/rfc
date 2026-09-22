@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type {
   CitationVerificationResult,
-  EvidenceBundle,
+  ResearchResult,
   RfcSourceCacheRemoveResult,
   RfcSourceCacheStatus,
 } from "@wyattjoh/rfc-core";
@@ -12,7 +12,7 @@ import {
   datatrackerTopicSearchTermMaximumCharacters,
   renderAuthStatus,
   renderCitationVerification,
-  renderEvidenceBundle,
+  renderResearchResult,
   renderSourceCacheRemove,
   renderSourceCacheStatus,
   rfcAgentParameterDescriptions as descriptions,
@@ -20,6 +20,7 @@ import {
   rfcPiInstructions,
   schemaVersion,
 } from "@wyattjoh/rfc/agent";
+import { retrievalPolicy } from "@wyattjoh/rfc-core";
 import { Type } from "typebox";
 import rfcPiPackage from "../package.json" with { type: "json" };
 
@@ -76,28 +77,33 @@ const commandFailures = new Map<string, RfcCommandFailureDiagnostics>();
 
 const nonEmptyString = (description: string) => Type.String({ description, minLength: 1 });
 
-const knownRfcResearchParameters = Type.Object(
+const researchParameters = Type.Object(
   {
-    question: nonEmptyString(descriptions.knownQuestion),
-    rfc: nonEmptyString(descriptions.rfc),
-  },
-  { additionalProperties: false },
-);
-
-const topicResearchParameters = Type.Object(
-  {
-    question: nonEmptyString(descriptions.topicQuestion),
-    searchTerms: Type.Array(
-      Type.String({
-        description: descriptions.searchTerm,
-        minLength: 1,
-        maxLength: datatrackerTopicSearchTermMaximumCharacters,
-      }),
-      {
-        description: descriptions.searchTerms,
+    questions: Type.Array(nonEmptyString(descriptions.question), {
+      description: descriptions.questions,
+      minItems: 1,
+      maxItems: retrievalPolicy.maxQuestions,
+    }),
+    rfcs: Type.Optional(
+      Type.Array(nonEmptyString(descriptions.rfc), {
+        description: descriptions.rfcs,
         minItems: 1,
-        maxItems: datatrackerTopicSearchTermLimit,
-      },
+        maxItems: retrievalPolicy.maxRequestedRfcs,
+      }),
+    ),
+    searchTerms: Type.Optional(
+      Type.Array(
+        Type.String({
+          description: descriptions.searchTerm,
+          minLength: 1,
+          maxLength: datatrackerTopicSearchTermMaximumCharacters,
+        }),
+        {
+          description: descriptions.searchTerms,
+          minItems: 1,
+          maxItems: datatrackerTopicSearchTermLimit,
+        },
+      ),
     ),
   },
   { additionalProperties: false },
@@ -167,8 +173,8 @@ const rfcCliCommandVariable = "RFC_CLI_COMMAND";
  */
 const rfcLocalToolsVariable = "RFC_PI_LOCAL_TOOLS";
 
-const renderAgentEvidence = (value: EvidenceBundle): string =>
-  renderEvidenceBundle(value, { audience: "agent" });
+const renderAgentResearch = (value: ResearchResult): string =>
+  renderResearchResult(value, { audience: "agent" });
 
 /**
  * The executable and leading arguments used to run the RFC CLI.
@@ -380,36 +386,24 @@ export default function rfcExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerTool({
-    name: rfcAgentToolMetadata.researchKnownRfc.name,
-    label: rfcAgentToolMetadata.researchKnownRfc.title,
-    description: rfcAgentToolMetadata.researchKnownRfc.description,
-    promptSnippet: rfcAgentToolMetadata.researchKnownRfc.title,
-    parameters: knownRfcResearchParameters,
-    async execute(toolCallId, { question, rfc }, signal) {
-      const result = await runToolCommand<EvidenceBundle>(
+    name: rfcAgentToolMetadata.research.name,
+    label: rfcAgentToolMetadata.research.title,
+    description: rfcAgentToolMetadata.research.description,
+    promptSnippet: rfcAgentToolMetadata.research.title,
+    parameters: researchParameters,
+    async execute(toolCallId, { questions, rfcs, searchTerms }, signal) {
+      const result = await runToolCommand<ResearchResult>(
         toolCallId,
         ["research"],
-        { schemaVersion, question, rfc },
+        {
+          schemaVersion,
+          questions,
+          ...(rfcs === undefined ? {} : { rfcs }),
+          ...(searchTerms === undefined ? {} : { searchTerms }),
+        },
         signal,
       );
-      return successResult(result.value, renderAgentEvidence(result.value), result.warnings);
-    },
-  });
-
-  pi.registerTool({
-    name: rfcAgentToolMetadata.researchTopic.name,
-    label: rfcAgentToolMetadata.researchTopic.title,
-    description: rfcAgentToolMetadata.researchTopic.description,
-    promptSnippet: rfcAgentToolMetadata.researchTopic.title,
-    parameters: topicResearchParameters,
-    async execute(toolCallId, { question, searchTerms }, signal) {
-      const result = await runToolCommand<EvidenceBundle>(
-        toolCallId,
-        ["research"],
-        { schemaVersion, question, rfc: null, searchTerms },
-        signal,
-      );
-      return successResult(result.value, renderAgentEvidence(result.value), result.warnings);
+      return successResult(result.value, renderAgentResearch(result.value), result.warnings);
     },
   });
 

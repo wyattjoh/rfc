@@ -35,7 +35,6 @@
   "scripts": {
     "build": "bun build src/bin.ts --outdir dist --target bun",
     "test": "bun test",
-    "evaluate:live": "cd ../.. && bun run packages/rfc/src/live-evaluation-bin.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {

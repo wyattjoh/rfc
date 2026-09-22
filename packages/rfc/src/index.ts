@@ -16,7 +16,7 @@ export {
   executeSourceCacheStatus,
   renderAuthStatus,
   renderCitationVerification,
-  renderEvidenceBundle,
+  renderResearchResult,
   renderSourceCacheRemove,
   renderSourceCacheStatus,
   toRfcOperationErrorEnvelope,

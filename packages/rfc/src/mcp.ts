@@ -1,14 +1,15 @@
 import {
   CitationVerificationResultSchema,
-  EvidenceBundleSchema,
+  ResearchResultSchema,
   InvalidInputError,
   RfcSourceCacheRemoveResultSchema,
   RfcSourceCacheStatusSchema,
   datatrackerTopicSearchTermLimit,
   datatrackerTopicSearchTermMaximumCharacters,
+  retrievalPolicy,
   schemaVersion,
   type CitationVerificationResult,
-  type EvidenceBundle,
+  type ResearchResult,
 } from "@wyattjoh/rfc-core";
 import { McpServer, type CallToolResult } from "@modelcontextprotocol/server";
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
@@ -28,7 +29,7 @@ import {
   executeSourceCacheStatus,
   renderAuthStatus,
   renderCitationVerification,
-  renderEvidenceBundle,
+  renderResearchResult,
   renderSourceCacheRemove,
   renderSourceCacheStatus,
   toRfcOperationErrorEnvelope,
@@ -45,37 +46,42 @@ export { rfcAgentToolMetadata, rfcMcpAgentReferenceUri, rfcMcpInstructions } fro
  */
 export const rfcMcpAgentReference = `# RFC MCP agent workflow
 
-This MCP server is the complete RFC research backend. It owns live RFC discovery, RFC currency traversal, canonical RFC Editor source retrieval, bounded evidence selection, citation verification, source caching, provider credential status, and usage accounting. Do not answer RFC claims from memory or another provider.
+This MCP server is the complete RFC research backend. It owns live RFC discovery, RFC currency traversal, canonical RFC Editor source retrieval, relevance ranking, passage selection, citation verification, source caching, provider credential status, and usage accounting. Do not answer RFC claims from memory or another provider.
 
-## Bounded workflow
+## Workflow
 
-For one atomic question:
+1. Call \`rfc_research\` once per user request. Put each fact you need in \`questions\` (up to four); each question is answered independently against the same candidate RFCs.
+2. Pass \`rfcs\` when you know the RFC numbers and \`searchTerms\` when you do not; both may be combined. Named RFCs, their current successors, and topic matches form one candidate pool.
+3. Answer from the returned passages. Each passage names its RFC, section, verdict, and UTF-8 byte range. Cite only the RFC and section shown.
+4. When a question is not found, you may make one follow-up call with other \`rfcs\` or \`searchTerms\`. Never re-research or re-verify returned passages.
 
-1. Call \`rfc_research_known_rfc\` when the RFC is known, otherwise call \`rfc_research_topic\` with one to four deliberate ordered technical search terms.
-2. Make at most one targeted follow-up research call, and only when the first result has neither usable accepted evidence nor a review candidate. Never loop by rephrasing a valid result to chase \`answered\` or higher confidence.
-3. When accepted evidence or a review candidate is returned, answer from that result and stop. Quote accepted evidence unchanged with provenance. Quote a review candidate only as explicitly unaccepted or \`needs_review\`.
-4. Never call \`rfc_verify_citation\` after research to re-check returned evidence, normalize formatting, or obtain alternate provenance. Use it only for a user-supplied quotation or an explicitly requested distinct paraphrase check, at most twice.
-5. Stop after the budget. Preserve non-answer statuses and typed operational failures.
+## Result
 
-For up to two explicit independently answerable questions, use one research call per question and keep their inputs and outputs separate. Do not invent a split for an ambiguous request; preserve \`needs_split\`.
+For each question the result lists hits: an RFC, its \`role\` (\`requested\`, \`current\` successor of a requested RFC, or \`discovered\` by topic search), its \`relevance\`, a \`verdict\`, and one to three exact passages. \`found: false\` means none of the \`searched\` RFCs contained an answer.
 
-When a result is \`needs_split\`, act on it rather than retrying or refusing. Split the request into one atomic question per requested fact, research each in its own call against the RFC the result already names, and treat the returned review candidates as material you already hold. The at-most-one-follow-up budget applies per sub-question, not to the compound request. Never rephrase and resubmit the compound request, and never re-research an RFC already researched in this session.
+Verdicts use citation-check semantics:
+
+- \`supports\`: the passage states the answer or directly implies it.
+- \`partial\`: the passage answers only part of the question.
+- \`says_nothing\`: the passage does not address the question.
+- \`contradicts\`: the passage states the opposite of what the question presumes.
+
+A \`current\` hit comes from the RFC that replaced the one named. Keep it distinct from the requested RFC and never silently substitute a successor. \`currency\` reports each named RFC's current successors and the relationship path.
 
 ## Tools
 
-### rfc_research_known_rfc
+### rfc_research
 
-Research one atomic question against a known published RFC. The server performs bounded live metadata lookup and currency traversal, researches requested and applicable current RFC contexts independently, and never silently substitutes a successor.
-
-Inputs are \`question\` and \`rfc\`. Use the exact RFC identifier, such as \`RFC9110\`.
-
-### rfc_research_topic
-
-Discover and research published RFCs for one atomic topic question. Inputs are \`question\` and \`searchTerms\`. Supply one to four ordered non-empty terms, each no longer than ${datatrackerTopicSearchTermMaximumCharacters} characters. Each term is matched as a literal case-insensitive substring of an RFC title or abstract, so use short noun phrases such as \`DNS over TLS\`; a sentence fragment such as \`DNS over TLS default port\` matches nothing. If the operator enabled optional full-text search, terms additionally match RFC keywords and body text, so a term naming a protocol element can also resolve; write terms that work either way. Terms are transmitted verbatim in upstream query URLs and may appear in diagnostics, errors, and upstream access logs. Never include private or user-specific details in a term. Standard technical terms, including title words of an RFC you expect to match, are fine; do not send the natural-language question upstream unless it was explicitly chosen as a term.
+Inputs are \`questions\`, optional \`rfcs\`, and optional \`searchTerms\`; at least one of \`rfcs\` or \`searchTerms\` is required. Supply one to four ordered non-empty terms, each no longer than ${datatrackerTopicSearchTermMaximumCharacters} characters. Each term is matched as a literal case-insensitive substring of an RFC title or abstract, so use short noun phrases such as \`DNS over TLS\`; a sentence fragment such as \`DNS over TLS default port\` matches nothing. If the operator enabled optional full-text search, terms additionally match RFC keywords and body text. Terms are transmitted verbatim in upstream query URLs and may appear in diagnostics, errors, and upstream access logs. Never include private or user-specific details in a term, and do not send a natural-language question upstream unless it was explicitly chosen as a term.
 
 ### rfc_verify_citation
 
-Verify one factual claim against one exact RFC quotation. Inputs are \`rfc\`, \`claim\`, \`quote\`, and optional \`offset\`. The offset is an absolute UTF-8 byte offset into the exact source identified by \`sourceHash\`, not a JavaScript string index. Copy it from research provenance or omit it for a unique quotation. Never guess wording or offsets.
+Verify one factual claim against one exact RFC quotation. Inputs are \`rfc\`, \`claim\`, \`quote\`, and optional \`offset\`. The offset is an absolute UTF-8 byte offset into the exact source identified by \`sourceHash\`, not a JavaScript string index. Copy it from a research quote range or omit it for a unique quotation. Never guess wording or offsets. Use it only for a user-supplied quotation or an explicitly requested check.
+
+- \`verified\`: the exact present quotation supports the claim.
+- \`unsupported\`: the quotation does not establish the claim.
+- \`contradicted\`: the quotation conflicts with the claim.
+- \`fabricated\`: the supplied quotation is absent from the authoritative source.
 
 ### rfc_source_cache_status
 
@@ -89,39 +95,16 @@ Remove one named RFC source-cache entry without network access. This destructive
 
 Report only whether the stable TypeSafe credential identity is configured. The MCP never accepts, returns, adds, or removes credentials. If missing, ask the human operator to run \`rfc auth login\` outside MCP.
 
-## Research statuses
-
-- \`answered\`: accepted direct evidence with no disqualifying uncertainty.
-- \`partial\`: only part of the question or RFC currency coverage is established.
-- \`unsupported\`: bounded research found no accepted answering evidence.
-- \`needs_review\`: confidence is low, evidence conflicts, discovery is empty, or RFC currency is uncertain.
-- \`needs_split\`: the question is compound and requires atomic questions. The result still names the RFC selected for the request and returns the canonical review candidates already retrieved.
-
-A valid non-answer status is a successful tool result, not an operational failure. Review candidates are canonical source passages surfaced for bounded review but are not accepted evidence. Never turn them into unqualified claims.
-
-## Citation verdicts
-
-- \`verified\`: the exact present quotation supports the claim.
-- \`unsupported\`: the quotation does not establish the claim.
-- \`contradicted\`: the quotation conflicts with the claim.
-- \`fabricated\`: the supplied quotation is absent from the authoritative source.
-
-Only accepted research evidence or a \`verified\` citation supports an unqualified factual claim. If a quote is fabricated, make at most one research call to locate current wording and at most one verification call for that replacement.
-
-## Provenance and RFC currency
-
-Preserve exact quotes, RFC identifiers, requested/current context roles, relationship paths, nullable section labels, canonical source URLs, source hashes, \`offsetUnit: "utf8-byte"\`, and byte offsets. Do not answer a question about the requested RFC with current-context evidence without explicitly explaining the distinction.
-
 ## Fail-closed operations
 
-Operational failures are returned as MCP tool errors containing the safe version-two RFC error envelope. Report the code and stop. In particular:
+Operational failures are returned as MCP tool errors containing the safe version-three RFC error envelope. Report the code and stop. In particular:
 
 - \`invalid_input\`: correct the bounded tool input.
 - \`credential_missing\`: ask the human to run \`rfc auth login\`.
 - \`credential_store_unavailable\` or \`credential_access_denied\`: ask the human to unlock or authorize the OS credential store; never use plaintext fallback.
 - \`discovery_failed\`: report the Datatracker failure; do not invent or use stale metadata.
 - \`source_cache_failed\`, \`source_fetch_failed\`, or \`source_revalidation_failed\`: report the authoritative source failure; never serve stale text or substitute another representation.
-- \`rfc_not_found\`: correct the exact identifier or use topic discovery with explicit terms.
+- \`rfc_not_found\`: correct the exact identifier or use \`searchTerms\`.
 - \`decision_model_failed\`: report the bounded provider failure; do not switch provider or model.
 - \`citation_quote_ambiguous\` or \`citation_offset_mismatch\`: copy an exact research offset or stop; never guess.
 - \`internal_error\` or \`configuration_error\`: report an operational failure rather than asserting an answer.
@@ -136,21 +119,25 @@ Research and citation results report provider input tokens and estimated input c
 const describedString = (description: string) =>
   Schema.NonEmptyString.pipe(Schema.annotate({ description }));
 
-const KnownRfcResearchInputSchema = Schema.Struct({
-  question: describedString(descriptions.knownQuestion),
-  rfc: describedString(descriptions.rfc),
-});
-
 const TopicSearchTermSchema = Schema.String.check(
   Schema.isMinLength(1),
   Schema.isMaxLength(datatrackerTopicSearchTermMaximumCharacters),
 ).pipe(Schema.annotate({ description: descriptions.searchTerm }));
 
-const TopicResearchInputSchema = Schema.Struct({
-  question: describedString(descriptions.topicQuestion),
-  searchTerms: Schema.Array(TopicSearchTermSchema)
-    .check(Schema.isMinLength(1), Schema.isMaxLength(datatrackerTopicSearchTermLimit))
-    .pipe(Schema.annotate({ description: descriptions.searchTerms })),
+const ResearchInputSchema = Schema.Struct({
+  questions: Schema.Array(describedString(descriptions.question))
+    .check(Schema.isMinLength(1), Schema.isMaxLength(retrievalPolicy.maxQuestions))
+    .pipe(Schema.annotate({ description: descriptions.questions })),
+  rfcs: Schema.optionalKey(
+    Schema.Array(describedString(descriptions.rfc))
+      .check(Schema.isMinLength(1), Schema.isMaxLength(retrievalPolicy.maxRequestedRfcs))
+      .pipe(Schema.annotate({ description: descriptions.rfcs })),
+  ),
+  searchTerms: Schema.optionalKey(
+    Schema.Array(TopicSearchTermSchema)
+      .check(Schema.isMinLength(1), Schema.isMaxLength(datatrackerTopicSearchTermLimit))
+      .pipe(Schema.annotate({ description: descriptions.searchTerms })),
+  ),
 });
 
 const CitationInputSchema = Schema.Struct({
@@ -187,8 +174,8 @@ const toMcpSchema = <S extends Schema.ConstraintDecoder<unknown> & Schema.Constr
   };
 };
 
-const renderAgentEvidence = (value: EvidenceBundle): string =>
-  renderEvidenceBundle(value, { audience: "agent" });
+const renderAgentResearch = (value: ResearchResult): string =>
+  renderResearchResult(value, { audience: "agent" });
 
 const renderAgentCitation = (value: CitationVerificationResult): string =>
   renderCitationVerification(value, { audience: "agent" });
@@ -239,7 +226,7 @@ export const createRfcMcpServer = (
     {
       title: "RFC MCP agent workflow",
       description:
-        "Reference for non-answer statuses, failures, citation repair, provenance, privacy, cache, and cost; skip for ordinary research",
+        "Reference for result fields, verdicts, failures, provenance, privacy, cache, and cost; skip for ordinary research",
       mimeType: "text/markdown",
     },
     async (uri) => ({
@@ -254,44 +241,28 @@ export const createRfcMcpServer = (
   );
 
   server.registerTool(
-    rfcAgentToolMetadata.researchKnownRfc.name,
+    rfcAgentToolMetadata.research.name,
     {
-      title: rfcAgentToolMetadata.researchKnownRfc.title,
-      description: rfcAgentToolMetadata.researchKnownRfc.description,
-      inputSchema: toMcpSchema(KnownRfcResearchInputSchema),
-      outputSchema: toMcpSchema(EvidenceBundleSchema),
-      annotations: rfcAgentToolMetadata.researchKnownRfc.annotations,
+      title: rfcAgentToolMetadata.research.title,
+      description: rfcAgentToolMetadata.research.description,
+      inputSchema: toMcpSchema(ResearchInputSchema),
+      outputSchema: toMcpSchema(ResearchResultSchema),
+      annotations: rfcAgentToolMetadata.research.annotations,
     },
-    async ({ question, rfc }) => {
-      try {
-        return semanticSuccess(
-          await executeResearch({ schemaVersion, question, rfc }, options, dependencies),
-          renderAgentEvidence,
-        );
-      } catch (error) {
-        return toolError(error);
-      }
-    },
-  );
-
-  server.registerTool(
-    rfcAgentToolMetadata.researchTopic.name,
-    {
-      title: rfcAgentToolMetadata.researchTopic.title,
-      description: rfcAgentToolMetadata.researchTopic.description,
-      inputSchema: toMcpSchema(TopicResearchInputSchema),
-      outputSchema: toMcpSchema(EvidenceBundleSchema),
-      annotations: rfcAgentToolMetadata.researchTopic.annotations,
-    },
-    async ({ question, searchTerms }) => {
+    async ({ questions, rfcs, searchTerms }) => {
       try {
         return semanticSuccess(
           await executeResearch(
-            { schemaVersion, question, rfc: null, searchTerms },
+            {
+              schemaVersion,
+              questions,
+              ...(rfcs === undefined ? {} : { rfcs }),
+              ...(searchTerms === undefined ? {} : { searchTerms }),
+            },
             options,
             dependencies,
           ),
-          renderAgentEvidence,
+          renderAgentResearch,
         );
       } catch (error) {
         return toolError(error);

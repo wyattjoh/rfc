@@ -8,13 +8,13 @@ import {
   type CitationVerificationRequest,
   type CitationVerificationResult,
   type ErrorEnvelope,
-  type EvidenceBundle,
   type ResearchRequest,
+  type ResearchResult,
   type RfcClient,
   type RfcSourceCacheRemoveResult,
   type RfcSourceCacheStatus,
 } from "@wyattjoh/rfc-core";
-import { automaticAnswerActivationFor, readCliConfig } from "./config";
+import { readCliConfig } from "./config";
 import {
   CredentialInputError,
   CredentialMissingError,
@@ -30,7 +30,7 @@ export {
   renderAuthStatus,
   renderCitationVerification,
   renderEstimatedUsd,
-  renderEvidenceBundle,
+  renderResearchResult,
   renderSourceCacheRemove,
   renderSourceCacheStatus,
 } from "./renderers";
@@ -206,8 +206,6 @@ const createSemanticClient = async (
     cacheDirectory: options.cacheDirectory,
     datatrackerApiUrl: options.datatrackerApiUrl,
     modelAlias: cliConfig.modelAlias,
-    policyPreset: cliConfig.policyPreset,
-    automaticAnswerActivation: automaticAnswerActivationFor(cliConfig),
     typeSafeApiKey: apiKey,
     typeSafeApiUrl: options.typeSafeApiUrl,
     rfcSearchApiUrl: options.rfcSearchApiUrl,
@@ -238,18 +236,18 @@ export const toRfcOperationErrorEnvelope = (error: unknown): ErrorEnvelope =>
   credentialErrorEnvelope(error) ?? toErrorEnvelope(error);
 
 /**
- * Research one validated known-RFC or topic request.
+ * Research one validated request against named RFCs, topic terms, or both.
  *
- * @param request Unknown input decoded through the public version-two request schema.
+ * @param request Unknown input decoded through the public version-three request schema.
  * @param options Trusted process configuration.
  * @param dependencies Injectable operation boundaries.
- * @returns The evidence bundle and any non-fatal usage warning.
+ * @returns The research result and any non-fatal usage warning.
  */
 export const executeResearch = async (
   request: ResearchRequest | unknown,
   options: RfcOperationOptions,
   dependencies: RfcOperationDependencies,
-): Promise<RfcOperationResult<EvidenceBundle>> => {
+): Promise<RfcOperationResult<ResearchResult>> => {
   const decoded = decodeResearchRequest(request);
   const value = await withClient(
     () => createSemanticClient(options, dependencies),
@@ -268,7 +266,7 @@ export const executeResearch = async (
 /**
  * Verify one validated factual claim against one exact RFC quotation.
  *
- * @param request Unknown input decoded through the public version-two citation schema.
+ * @param request Unknown input decoded through the public version-three citation schema.
  * @param options Trusted process configuration.
  * @param dependencies Injectable operation boundaries.
  * @returns The citation verdict and any non-fatal usage warning.
@@ -311,7 +309,6 @@ export const executeSourceCacheStatus = (
       dependencies.createClient({
         cacheDirectory: options.cacheDirectory,
         modelAlias: undefined,
-        automaticAnswerActivation: undefined,
         typeSafeApiKey: undefined,
         typeSafeApiUrl: undefined,
       }),
@@ -336,7 +333,6 @@ export const executeSourceCacheRemove = (
       dependencies.createClient({
         cacheDirectory: options.cacheDirectory,
         modelAlias: undefined,
-        automaticAnswerActivation: undefined,
         typeSafeApiKey: undefined,
         typeSafeApiUrl: undefined,
       }),
