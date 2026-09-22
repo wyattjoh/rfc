@@ -63,7 +63,6 @@ import {
   RfcNotFoundError,
   researchKnownRfc,
   researchTopic,
-  subQuestionsForStatus,
 } from "./research";
 import type { EvidenceBundle } from "./research";
 import {
@@ -134,8 +133,6 @@ export {
   precisionV2Policy,
   researchPolicyPresets,
   shortlistPassageCandidates,
-  splitCompoundQuestion,
-  subQuestionsForStatus,
   type AnswerRelation,
   type EvidenceBundle,
   type EvidencePassage,
@@ -908,9 +905,6 @@ const liveKnownResearchProgram = Effect.fnUntraced(function* (
     ...result,
     schemaVersion: 2,
     status,
-    // An incomplete traversal downgrades the status, and sub-questions belong
-    // only to a status that actually asks the caller to split.
-    subQuestions: subQuestionsForStatus(status, request.question),
     currency,
     diagnostics: {
       ...result.diagnostics,
@@ -1036,9 +1030,6 @@ const liveTopicResearchProgram = Effect.fnUntraced(function* (
     ...result,
     schemaVersion: 2,
     status,
-    // Truncated discovery downgrades the status, and sub-questions belong only
-    // to a status that actually asks the caller to split.
-    subQuestions: subQuestionsForStatus(status, request.question),
     contexts: result.contexts,
     currency: result.currency,
     diagnostics: {

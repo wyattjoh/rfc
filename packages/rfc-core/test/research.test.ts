@@ -17,7 +17,6 @@ import {
   hashRfcSource,
   parseSourceBlocks,
   shortlistPassageCandidates,
-  splitCompoundQuestion,
   type EvidenceBundle,
   type RfcClient,
   type RfcClientOptions,
@@ -1443,7 +1442,7 @@ describe("known RFC research", () => {
     expect(calls).toHaveLength(1);
   });
 
-  test("returns actionable sub-questions and every canonical passage for a compound request", async () => {
+  test("returns every canonical passage for a compound request", async () => {
     const cacheDirectory = await makeCacheDirectory();
     const client = await createRfcClient({
       cacheDirectory,
@@ -1467,13 +1466,6 @@ describe("known RFC research", () => {
     // explicit activation and partial behind accepted relations.
     expect(result.status).toBe("needs_split");
     expect(result.evidence).toEqual([]);
-    // The caller splits deterministically instead of guessing at the parts.
-    expect(result.subQuestions).toEqual([
-      "What header field must the client send?",
-      "What header field must the server return?",
-      "When does the connection close?",
-      "What error code applies to a malformed header field?",
-    ]);
     // Every canonical passage the pipeline already ranked comes back, so the
     // follow-up research calls do not re-retrieve the same source.
     expect(result.reviewCandidates?.length ?? 0).toBeGreaterThan(1);
@@ -2777,28 +2769,5 @@ describe("known RFC research", () => {
       _tag: "DecisionModelError",
       stage: "document",
     });
-  });
-});
-
-describe("compound question splitting", () => {
-  test("names each part of a compound request", () => {
-    expect(
-      splitCompoundQuestion("What must the client send and what should the server cache?"),
-    ).toEqual(["What must the client send?", "What should the server cache?"]);
-    expect(
-      splitCompoundQuestion("What must an HTTP client send, and which RFC obsoleted that rule?"),
-    ).toEqual(["What must an HTTP client send?", "Which RFC obsoleted that rule?"]);
-  });
-
-  test("splits only where a new interrogative clause begins", () => {
-    // "and" inside a noun phrase is not a seam, and an atomic request has none.
-    expect(splitCompoundQuestion("What are the terms and conditions of the license?")).toEqual([]);
-    expect(splitCompoundQuestion("What must the client send?")).toEqual([]);
-  });
-
-  test("discards a split that would hand back an unresearchable fragment", () => {
-    // Splitting here yields "When?", which names no fact to research. Returning
-    // nothing is better than returning a part the caller cannot act on.
-    expect(splitCompoundQuestion("What must the client send and when?")).toEqual([]);
   });
 });

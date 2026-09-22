@@ -48,23 +48,12 @@ const noRfcReason = (result: EvidenceBundle): string => {
  *
  * A bare `Status: needs_split` reads as a failure, so callers retried the same
  * compound request or refused it outright while the passages they needed were
- * already in the bundle below.
- *
- * @param result Version-two evidence bundle whose status is `needs_split`.
- * @returns The next-step line followed by one line per sub-question.
+ * already in the bundle below. The caller holds the question and can parse it,
+ * so the split is its work; this line says to do that work and names the
+ * material it already has.
  */
-const splitGuidance = (result: EvidenceBundle): ReadonlyArray<string> => {
-  const subQuestions = result.subQuestions ?? [];
-  if (subQuestions.length === 0) {
-    return [
-      "Next step: research one atomic question per requested fact. The passages below are review candidates, not accepted evidence.",
-    ];
-  }
-  return [
-    "Next step: research each sub-question below in its own call, then answer every part. The passages below are review candidates, not accepted evidence.",
-    ...subQuestions.map((question, index) => `Sub-question ${index + 1}: ${question}`),
-  ];
-};
+const splitGuidance =
+  "Next step: this request asks for more than one fact. Split it into one atomic question per requested fact and research each in its own call against the RFC named above. The passages below are review candidates, not accepted evidence; reuse them rather than researching this RFC again.";
 
 /**
  * Render one evidence bundle for concise agent or human consumption.
@@ -76,7 +65,7 @@ export const renderEvidenceBundle = (result: EvidenceBundle): string => {
   const lines = [
     `Status: ${result.status}`,
     `RFC: ${result.rfc?.identifier ?? noRfcReason(result)}`,
-    ...(result.status === "needs_split" ? splitGuidance(result) : []),
+    ...(result.status === "needs_split" ? [splitGuidance] : []),
   ];
   for (const context of result.contexts ?? []) {
     lines.push(`Context: ${context.role} ${context.document.identifier} (${context.state})`);

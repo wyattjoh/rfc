@@ -1359,16 +1359,23 @@ describe("evidence bundle rendering", () => {
   });
 
   test("tells the caller what to do with a needs_split bundle", () => {
-    // `Status: needs_split` alone reads as a failure, so callers retried or
-    // refused instead of researching each part against the same bundle.
+    // `Status: needs_split` alone reads as a failure, so callers retried the
+    // compound request or refused it while holding the passages they needed.
     const split = renderEvidenceBundle({
       ...stubEvidenceBundle,
       status: "needs_split",
-      subQuestions: ["What must the client send?", "What must the server return?"],
     } as unknown as Parameters<typeof renderEvidenceBundle>[0]);
 
     expect(split).toContain("Next step:");
-    expect(split).toContain("Sub-question 1: What must the client send?");
-    expect(split).toContain("Sub-question 2: What must the server return?");
+    expect(split).toContain("one atomic question per requested fact");
+    expect(split).toContain("research each in its own call against the RFC named above");
+    expect(split).toContain("reuse them rather than researching this RFC again");
+
+    // Every other status renders exactly as before.
+    expect(
+      renderEvidenceBundle(
+        stubEvidenceBundle as unknown as Parameters<typeof renderEvidenceBundle>[0],
+      ),
+    ).not.toContain("Next step:");
   });
 });
