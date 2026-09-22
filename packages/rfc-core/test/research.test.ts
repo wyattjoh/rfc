@@ -391,9 +391,10 @@ describe("researchQuestions sections and paragraphs", () => {
       { RFC9999: manySections },
     );
     const paragraphCall = calls.find(({ decisions }) => "paragraph_q0" in decisions);
-    expect(Object.values(paragraphCall?.input.paragraphs ?? {})).not.toContain(
-      "Overview paragraph.",
-    );
+    expect(
+      Object.values(paragraphCall?.input.paragraphs ?? {}).map(({ text }) => text),
+    ).not.toContain("Overview paragraph.");
+    expect(Object.values(paragraphCall?.input.paragraphs ?? {})[0]?.section).toBe("2. Headers");
     const sectionCall = calls.find(({ decisions }) => "section_q0" in decisions);
     expect(Object.values(sectionCall?.input.toc ?? {})).toEqual([
       { heading: "1. Overview", preview: "Overview paragraph." },

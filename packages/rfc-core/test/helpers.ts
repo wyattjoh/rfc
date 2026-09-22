@@ -24,7 +24,9 @@ export type RecordedCall = {
     readonly questions: Readonly<Record<string, string>>;
     readonly candidates?: Readonly<Record<string, { readonly identifier: string }>>;
     readonly toc?: Readonly<Record<string, { readonly heading: string; readonly preview: string }>>;
-    readonly paragraphs?: Readonly<Record<string, string>>;
+    readonly paragraphs?: Readonly<
+      Record<string, { readonly section: string; readonly text: string }>
+    >;
   };
 };
 
@@ -90,7 +92,7 @@ export const makeRoutingModel = (route: Route = {}, calls: Array<RecordedCall> =
           if (kind === "verdict") {
             const verdict = (route.verdict ?? (() => "supports" as const))(
               question,
-              input.paragraphs?.[target ?? ""] ?? "",
+              input.paragraphs?.[target ?? ""]?.text ?? "",
             );
             return [
               key,
@@ -110,7 +112,7 @@ export const makeRoutingModel = (route: Route = {}, calls: Array<RecordedCall> =
                 ? (label: string) =>
                     (route.section ?? (() => 1))(question, input.toc?.[label]?.heading ?? "")
                 : (label: string) =>
-                    (route.paragraph ?? (() => 1))(question, input.paragraphs?.[label] ?? "");
+                    (route.paragraph ?? (() => 1))(question, input.paragraphs?.[label]?.text ?? "");
           return [key, { ...distribution(labels, weight), confidence: 0.9 }];
         }),
       );

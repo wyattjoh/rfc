@@ -572,6 +572,59 @@ const makeClock = (now: () => number): Clock.Clock => ({
     }),
 });
 
+/**
+ * Largest rounding error in a provider distribution that is renormalized
+ * rather than rejected.
+ *
+ * TypeSafe reports probabilities rounded to two decimals, so a Choice with
+ * many options can sum to 0.99 or 1.01. The DecisionModel contract rejects any
+ * distribution more than 1e-6 from one, which failed large section and
+ * paragraph Choices on otherwise valid answers. A larger deviation still
+ * fails validation.
+ */
+const distributionRoundingTolerance = 0.05;
+
+type SystemOneResponse = {
+  readonly answers: Readonly<Record<string, unknown>>;
+};
+
+/**
+ * Rescale rounded Choice and Score distributions so they sum to exactly one.
+ *
+ * @param response Raw TypeSafe System One response.
+ * @returns The response with near-unit distributions renormalized.
+ */
+const normalizeRoundedDistributions = <R extends SystemOneResponse>(response: R): R => ({
+  ...response,
+  answers: Object.fromEntries(
+    Object.entries(response.answers).map(([key, answer]) => {
+      if (typeof answer !== "object" || answer === null || !("probabilities" in answer)) {
+        return [key, answer];
+      }
+      const probabilities = answer.probabilities;
+      if (typeof probabilities !== "object" || probabilities === null) return [key, answer];
+      const values = Object.values(probabilities);
+      if (!values.every((value) => typeof value === "number" && Number.isFinite(value))) {
+        return [key, answer];
+      }
+      const total = (values as ReadonlyArray<number>).reduce((sum, value) => sum + value, 0);
+      if (total <= 0 || Math.abs(total - 1) > distributionRoundingTolerance) return [key, answer];
+      return [
+        key,
+        {
+          ...answer,
+          probabilities: Object.fromEntries(
+            Object.entries(probabilities as Record<string, number>).map(([label, value]) => [
+              label,
+              value / total,
+            ]),
+          ),
+        },
+      ];
+    }),
+  ),
+});
+
 const typeSafeDecisionModelLayer = (options: RfcClientOptions) => {
   const observedClientLayer = Layer.fromBuildMemo(() =>
     Effect.gen(function* () {
@@ -585,16 +638,15 @@ const typeSafeDecisionModelLayer = (options: RfcClientOptions) => {
       const observedClient = {
         ...client,
         systemOne: (request: Parameters<typeof client.systemOne>[0]) =>
-          client
-            .systemOne(request)
-            .pipe(
-              Effect.tap((response) =>
-                Effect.all([
-                  Ref.set(resolvedModel, response.model),
-                  Ref.update(resolvedModels, (models) => [...models, response.model]),
-                ]),
-              ),
+          client.systemOne(request).pipe(
+            Effect.map(normalizeRoundedDistributions),
+            Effect.tap((response) =>
+              Effect.all([
+                Ref.set(resolvedModel, response.model),
+                Ref.update(resolvedModels, (models) => [...models, response.model]),
+              ]),
             ),
+          ),
       };
       return Context.make(TypeSafeClientApi.TypeSafeClient, observedClient).pipe(
         Context.add(ResolvedModelName, resolvedModel),

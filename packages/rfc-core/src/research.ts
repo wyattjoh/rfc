@@ -1195,15 +1195,22 @@ const pickSections = Effect.fnUntraced(function* (
 
 const ParagraphInputSchema = Schema.Struct({
   questions: QuestionsSchema,
-  paragraphs: Schema.Record(Schema.String, Schema.String),
+  paragraphs: Schema.Record(
+    Schema.String,
+    Schema.Struct({
+      section: Schema.String,
+      text: Schema.String,
+    }),
+  ),
 });
 
 const paragraphKey = (paragraph: RfcParagraph): string => `p${paragraph.index}`;
 
 const verdictCriteria = {
-  supports: "The paragraph states the answer to the question or directly implies it",
+  supports:
+    "The paragraph states the answer, directly implies it, or is the text that defines what the question asks about",
   partial: "The paragraph answers only part of the question",
-  says_nothing: "The paragraph does not address what the question asks, either way",
+  says_nothing: "The paragraph does not address what the question asks about, either way",
   contradicts:
     "The paragraph states the opposite of what the question presumes or implies it is false",
 } as const satisfies Record<Verdict, string>;
@@ -1283,11 +1290,11 @@ const judgeParagraphs = Effect.fnUntraced(function* (
         [
           `paragraph_${questionKey(questionIndex)}`,
           Decision.classify({
-            instructions: `Which paragraph of ${identifier} in ${scope} best answers the question ${question}?`,
+            instructions: `Which paragraph of ${identifier} in ${scope} best answers the question ${question}, fully or in part? Each paragraph gives its \`section\` and \`text\`; for a question about where something is defined, the answer is the paragraph whose text defines it.`,
             criteria: Object.fromEntries([
               ...paragraphs.map((paragraph) => [
                 paragraphKey(paragraph),
-                `Paragraph \`paragraphs.${paragraphKey(paragraph)}\` answers the question`,
+                `Paragraph \`paragraphs.${paragraphKey(paragraph)}\` answers the question or defines what it asks about`,
               ]),
               [noneLabel, "No listed paragraph answers the question"],
             ]),
@@ -1296,17 +1303,18 @@ const judgeParagraphs = Effect.fnUntraced(function* (
         [
           `exists_${questionKey(questionIndex)}`,
           Decision.probability({
-            instructions: `Does any paragraph of ${identifier} in ${scope} state or directly imply the answer to the question ${question}?`,
+            instructions: `Does any paragraph of ${identifier} in ${scope} answer the question ${question}, fully or in part? A paragraph that defines what the question asks about answers where it is defined, since its RFC and \`section\` are known.`,
             criteria: {
-              true: "At least one of these paragraphs states the answer or directly implies it.",
-              false: "None of these paragraphs states or directly implies the answer.",
+              true: "At least one of these paragraphs states, directly implies, or defines at least part of the answer.",
+              false:
+                "None of these paragraphs addresses what the question asks; they are only on a related topic.",
             },
           }),
         ],
         ...paragraphs.map((paragraph) => [
           `verdict_${questionKey(questionIndex)}_${paragraphKey(paragraph)}`,
           Decision.classify({
-            instructions: `How does the paragraph \`paragraphs.${paragraphKey(paragraph)}\` relate to the question ${question}?`,
+            instructions: `How does the paragraph \`paragraphs.${paragraphKey(paragraph)}\` relate to the question ${question}? Its RFC is ${identifier} and its \`section\` is given, so a paragraph that defines what the question asks about answers where it is defined.`,
             criteria: verdictCriteria,
           }),
         ]),
@@ -1324,7 +1332,16 @@ const judgeParagraphs = Effect.fnUntraced(function* (
         ]),
       ),
       paragraphs: Object.fromEntries(
-        [...included.values()].map((paragraph) => [paragraphKey(paragraph), paragraph.text]),
+        [...included.values()].map((paragraph) => [
+          paragraphKey(paragraph),
+          {
+            section:
+              paragraph.section === undefined
+                ? ""
+                : collapse(rfc.sections[paragraph.section]?.heading ?? ""),
+            text: paragraph.text,
+          },
+        ]),
       ),
     },
     decisions,
