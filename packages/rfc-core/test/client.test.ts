@@ -4,34 +4,25 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { Cause, Duration, Effect, Schema } from "effect";
 import { TestClock } from "effect/testing";
-import type * as Decision from "effect/unstable/ai/Decision";
 import * as DecisionModel from "effect/unstable/ai/DecisionModel";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 import * as PublicApi from "../src/index";
 import {
-  EvidenceBundleSchema,
   InvalidInputError,
+  ResearchResultSchema,
   RfcClientClosedError,
   RfcDiscoveryError,
   RfcDocumentSchema,
   RfcSourceFetchError,
-  createRfcClient as createCoreRfcClient,
+  createRfcClient,
   decodeResearchRequest,
   hashRfcSource,
   toErrorEnvelope,
   type RfcClient,
-  type RfcClientOptions,
 } from "../src/index";
+import { makeRoutingModel, type RecordedCall } from "./helpers";
 
 const clients: Array<RfcClient> = [];
-type TestClientOptions = Omit<RfcClientOptions, "automaticAnswerActivation"> & {
-  readonly automaticAnswerActivation?: RfcClientOptions["automaticAnswerActivation"];
-};
-const createRfcClient = (options: TestClientOptions) =>
-  createCoreRfcClient({
-    ...options,
-    automaticAnswerActivation: options.automaticAnswerActivation,
-  });
 
 const makeCacheDirectory = async () => mkdtemp(join(tmpdir(), "rfc-core-test-"));
 
@@ -72,44 +63,6 @@ const sourceText = [
   "The client MUST send a request containing the target resource.",
   "",
 ].join("\n");
-
-const makeDecisionModel = (): DecisionModel.DecisionModel =>
-  ({
-    [DecisionModel.TypeId]: DecisionModel.TypeId,
-    decide: (definition: { readonly decisions: Readonly<Record<string, Decision.Any>> }) =>
-      Effect.succeed({
-        answers: Object.fromEntries(
-          Object.entries(definition.decisions).map(([key, decision]) =>
-            decision._tag === "Probability"
-              ? [key, { probability: 0.99 }]
-              : "atomic" in decision.criteria
-                ? [
-                    key,
-                    {
-                      label: "atomic",
-                      probabilities: { atomic: 0.99, compound: 0.01 },
-                      confidence: 0.99,
-                    },
-                  ]
-                : [
-                    key,
-                    {
-                      label: "direct_answer",
-                      probabilities: {
-                        direct_answer: 0.99,
-                        partial_answer: 0.0025,
-                        background_only: 0.0025,
-                        contradictory: 0.0025,
-                        irrelevant: 0.0025,
-                      },
-                      confidence: 0.99,
-                    },
-                  ],
-          ),
-        ),
-        usage: { inputTokens: 4, outputTokens: 2 },
-      }),
-  }) as DecisionModel.DecisionModel;
 
 const datatrackerDocument = {
   name: "rfc9110",
@@ -210,7 +163,7 @@ const makeCurrencyFixture = async (
         text: sourceText,
       };
     },
-    decisionModel: makeDecisionModel(),
+    decisionModel: makeRoutingModel(),
   });
   clients.push(client);
   return { cacheDirectory, client, datatracker, sourceIdentifiers };
@@ -254,15 +207,14 @@ const researchWithSeededCache = async (
     modelAlias: "jev-test",
     typeSafeApiKey: undefined,
     typeSafeApiUrl: undefined,
-    decisionModel: makeDecisionModel(),
+    decisionModel: makeRoutingModel(),
     now: () => 30_000,
   });
   clients.push(client);
   const result = await client.research({
-    schemaVersion: 2 as const,
-    question: "What must the client send?",
-    rfc: "RFC9110",
-    searchTerms: undefined,
+    schemaVersion: 3 as const,
+    questions: ["What must the client send?"],
+    rfcs: ["RFC9110"],
   });
   return { result, sourceRequests };
 };
@@ -324,12 +276,12 @@ describe("createRfcClient", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
     });
     clients.push(client);
 
     await expect(client.sourceCacheStatus("9110")).resolves.toEqual({
-      schemaVersion: 2,
+      schemaVersion: 3,
       kind: "source_cache_status",
       rfc: "RFC9110",
       state: "hit",
@@ -341,7 +293,7 @@ describe("createRfcClient", () => {
     await writeFile(rfc9110Path, "{corrupt");
     await expect(client.sourceCacheStatus("RFC9110")).resolves.toMatchObject({ state: "miss" });
     await expect(client.sourceCacheRemove("RFC9110")).resolves.toEqual({
-      schemaVersion: 2,
+      schemaVersion: 3,
       kind: "source_cache_remove",
       rfc: "RFC9110",
       removed: true,
@@ -388,7 +340,7 @@ describe("createRfcClient", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
       rfcSourceFetcher: async () => ({
         sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
         text: sourceText,
@@ -397,10 +349,9 @@ describe("createRfcClient", () => {
     clients.push(client);
 
     await client.research({
-      schemaVersion: 2 as const,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-      searchTerms: undefined,
+      schemaVersion: 3 as const,
+      questions: ["What must the client send?"],
+      rfcs: ["RFC9110"],
     });
 
     // 600 MiB of fillers plus the new entry: eviction walks oldest first and
@@ -438,7 +389,7 @@ describe("createRfcClient", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
       rfcSourceFetcher: async () => {
         sourceFetches += 1;
@@ -453,21 +404,30 @@ describe("createRfcClient", () => {
     clients.push(client);
 
     const request = {
-      schemaVersion: 2 as const,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-      searchTerms: undefined,
+      schemaVersion: 3 as const,
+      questions: ["What must the client send?"],
+      rfcs: ["RFC9110"],
     };
     const first = await client.research(request);
     const second = await client.research(request);
 
     expect(first).toMatchObject({
-      schemaVersion: 2,
-      kind: "evidence_bundle",
-      rfc: { identifier: "RFC9110" },
+      schemaVersion: 3,
+      kind: "research_result",
+      currency: [
+        {
+          requested: "RFC9110",
+          current: ["RFC9110"],
+          complete: true,
+          paths: [{ identifier: "RFC9110", path: [] }],
+        },
+      ],
       diagnostics: {
-        schemaVersion: 2,
+        policyVersion: "jev-retrieval-v1",
+        requestedModel: "jev-test",
+        candidates: { pool: 1, ranked: 1 },
         retrieval: {
+          schemaVersion: 3,
           requestCount: 3,
           datatrackerRequestCount: 2,
           sourceRequestCount: 1,
@@ -476,45 +436,43 @@ describe("createRfcClient", () => {
       },
     });
     const serialized = JSON.parse(JSON.stringify(first));
-    expect(Schema.decodeUnknownSync(EvidenceBundleSchema)(serialized)).toEqual(serialized);
+    expect(Schema.decodeUnknownSync(ResearchResultSchema)(serialized)).toEqual(serialized);
     expect(() =>
-      Schema.decodeUnknownSync(EvidenceBundleSchema)({ ...first, schemaVersion: 1 }),
+      Schema.decodeUnknownSync(ResearchResultSchema)({ ...first, schemaVersion: 2 }),
     ).toThrow();
     expect("catalog" in first.diagnostics).toBe(false);
     expect("catalogMs" in first.diagnostics.timings).toBe(false);
-    expect("catalogDocuments" in first.diagnostics.candidates).toBe(false);
     expect(JSON.stringify(first)).not.toContain('"catalog');
-    expect("discoveredDocuments" in first.diagnostics.candidates).toBe(true);
-    expect(first.diagnostics.candidates.discoveredDocuments).toBe(1);
     expect(first.diagnostics.timings.metadataMs).toBeGreaterThanOrEqual(0);
-    expect(first.rfc).not.toBeNull();
-    if (first.rfc === null) throw new Error("Expected discovered RFC metadata");
-    expect("updates" in first.rfc).toBe(false);
-    expect("obsoletes" in first.rfc).toBe(false);
-    expect(
-      first.contexts?.every(
-        ({ document }) => !("updates" in document) && !("obsoletes" in document),
-      ),
-    ).toBe(true);
-    expect(first.diagnostics.retrieval?.sourceMs).toBe(7);
-    expect(first.diagnostics.retrieval?.requests[2]?.durationMs).toBe(7);
-    expect(first.diagnostics.retrieval?.requests.map(({ url }) => url)).toEqual([
+    const hit = first.answers[0]?.hits[0];
+    if (hit === undefined) throw new Error("Expected a research hit");
+    expect(first.answers[0]).toMatchObject({ found: true, searched: ["RFC9110"] });
+    expect(hit).toMatchObject({
+      rfc: { identifier: "RFC9110" },
+      role: "requested",
+      relevance: null,
+      verdict: "supports",
+    });
+    expect("updates" in hit.rfc).toBe(false);
+    expect("obsoletes" in hit.rfc).toBe(false);
+    expect(first.diagnostics.retrieval.sourceMs).toBe(7);
+    expect(first.diagnostics.retrieval.requests[2]?.durationMs).toBe(7);
+    expect(first.diagnostics.retrieval.requests.map(({ url }) => url)).toEqual([
       "https://datatracker.ietf.org/api/v1/doc/document/rfc9110/?format=json",
       "https://datatracker.ietf.org/api/v1/doc/relateddocument/?format=json&limit=64&offset=0&relationship__slug__in=obs%2Cupdates&target__name=rfc9110",
       "https://www.rfc-editor.org/rfc/rfc9110.txt",
     ]);
-    expect(first.evidence[0]).toMatchObject({
+    const passage = hit.passages[0];
+    if (passage === undefined) throw new Error("Expected an exact RFC passage");
+    expect(passage).toMatchObject({
+      quote: "The client MUST send a request containing the target resource.",
+      section: "1. Requirements",
       provenance: {
-        identifier: "RFC9110",
+        sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
         sourceHash: hashRfcSource(sourceText),
         offsetUnit: "utf8-byte",
       },
     });
-    const passage = first.evidence[0];
-    if (passage === undefined) throw new Error("Expected exact RFC evidence");
-    expect(passage.quote).toContain(
-      "The client MUST send a request containing the target resource.",
-    );
     expect(
       Buffer.from(sourceText)
         .subarray(passage.provenance.startOffset, passage.provenance.endOffset)
@@ -546,46 +504,33 @@ describe("createRfcClient", () => {
     );
 
     const result = await fixture.client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-      searchTerms: undefined,
+      schemaVersion: 3,
+      questions: ["What must the client send?"],
+      rfcs: ["RFC9110"],
     });
 
-    expect(result.currency).toMatchObject({
-      requested: "RFC9110",
-      current: ["RFC9111"],
-      complete: true,
-      issues: [],
-      unresolved: [],
-    });
-    expect(result.contexts).toEqual([
-      expect.objectContaining({
-        role: "requested",
-        document: expect.objectContaining({ identifier: "RFC9110" }),
-        relationshipPath: [],
-        state: "researched",
-      }),
-      expect.objectContaining({
-        role: "current",
-        document: expect.objectContaining({ identifier: "RFC9111" }),
-        relationshipPath: [{ from: "RFC9110", to: "RFC9111", relationship: "updates" }],
-        state: "researched",
-      }),
+    expect(result.currency).toEqual([
+      {
+        requested: "RFC9110",
+        current: ["RFC9111"],
+        complete: true,
+        paths: [
+          { identifier: "RFC9110", path: [] },
+          {
+            identifier: "RFC9111",
+            path: [{ from: "RFC9110", to: "RFC9111", relationship: "updates" }],
+          },
+        ],
+      },
     ]);
-    expect(new Set(result.evidence.map(({ provenance }) => provenance.identifier))).toEqual(
-      new Set(["RFC9110", "RFC9111"]),
-    );
-    expect(
-      result.evidence.find(({ provenance }) => provenance.identifier === "RFC9110")?.provenance,
-    ).toMatchObject({ context: "requested", relationshipPath: [] });
-    expect(
-      result.evidence.find(({ provenance }) => provenance.identifier === "RFC9111")?.provenance,
-    ).toMatchObject({
-      context: "current",
-      relationshipPath: [{ from: "RFC9110", to: "RFC9111", relationship: "updates" }],
-    });
-    expect(fixture.sourceIdentifiers).toEqual(["RFC9110", "RFC9111"]);
+    expect(result.diagnostics.candidates).toEqual({ pool: 2, ranked: 2 });
+    const hits = result.answers[0]?.hits ?? [];
+    expect(hits.map(({ rfc, role }) => `${rfc.identifier}:${role}`)).toEqual([
+      "RFC9110:requested",
+      "RFC9111:current",
+    ]);
+    expect(hits.every(({ passages }) => passages.length > 0)).toBe(true);
+    expect([...fixture.sourceIdentifiers].sort()).toEqual(["RFC9110", "RFC9111"]);
     expect(
       fixture.datatracker.urls
         .filter((url) => url.includes("/relateddocument/"))
@@ -665,25 +610,21 @@ describe("createRfcClient", () => {
         sourceUrl: `https://www.rfc-editor.org/rfc/rfc${document.rfcNumber}.txt`,
         text: sourceText,
       }),
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
     });
     clients.push(client);
 
     const result = await client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-      searchTerms: undefined,
+      schemaVersion: 3,
+      questions: ["What must the client send?"],
+      rfcs: ["RFC9110"],
     });
 
-    expect(result.currency).toMatchObject({
-      requested: "RFC9110",
-      current: ["RFC9112"],
-      complete: true,
-      unresolved: [],
-    });
-    expect(result.currency?.paths).toContainEqual({
+    expect(result.currency).toMatchObject([
+      { requested: "RFC9110", current: ["RFC9112"], complete: true },
+    ]);
+    expect(result.currency?.[0]?.paths).toContainEqual({
       identifier: "RFC9112",
       path: [
         { from: "RFC9110", to: "RFC9111", relationship: "updates" },
@@ -718,18 +659,16 @@ describe("createRfcClient", () => {
     );
 
     const result = await fixture.client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-      searchTerms: undefined,
+      schemaVersion: 3,
+      questions: ["What must the client send?"],
+      rfcs: ["RFC9110"],
     });
 
-    expect(result.currency).toMatchObject({
+    expect(result.currency?.[0]).toMatchObject({
       current: ["RFC9111", "RFC9112"],
       complete: true,
-      issues: [],
     });
-    expect(result.currency?.paths).toEqual([
+    expect(result.currency?.[0]?.paths).toEqual([
       { identifier: "RFC9110", path: [] },
       {
         identifier: "RFC9111",
@@ -740,12 +679,13 @@ describe("createRfcClient", () => {
         path: [{ from: "RFC9110", to: "RFC9112", relationship: "obsoletes" }],
       },
     ]);
-    expect(result.contexts?.map(({ document }) => document.identifier)).toEqual([
-      "RFC9110",
-      "RFC9111",
-      "RFC9112",
+    expect(result.diagnostics.candidates).toEqual({ pool: 3, ranked: 3 });
+    expect(result.answers[0]?.hits.map(({ rfc, role }) => `${rfc.identifier}:${role}`)).toEqual([
+      "RFC9110:requested",
+      "RFC9111:current",
+      "RFC9112:current",
     ]);
-    expect(fixture.sourceIdentifiers).toEqual(["RFC9110", "RFC9111", "RFC9112"]);
+    expect([...fixture.sourceIdentifiers].sort()).toEqual(["RFC9110", "RFC9111", "RFC9112"]);
     expect(result.diagnostics.retrieval).toMatchObject({
       traversalComplete: true,
       traversalContexts: 3,
@@ -766,18 +706,24 @@ describe("createRfcClient", () => {
     );
 
     const result = await fixture.client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-      searchTerms: undefined,
+      schemaVersion: 3,
+      questions: ["What must the client send?"],
+      rfcs: ["RFC9110"],
     });
 
-    expect(result.status).toBe("needs_review");
-    expect(result.currency).toMatchObject({
-      current: [],
-      complete: false,
-      issues: ["cycle_detected", "missing_current_context"],
-    });
+    // A cycle has no terminal RFC, so no successor is claimed as current, but
+    // every relationship was read, so the report is still complete.
+    expect(result.currency).toEqual([
+      {
+        requested: "RFC9110",
+        current: [],
+        complete: true,
+        paths: [{ identifier: "RFC9110", path: [] }],
+      },
+    ]);
+    expect(result.answers[0]?.hits.map(({ rfc, role }) => `${rfc.identifier}:${role}`)).toEqual([
+      "RFC9110:requested",
+    ]);
     expect(result.diagnostics.retrieval).toMatchObject({
       traversalComplete: true,
       traversalContexts: 2,
@@ -798,10 +744,9 @@ describe("createRfcClient", () => {
 
     await expect(
       fixture.client.research({
-        schemaVersion: 2,
-        question: "What must the client send?",
-        rfc: "RFC9110",
-        searchTerms: undefined,
+        schemaVersion: 3,
+        questions: ["What must the client send?"],
+        rfcs: ["RFC9110"],
       }),
     ).rejects.toMatchObject({
       _tag: "RfcDiscoveryError",
@@ -819,7 +764,7 @@ describe("createRfcClient", () => {
     await rm(fixture.cacheDirectory, { recursive: true, force: true });
   });
 
-  test("forces review and reports the bounded successor depth exit", async () => {
+  test("claims no current RFC and reports the bounded successor depth exit", async () => {
     const fixture = await makeCurrencyFixture(
       new Map([
         [9110, [{ source: 9111, relationship: "updates" }]],
@@ -832,18 +777,21 @@ describe("createRfcClient", () => {
     );
 
     const result = await fixture.client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-      searchTerms: undefined,
+      schemaVersion: 3,
+      questions: ["What must the client send?"],
+      rfcs: ["RFC9110"],
     });
 
-    expect(result.status).toBe("needs_review");
-    expect(result.currency).toMatchObject({
-      complete: false,
-      issues: expect.arrayContaining(["missing_successor", "traversal_limit"]),
-      unresolved: ["RFC9113"],
-    });
+    // RFC9112 still has an unresolved successor, so it is not reported as current.
+    expect(result.currency).toEqual([
+      {
+        requested: "RFC9110",
+        current: [],
+        complete: false,
+        paths: [{ identifier: "RFC9110", path: [] }],
+      },
+    ]);
+    expect(fixture.sourceIdentifiers).toEqual(["RFC9110"]);
     expect(result.diagnostics.retrieval).toMatchObject({
       traversalComplete: false,
       traversalContexts: 3,
@@ -857,7 +805,7 @@ describe("createRfcClient", () => {
     await rm(fixture.cacheDirectory, { recursive: true, force: true });
   });
 
-  test("forces review and reports the eight-context traversal bound", async () => {
+  test("reports the eight-context traversal bound", async () => {
     const successors = Array.from({ length: 8 }, (_, index) => ({
       source: 9111 + index,
       relationship: "updates" as const,
@@ -870,18 +818,25 @@ describe("createRfcClient", () => {
     );
 
     const result = await fixture.client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-      searchTerms: undefined,
+      schemaVersion: 3,
+      questions: ["What must the client send?"],
+      rfcs: ["RFC9110"],
     });
 
-    expect(result.status).toBe("needs_review");
-    expect(result.currency).toMatchObject({
-      complete: false,
-      issues: expect.arrayContaining(["missing_successor", "traversal_limit"]),
-      unresolved: ["RFC9118"],
-    });
+    // RFC9118 was cut off by the context bound, so the current set is partial.
+    expect(result.currency?.[0]?.complete).toBe(false);
+    expect(result.currency?.[0]?.current).toEqual([
+      "RFC9111",
+      "RFC9112",
+      "RFC9113",
+      "RFC9114",
+      "RFC9115",
+      "RFC9116",
+      "RFC9117",
+    ]);
+    expect(result.currency?.[0]?.paths.map(({ identifier }) => identifier)).not.toContain(
+      "RFC9118",
+    );
     expect(result.diagnostics.retrieval).toMatchObject({
       traversalComplete: false,
       traversalContexts: 8,
@@ -912,10 +867,9 @@ describe("createRfcClient", () => {
 
     await expect(
       fixture.client.research({
-        schemaVersion: 2,
-        question: "What must the client send?",
-        rfc: "RFC9110",
-        searchTerms: undefined,
+        schemaVersion: 3,
+        questions: ["What must the client send?"],
+        rfcs: ["RFC9110"],
       }),
     ).rejects.toMatchObject({
       _tag: "RfcDiscoveryError",
@@ -929,7 +883,7 @@ describe("createRfcClient", () => {
     await rm(fixture.cacheDirectory, { recursive: true, force: true });
   });
 
-  test("forces review when successor relationship results hit their bound", async () => {
+  test("reports the bounded exit when successor relationship results hit their bound", async () => {
     const cacheDirectory = await makeCacheDirectory();
     const datatracker = makeDatatrackerHttpClient((url) => {
       const name = url.pathname.match(/\/document\/(rfc\d+)\/$/)?.[1];
@@ -981,22 +935,18 @@ describe("createRfcClient", () => {
         sourceUrl: `https://www.rfc-editor.org/rfc/rfc${document.rfcNumber}.txt`,
         text: sourceText,
       }),
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
     });
     clients.push(client);
 
     const result = await client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-      searchTerms: undefined,
+      schemaVersion: 3,
+      questions: ["What must the client send?"],
+      rfcs: ["RFC9110"],
     });
 
-    expect(result.status).toBe("needs_review");
-    expect(result.currency).toMatchObject({
-      complete: false,
-      issues: expect.arrayContaining(["traversal_limit"]),
-    });
+    // Datatracker reported more relationship rows than it returned.
+    expect(result.currency?.[0]).toMatchObject({ current: ["RFC9111"], complete: false });
     expect(result.diagnostics.retrieval).toMatchObject({
       traversalComplete: false,
       successorRows: 2,
@@ -1023,15 +973,14 @@ describe("createRfcClient", () => {
         sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
         text: sourceText,
       }),
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
     });
     clients.push(client);
 
     const result = await client.research({
-      schemaVersion: 2,
-      question: "Which requirements apply?",
-      rfc: null,
+      schemaVersion: 3,
+      questions: ["Which requirements apply?"],
       searchTerms: ["HTTP semantics"],
     });
 
@@ -1070,19 +1019,18 @@ describe("createRfcClient", () => {
         sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
         text: sourceText,
       }),
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
     });
     clients.push(client);
 
     const result = await client.research({
-      schemaVersion: 2,
-      question: "How long should a client wait before retrying?",
-      rfc: null,
+      schemaVersion: 3,
+      questions: ["How long should a client wait before retrying?"],
       searchTerms: ["Retry-After"],
     });
 
-    expect(result.rfc?.identifier).toBe("RFC9110");
+    expect(result.answers[0]?.hits.map(({ rfc }) => rfc.identifier)).toEqual(["RFC9110"]);
     expect(datatracker.urls.map((value) => new URL(value).searchParams.get("q"))).toEqual([
       "Retry-After",
     ]);
@@ -1117,15 +1065,14 @@ describe("createRfcClient", () => {
         sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
         text: sourceText,
       }),
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
     });
     clients.push(client);
 
     const result = await client.research({
-      schemaVersion: 2,
-      question: "Which requirements apply?",
-      rfc: null,
+      schemaVersion: 3,
+      questions: ["Which requirements apply?"],
       searchTerms: ["Retry-After"],
     });
 
@@ -1159,20 +1106,19 @@ describe("createRfcClient", () => {
         sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
         text: sourceText,
       }),
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
     });
     clients.push(client);
 
     const result = await client.research({
-      schemaVersion: 2,
-      question: "Which requirements apply?",
-      rfc: null,
+      schemaVersion: 3,
+      questions: ["Which requirements apply?"],
       searchTerms: ["HTTP semantics"],
     });
 
     // A revoked key must degrade discovery, never remove the tool.
-    expect(result.rfc?.identifier).toBe("RFC9110");
+    expect(result.answers[0]?.hits.map(({ rfc }) => rfc.identifier)).toEqual(["RFC9110"]);
     expect(result.diagnostics.retrieval).toMatchObject({
       topicSearchFallback: true,
       datatrackerRequestCount: 2,
@@ -1207,20 +1153,19 @@ describe("createRfcClient", () => {
         sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
         text: sourceText,
       }),
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
     });
     clients.push(client);
 
     const result = await client.research({
-      schemaVersion: 2,
-      question: "Which requirements apply?",
-      rfc: null,
+      schemaVersion: 3,
+      questions: ["Which requirements apply?"],
       searchTerms: ["HTTP semantics"],
     });
 
     // A bot-management interstitial is not JSON; discovery must survive it.
-    expect(result.rfc?.identifier).toBe("RFC9110");
+    expect(result.answers[0]?.hits.map(({ rfc }) => rfc.identifier)).toEqual(["RFC9110"]);
     expect(result.diagnostics.retrieval?.topicSearchFallback).toBe(true);
   });
 
@@ -1242,19 +1187,18 @@ describe("createRfcClient", () => {
         sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
         text: sourceText,
       }),
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
     });
     clients.push(client);
 
     const result = await client.research({
-      schemaVersion: 2,
-      question: "Which requirements apply?",
-      rfc: null,
+      schemaVersion: 3,
+      questions: ["Which requirements apply?"],
       searchTerms: ["HTTP/2 :method", "HTTP/2 :method"],
     });
 
-    expect(result.rfc?.identifier).toBe("RFC9110");
+    expect(result.answers[0]?.hits.map(({ rfc }) => rfc.identifier)).toEqual(["RFC9110"]);
     expect(
       datatracker.urls.map((value) => {
         const url = new URL(value);
@@ -1271,7 +1215,7 @@ describe("createRfcClient", () => {
     });
   });
 
-  test("enforces topic traffic, merge, semantic, and source bounds", async () => {
+  test("enforces topic traffic, merge, rank, and source bounds", async () => {
     const cacheDirectory = await makeCacheDirectory();
     const searchTerms = ["HTTP semantics", "client request", "cache control", "status code"];
     const urls: Array<string> = [];
@@ -1313,60 +1257,8 @@ describe("createRfcClient", () => {
         );
       }),
     );
-    const documentBatches: Array<ReadonlyArray<string>> = [];
-    const documentDecisionKeys: Array<ReadonlyArray<string>> = [];
-    const decisionModel = {
-      [DecisionModel.TypeId]: DecisionModel.TypeId,
-      decide: (
-        definition: { readonly decisions: Readonly<Record<string, Decision.Any>> },
-        options: {
-          readonly input: {
-            readonly documents:
-              | Readonly<Record<string, { readonly identifier: string }>>
-              | undefined;
-          };
-        },
-      ) => {
-        if (options.input.documents !== undefined) {
-          documentBatches.push(
-            Object.values(options.input.documents).map(({ identifier }) => identifier),
-          );
-          documentDecisionKeys.push(Object.keys(definition.decisions));
-        }
-        return Effect.succeed({
-          answers: Object.fromEntries(
-            Object.entries(definition.decisions).map(([key, decision]) =>
-              key === "question_atomicity"
-                ? [
-                    key,
-                    {
-                      label: "atomic",
-                      probabilities: { atomic: 0.99, compound: 0.01 },
-                      confidence: 0.99,
-                    },
-                  ]
-                : decision._tag === "Probability"
-                  ? [key, { probability: 0.99 }]
-                  : [
-                      key,
-                      {
-                        label: "direct_answer",
-                        probabilities: {
-                          direct_answer: 0.99,
-                          partial_answer: 0.0025,
-                          background_only: 0.0025,
-                          contradictory: 0.0025,
-                          irrelevant: 0.0025,
-                        },
-                        confidence: 0.99,
-                      },
-                    ],
-            ),
-          ),
-          usage: { inputTokens: 4, outputTokens: 2 },
-        });
-      },
-    } as unknown as DecisionModel.DecisionModel;
+    const calls: Array<RecordedCall> = [];
+    const decisionModel = makeRoutingModel({}, calls);
     const fetchedSources: Array<string> = [];
     const client = await createRfcClient({
       cacheDirectory,
@@ -1387,9 +1279,8 @@ describe("createRfcClient", () => {
     clients.push(client);
 
     const result = await client.research({
-      schemaVersion: 2,
-      question: "Which requirements apply without disclosing this question?",
-      rfc: null,
+      schemaVersion: 3,
+      questions: ["Which requirements apply without disclosing this question?"],
       searchTerms,
     });
 
@@ -1408,14 +1299,18 @@ describe("createRfcClient", () => {
         );
       }),
     ).toBe(true);
-    expect(documentBatches).toHaveLength(1);
-    expect(documentBatches[0]).toHaveLength(32);
-    expect(documentDecisionKeys).toHaveLength(1);
-    expect(documentDecisionKeys[0]).toEqual([
-      "question_atomicity",
-      ...Array.from({ length: 32 }, (_, index) => `document_${index}`),
+    // One rank request judges the whole capped pool at once.
+    const rankCalls = calls.filter(({ decisions }) => "rank_q0" in decisions);
+    expect(rankCalls).toHaveLength(1);
+    const ranked = Object.values(rankCalls[0]?.input.candidates ?? {}).map(
+      ({ identifier }) => identifier,
+    );
+    expect(ranked).toHaveLength(32);
+    expect(Object.keys(rankCalls[0]?.decisions ?? {})).toEqual([
+      "rank_q0",
+      ...Array.from({ length: 32 }, (_, index) => `relevant_q0_c${index}`),
     ]);
-    expect(documentBatches[0]?.slice(0, 9)).toEqual([
+    expect(ranked.slice(0, 9)).toEqual([
       "RFC9900",
       "RFC9860",
       "RFC9840",
@@ -1426,15 +1321,16 @@ describe("createRfcClient", () => {
       "RFC9899",
       "RFC9879",
     ]);
-    expect(fetchedSources.length).toBeLessThanOrEqual(8);
-    expect(result.status).toBe("needs_review");
+    // Only the ranked RFCs have their source fetched.
+    expect([...fetchedSources].sort()).toEqual(["RFC9860", "RFC9900"]);
+    expect(result.diagnostics.candidates).toEqual({ pool: 32, ranked: 2 });
     expect(result.diagnostics.retrieval).toMatchObject({
       datatrackerRequestCount: 8,
       upstreamRows: 160,
       uniqueCandidates: 159,
       mergeLimit: 32,
       semanticCandidates: 32,
-      selectedSources: fetchedSources.length,
+      selectedSources: 2,
       topicTruncated: true,
     });
     const metadataRequests = result.diagnostics.retrieval?.requests.filter(
@@ -1474,19 +1370,18 @@ describe("createRfcClient", () => {
         sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
         text: sourceText,
       }),
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
     });
     clients.push(client);
 
     const result = await client.research({
-      schemaVersion: 2,
-      question: "Which requirements apply?",
-      rfc: null,
+      schemaVersion: 3,
+      questions: ["Which requirements apply?"],
       searchTerms: ["HTTP semantics"],
     });
 
-    expect(result.status).toBe("needs_review");
+    expect(result.answers[0]?.hits.map(({ rfc }) => rfc.identifier)).toEqual(["RFC9110"]);
     expect(result.diagnostics.retrieval).toMatchObject({
       upstreamRows: 2,
       uniqueCandidates: 1,
@@ -1494,7 +1389,7 @@ describe("createRfcClient", () => {
     });
   });
 
-  test("returns needs_review when live topic discovery finds no RFCs", async () => {
+  test("reports not found without model or source work when topic discovery finds no RFCs", async () => {
     const cacheDirectory = await makeCacheDirectory();
     const datatracker = makeDatatrackerHttpClient(() =>
       Response.json({
@@ -1528,17 +1423,18 @@ describe("createRfcClient", () => {
     clients.push(client);
 
     const result = await client.research({
-      schemaVersion: 2,
-      question: "Which requirements apply?",
-      rfc: null,
+      schemaVersion: 3,
+      questions: ["Which requirements apply?"],
       searchTerms: ["no matching RFC"],
     });
 
-    expect(result).toMatchObject({ status: "needs_review", rfc: null, evidence: [] });
+    expect(result.answers).toEqual([
+      { question: "Which requirements apply?", found: false, searched: [], hits: [] },
+    ]);
+    expect(result.currency).toBeUndefined();
     expect(result.diagnostics).toMatchObject({
-      resolvedModels: [],
-      atomicity: null,
-      documentSelection: [],
+      usage: { inputTokens: null, outputTokens: null },
+      candidates: { pool: 0, ranked: 0 },
     });
     expect(result.diagnostics.retrieval).toMatchObject({
       datatrackerRequestCount: 2,
@@ -1556,38 +1452,15 @@ describe("createRfcClient", () => {
     await rm(cacheDirectory, { recursive: true, force: true });
   });
 
-  test("returns needs_review when semantic document selection rejects every RFC", async () => {
+  test("reports not found without fetching sources when ranking rejects every topic RFC", async () => {
     const cacheDirectory = await makeCacheDirectory();
     const datatracker = makeDatatrackerHttpClient(() =>
       Response.json({
-        meta: { limit: 20, offset: 0, total_count: 1, next: null },
-        objects: [datatrackerDocument],
+        meta: { limit: 20, offset: 0, total_count: 2, next: null },
+        objects: [datatrackerDocument, currencyDocument(9111)],
       }),
     );
-    let modelCalls = 0;
-    const decisionModel = {
-      [DecisionModel.TypeId]: DecisionModel.TypeId,
-      decide: (definition: { readonly decisions: Readonly<Record<string, Decision.Any>> }) => {
-        modelCalls += 1;
-        return Effect.succeed({
-          answers: Object.fromEntries(
-            Object.keys(definition.decisions).map((key) =>
-              key === "question_atomicity"
-                ? [
-                    key,
-                    {
-                      label: "atomic",
-                      probabilities: { atomic: 0.99, compound: 0.01 },
-                      confidence: 0.99,
-                    },
-                  ]
-                : [key, { probability: 0.1 }],
-            ),
-          ),
-          usage: { inputTokens: 2, outputTokens: 1 },
-        });
-      },
-    } as unknown as DecisionModel.DecisionModel;
+    const calls: Array<RecordedCall> = [];
     let sourceFetches = 0;
     const client = await createRfcClient({
       cacheDirectory,
@@ -1602,96 +1475,27 @@ describe("createRfcClient", () => {
           text: sourceText,
         };
       },
-      decisionModel,
+      decisionModel: makeRoutingModel({ relevance: () => 0.1 }, calls),
     });
     clients.push(client);
 
     const result = await client.research({
-      schemaVersion: 2,
-      question: "Which requirements apply?",
-      rfc: null,
+      schemaVersion: 3,
+      questions: ["Which requirements apply?"],
       searchTerms: ["HTTP semantics"],
     });
 
-    expect(result).toMatchObject({ status: "needs_review", rfc: null, evidence: [] });
+    expect(result.answers).toEqual([
+      { question: "Which requirements apply?", found: false, searched: [], hits: [] },
+    ]);
+    expect(result.diagnostics.candidates).toEqual({ pool: 2, ranked: 0 });
     expect(result.diagnostics.retrieval).toMatchObject({
-      upstreamRows: 2,
-      uniqueCandidates: 1,
-      semanticCandidates: 1,
+      upstreamRows: 4,
+      uniqueCandidates: 2,
+      semanticCandidates: 2,
       selectedSources: 0,
     });
-    expect(modelCalls).toBe(1);
-    expect(sourceFetches).toBe(0);
-
-    await rm(cacheDirectory, { recursive: true, force: true });
-  });
-
-  test("returns needs_split when a compound question has no accepted RFCs", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const datatracker = makeDatatrackerHttpClient(() =>
-      Response.json({
-        meta: { limit: 20, offset: 0, total_count: 1, next: null },
-        objects: [datatrackerDocument],
-      }),
-    );
-    let modelCalls = 0;
-    const decisionModel = {
-      [DecisionModel.TypeId]: DecisionModel.TypeId,
-      decide: (definition: { readonly decisions: Readonly<Record<string, Decision.Any>> }) => {
-        modelCalls += 1;
-        return Effect.succeed({
-          answers: Object.fromEntries(
-            Object.keys(definition.decisions).map((key) =>
-              key === "question_atomicity"
-                ? [
-                    key,
-                    {
-                      label: "compound",
-                      probabilities: { atomic: 0.01, compound: 0.99 },
-                      confidence: 0.99,
-                    },
-                  ]
-                : [key, { probability: 0.1 }],
-            ),
-          ),
-          usage: { inputTokens: 2, outputTokens: 1 },
-        });
-      },
-    } as unknown as DecisionModel.DecisionModel;
-    let sourceFetches = 0;
-    const client = await createRfcClient({
-      cacheDirectory,
-      datatrackerHttpClient: datatracker.client,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      rfcSourceFetcher: async () => {
-        sourceFetches += 1;
-        return {
-          sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
-          text: sourceText,
-        };
-      },
-      decisionModel,
-    });
-    clients.push(client);
-
-    const result = await client.research({
-      schemaVersion: 2,
-      question: "Which requirements apply and what should servers cache?",
-      rfc: null,
-      searchTerms: ["HTTP semantics"],
-    });
-
-    // documentSelectionStage accepts nothing unless the question is confidently
-    // atomic, so the compound verdict is the known cause of the empty result.
-    expect(result).toMatchObject({ status: "needs_split", rfc: null, evidence: [] });
-    expect(result.diagnostics).toMatchObject({
-      atomicity: { label: "compound" },
-      candidates: { acceptedDocuments: 0 },
-      retrieval: { selectedSources: 0 },
-    });
-    expect(modelCalls).toBe(1);
+    expect(calls).toHaveLength(1);
     expect(sourceFetches).toBe(0);
 
     await rm(cacheDirectory, { recursive: true, force: true });
@@ -1709,7 +1513,7 @@ describe("createRfcClient", () => {
       });
     });
     let modelCalls = 0;
-    const baseModel = makeDecisionModel();
+    const baseModel = makeRoutingModel();
     const decisionModel = {
       ...baseModel,
       decide: (...args: Parameters<DecisionModel.DecisionModel["decide"]>) => {
@@ -1737,9 +1541,8 @@ describe("createRfcClient", () => {
 
     await expect(
       client.research({
-        schemaVersion: 2,
-        question: "Which requirements apply?",
-        rfc: null,
+        schemaVersion: 3,
+        questions: ["Which requirements apply?"],
         searchTerms: ["first term", "second term"],
       }),
     ).rejects.toMatchObject({
@@ -1762,8 +1565,8 @@ describe("createRfcClient", () => {
     const cacheDirectory = await makeCacheDirectory();
     const datatracker = makeDatatrackerHttpClient(() =>
       Response.json({
-        meta: { limit: 20, offset: 0, total_count: 1, next: null },
-        objects: [datatrackerDocument],
+        meta: { limit: 20, offset: 0, total_count: 2, next: null },
+        objects: [datatrackerDocument, currencyDocument(9111)],
       }),
     );
     let sourceFetches = 0;
@@ -1785,10 +1588,10 @@ describe("createRfcClient", () => {
         decide: () =>
           Effect.succeed({
             answers: {
-              question_atomicity: {
-                label: "atomic",
-                probabilities: { atomic: 0.99, compound: 0.01 },
-                confidence: 0.99,
+              rank_q0: {
+                label: "c0",
+                probabilities: { c0: 0.9, c1: 0.1, none: 0 },
+                confidence: 0.9,
               },
             },
             usage: { inputTokens: 2, outputTokens: 1 },
@@ -1799,14 +1602,13 @@ describe("createRfcClient", () => {
 
     await expect(
       client.research({
-        schemaVersion: 2,
-        question: "Which requirements apply?",
-        rfc: null,
+        schemaVersion: 3,
+        questions: ["Which requirements apply?"],
         searchTerms: ["HTTP semantics"],
       }),
     ).rejects.toMatchObject({
       _tag: "DecisionModelError",
-      stage: "document",
+      stage: "rank",
       reason: expect.stringContaining("omitted"),
     });
     expect(sourceFetches).toBe(0);
@@ -1844,15 +1646,14 @@ describe("createRfcClient", () => {
           text: sourceText,
         };
       },
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
     });
     clients.push(client);
 
     await expect(
       client.research({
-        schemaVersion: 2,
-        question: "Which requirements apply?",
-        rfc: null,
+        schemaVersion: 3,
+        questions: ["Which requirements apply?"],
         searchTerms: ["HTTP semantics"],
       }),
     ).rejects.toMatchObject({
@@ -1881,15 +1682,15 @@ describe("createRfcClient", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
     });
     clients.push(client);
 
     await expect(
       client.research({
-        schemaVersion: 2,
-        question: "What must the client send?",
-        rfc: "RFC9110",
+        schemaVersion: 3,
+        questions: ["What must the client send?"],
+        rfcs: ["RFC9110"],
       }),
     ).rejects.toMatchObject({
       _tag: "RfcDiscoveryError",
@@ -1913,15 +1714,15 @@ describe("createRfcClient", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
     });
     clients.push(client);
 
     await expect(
       client.research({
-        schemaVersion: 2,
-        question: "What must the client send?",
-        rfc: "RFC9110",
+        schemaVersion: 3,
+        questions: ["What must the client send?"],
+        rfcs: ["RFC9110"],
       }),
     ).rejects.toMatchObject({
       _tag: "RfcDiscoveryError",
@@ -1930,7 +1731,7 @@ describe("createRfcClient", () => {
     });
   });
 
-  test("rejects overlong metadata fields before semantic evaluation", async () => {
+  test("rejects overlong metadata fields before ranking", async () => {
     const cacheDirectory = await makeCacheDirectory();
     const datatracker = makeDatatrackerHttpClient(() =>
       Response.json({ ...datatrackerDocument, title: "x".repeat(2_001) }),
@@ -1941,15 +1742,15 @@ describe("createRfcClient", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
     });
     clients.push(client);
 
     await expect(
       client.research({
-        schemaVersion: 2,
-        question: "What must the client send?",
-        rfc: "RFC9110",
+        schemaVersion: 3,
+        questions: ["What must the client send?"],
+        rfcs: ["RFC9110"],
       }),
     ).rejects.toMatchObject({ _tag: "RfcDiscoveryError", stage: "decode" });
     expect(datatracker.urls).toHaveLength(1);
@@ -1976,7 +1777,7 @@ describe("createRfcClient", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
       rfcSourceFetcher: async () => ({
         sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
         text: sourceText,
@@ -1985,10 +1786,9 @@ describe("createRfcClient", () => {
     clients.push(client);
 
     const result = await client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-      searchTerms: undefined,
+      schemaVersion: 3,
+      questions: ["What must the client send?"],
+      rfcs: ["RFC9110"],
     });
 
     expect(documentAttempts).toBe(3);
@@ -2026,7 +1826,7 @@ describe("createRfcClient", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
       rfcSourceFetcher: async () => ({
         sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
         text: sourceText,
@@ -2035,10 +1835,9 @@ describe("createRfcClient", () => {
     clients.push(client);
 
     const result = await client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-      searchTerms: undefined,
+      schemaVersion: 3,
+      questions: ["What must the client send?"],
+      rfcs: ["RFC9110"],
     });
 
     expect(documentAttempts).toBe(2);
@@ -2080,7 +1879,7 @@ describe("createRfcClient", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
       rfcSourceFetcher: async () => ({
         sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
         text: sourceText,
@@ -2089,10 +1888,9 @@ describe("createRfcClient", () => {
     clients.push(client);
 
     const result = await client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-      searchTerms: undefined,
+      schemaVersion: 3,
+      questions: ["What must the client send?"],
+      rfcs: ["RFC9110"],
     });
 
     expect(documentAttempts).toBe(2);
@@ -2110,16 +1908,15 @@ describe("createRfcClient", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
     });
     clients.push(client);
 
     await expect(
       client.research({
-        schemaVersion: 2,
-        question: "What must the client send?",
-        rfc: "RFC9110",
-        searchTerms: undefined,
+        schemaVersion: 3,
+        questions: ["What must the client send?"],
+        rfcs: ["RFC9110"],
       }),
     ).rejects.toMatchObject({
       _tag: "RfcDiscoveryError",
@@ -2167,7 +1964,7 @@ describe("createRfcClient", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
       clock,
       rfcSourceFetcher: async () => ({
         sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
@@ -2178,10 +1975,9 @@ describe("createRfcClient", () => {
 
     const research = client
       .research({
-        schemaVersion: 2,
-        question: "What must the client send?",
-        rfc: "RFC9110",
-        searchTerms: undefined,
+        schemaVersion: 3,
+        questions: ["What must the client send?"],
+        rfcs: ["RFC9110"],
       })
       .then(
         () => undefined,
@@ -2213,17 +2009,16 @@ describe("createRfcClient", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
       now: () => (clockReads++ < 3 ? 0 : 9_500),
     });
     clients.push(client);
 
     await expect(
       client.research({
-        schemaVersion: 2,
-        question: "What must the client send?",
-        rfc: "RFC9110",
-        searchTerms: undefined,
+        schemaVersion: 3,
+        questions: ["What must the client send?"],
+        rfcs: ["RFC9110"],
       }),
     ).rejects.toMatchObject({
       _tag: "RfcDiscoveryError",
@@ -2282,15 +2077,14 @@ describe("createRfcClient", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
       now: () => now,
     });
     clients.push(client);
     const request = {
-      schemaVersion: 2 as const,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-      searchTerms: undefined,
+      schemaVersion: 3 as const,
+      questions: ["What must the client send?"],
+      rfcs: ["RFC9110"],
     };
 
     const miss = await client.research(request);
@@ -2308,7 +2102,7 @@ describe("createRfcClient", () => {
     ).toEqual(["miss", "hit", "revalidated", "replaced"]);
     expect(validators).toEqual([undefined, '"one"', '"one"']);
     expect(sourceRequests).toBe(3);
-    expect(replaced.evidence[0]?.provenance.sourceHash).toBe(
+    expect(replaced.answers[0]?.hits[0]?.passages[0]?.provenance.sourceHash).toBe(
       hashRfcSource(sourceText.replace("target", "selected")),
     );
   });
@@ -2341,7 +2135,9 @@ describe("createRfcClient", () => {
 
     expect(result.diagnostics.retrieval?.sourceCacheOutcome).toBe("repaired");
     expect(sourceRequests).toBe(1);
-    expect(result.evidence[0]?.provenance.sourceHash).toBe(hashRfcSource(sourceText));
+    expect(result.answers[0]?.hits[0]?.passages[0]?.provenance.sourceHash).toBe(
+      hashRfcSource(sourceText),
+    );
   });
 
   test("does not persist a source response marked no-store", async () => {
@@ -2383,21 +2179,22 @@ describe("createRfcClient", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
       now: () => 30_000,
     });
     clients.push(client);
     const request = {
-      schemaVersion: 2 as const,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-      searchTerms: undefined,
+      schemaVersion: 3 as const,
+      questions: ["What must the client send?"],
+      rfcs: ["RFC9110"],
     };
 
     const first = await client.research(request);
     const second = await client.research(request);
 
-    expect(first.evidence[0]?.provenance.sourceHash).toBe(hashRfcSource(sourceText));
+    expect(first.answers[0]?.hits[0]?.passages[0]?.provenance.sourceHash).toBe(
+      hashRfcSource(sourceText),
+    );
     expect(await Bun.file(join(cacheDirectory, "sources", "v2", "RFC9110.json")).exists()).toBe(
       false,
     );
@@ -2439,17 +2236,16 @@ describe("createRfcClient", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
       now: () => 0,
     });
     clients.push(client);
 
     await expect(
       client.research({
-        schemaVersion: 2 as const,
-        question: "What must the client send?",
-        rfc: "RFC9110",
-        searchTerms: undefined,
+        schemaVersion: 3 as const,
+        questions: ["What must the client send?"],
+        rfcs: ["RFC9110"],
       }),
     ).rejects.toMatchObject({
       _tag: "RfcSourceFetchError",
@@ -2522,16 +2318,15 @@ describe("createRfcClient", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
       now: () => 0,
     });
     clients.push(client);
 
     const result = await client.research({
-      schemaVersion: 2 as const,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-      searchTerms: undefined,
+      schemaVersion: 3 as const,
+      questions: ["What must the client send?"],
+      rfcs: ["RFC9110"],
     });
 
     const sourceRequests = (result.diagnostics.retrieval?.requests ?? []).filter(
@@ -2543,6 +2338,10 @@ describe("createRfcClient", () => {
     const failed = sourceRequests.find((request) => request.url.endsWith("rfc9111.txt"));
     expect(failed?.attempts).toBeGreaterThan(0);
     expect(failed?.durationMs).toBeGreaterThanOrEqual(0);
+    // The unavailable successor is dropped rather than failing the named RFC.
+    expect(result.answers[0]?.hits.map(({ rfc, role }) => `${rfc.identifier}:${role}`)).toEqual([
+      "RFC9110:requested",
+    ]);
   });
 
   test("does not send a weak validator in a conditional request", async () => {
@@ -2587,20 +2386,21 @@ describe("createRfcClient", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
       now: () => 30_000,
     });
     clients.push(client);
 
     const result = await client.research({
-      schemaVersion: 2 as const,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-      searchTerms: undefined,
+      schemaVersion: 3 as const,
+      questions: ["What must the client send?"],
+      rfcs: ["RFC9110"],
     });
 
     expect(validators).toEqual([undefined]);
-    expect(result.evidence[0]?.provenance.sourceHash).toBe(hashRfcSource(replacement));
+    expect(result.answers[0]?.hits[0]?.passages[0]?.provenance.sourceHash).toBe(
+      hashRfcSource(replacement),
+    );
   });
 
   test("rejects topic metadata whose name and RFC number disagree", async () => {
@@ -2624,16 +2424,15 @@ describe("createRfcClient", () => {
         sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
         text: sourceText,
       }),
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
       now: () => 0,
     });
     clients.push(client);
 
     await expect(
       client.research({
-        schemaVersion: 2 as const,
-        question: "Which requirements apply?",
-        rfc: null,
+        schemaVersion: 3 as const,
+        questions: ["Which requirements apply?"],
         searchTerms: ["HTTP semantics"],
       }),
     ).rejects.toMatchObject({
@@ -2661,16 +2460,15 @@ describe("createRfcClient", () => {
         sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
         text: sourceText,
       }),
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
       now: () => 0,
     });
     clients.push(client);
 
     await expect(
       client.research({
-        schemaVersion: 2 as const,
-        question: "Which requirements apply?",
-        rfc: null,
+        schemaVersion: 3 as const,
+        questions: ["Which requirements apply?"],
         searchTerms: ["HTTP semantics"],
       }),
     ).rejects.toMatchObject({
@@ -2715,17 +2513,16 @@ describe("createRfcClient", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
       now: () => 30_000,
     });
     clients.push(client);
 
     await expect(
       client.research({
-        schemaVersion: 2 as const,
-        question: "What must the client send?",
-        rfc: "RFC9110",
-        searchTerms: undefined,
+        schemaVersion: 3 as const,
+        questions: ["What must the client send?"],
+        rfcs: ["RFC9110"],
       }),
     ).rejects.toMatchObject({ _tag: "RfcSourceRevalidationError" });
   });
@@ -2764,17 +2561,16 @@ describe("createRfcClient", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
       now: () => 30_000,
     });
     clients.push(client);
 
     await expect(
       client.research({
-        schemaVersion: 2 as const,
-        question: "What must the client send?",
-        rfc: "RFC9110",
-        searchTerms: undefined,
+        schemaVersion: 3 as const,
+        questions: ["What must the client send?"],
+        rfcs: ["RFC9110"],
       }),
     ).rejects.toMatchObject({ _tag: "RfcSourceRevalidationError" });
   });
@@ -2845,16 +2641,15 @@ describe("createRfcClient", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
       now: () => 30_000,
     });
     clients.push(client);
 
     const result = await client.research({
-      schemaVersion: 2 as const,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-      searchTerms: undefined,
+      schemaVersion: 3 as const,
+      questions: ["What must the client send?"],
+      rfcs: ["RFC9110"],
     });
 
     const failed = (result.diagnostics.retrieval?.requests ?? []).find(
@@ -2901,17 +2696,16 @@ describe("createRfcClient", () => {
         sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
         text: sourceText,
       }),
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
       now: () => 0,
     });
     clients.push(client);
 
     await expect(
       client.research({
-        schemaVersion: 2 as const,
-        question: "What must the client send?",
-        rfc: "RFC9110",
-        searchTerms: undefined,
+        schemaVersion: 3 as const,
+        questions: ["What must the client send?"],
+        rfcs: ["RFC9110"],
       }),
     ).rejects.toMatchObject({ _tag: "RfcDiscoveryError", stage: "decode" });
   });
@@ -2956,16 +2750,15 @@ describe("createRfcClient", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
       now: () => 30_000,
     });
     clients.push(client);
 
     const result = await client.research({
-      schemaVersion: 2 as const,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-      searchTerms: undefined,
+      schemaVersion: 3 as const,
+      questions: ["What must the client send?"],
+      rfcs: ["RFC9110"],
     });
 
     expect(result.diagnostics.retrieval?.sourceCacheOutcome).not.toBe("hit");
@@ -3000,17 +2793,16 @@ describe("createRfcClient", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
       now: () => 0,
     });
     clients.push(client);
 
     await expect(
       client.research({
-        schemaVersion: 2 as const,
-        question: "What must the client send?",
-        rfc: "RFC9110",
-        searchTerms: undefined,
+        schemaVersion: 3 as const,
+        questions: ["What must the client send?"],
+        rfcs: ["RFC9110"],
       }),
     ).rejects.toMatchObject({
       _tag: "RfcSourceFetchError",
@@ -3078,16 +2870,15 @@ describe("createRfcClient", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
       now: () => 0,
     });
     clients.push(client);
 
     const result = await client.research({
-      schemaVersion: 2 as const,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-      searchTerms: undefined,
+      schemaVersion: 3 as const,
+      questions: ["What must the client send?"],
+      rfcs: ["RFC9110"],
     });
 
     const failed = (result.diagnostics.retrieval?.requests ?? []).find(
@@ -3134,15 +2925,14 @@ describe("createRfcClient", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
       now: () => now,
     });
     clients.push(client);
     const request = {
-      schemaVersion: 2 as const,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-      searchTerms: undefined,
+      schemaVersion: 3 as const,
+      questions: ["What must the client send?"],
+      rfcs: ["RFC9110"],
     };
 
     await client.research(request);
@@ -3187,7 +2977,7 @@ describe("createRfcClient", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
       rfcSourceFetcher: async () => {
         sourceFetches += 1;
         return sourceText;
@@ -3197,10 +2987,9 @@ describe("createRfcClient", () => {
 
     await expect(
       client.research({
-        schemaVersion: 2,
-        question: "What must the client send?",
-        rfc: "RFC9110",
-        searchTerms: undefined,
+        schemaVersion: 3,
+        questions: ["What must the client send?"],
+        rfcs: ["RFC9110"],
       }),
     ).rejects.toMatchObject({
       _tag: "RfcDiscoveryError",
@@ -3222,16 +3011,15 @@ describe("createRfcClient", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
     });
     clients.push(client);
 
     await expect(
       client.research({
-        schemaVersion: 2,
-        question: "What must the client send?",
-        rfc: "RFC9110",
-        searchTerms: undefined,
+        schemaVersion: 3,
+        questions: ["What must the client send?"],
+        rfcs: ["RFC9110"],
       }),
     ).rejects.toMatchObject({
       _tag: "RfcDiscoveryError",
@@ -3242,21 +3030,32 @@ describe("createRfcClient", () => {
     await rm(cacheDirectory, { recursive: true, force: true });
   });
 
-  test("decodes versioned research input at the Promise facade boundary", async () => {
+  test("decodes versioned research input at the Promise facade boundary", () => {
     expect(
       decodeResearchRequest({
-        schemaVersion: 2,
-        question: "What is HTTP?",
-        rfc: "RFC9110",
+        schemaVersion: 3,
+        questions: ["What is HTTP?"],
+        rfcs: ["RFC9110"],
       }),
     ).toEqual({
-      schemaVersion: 2,
-      question: "What is HTTP?",
-      rfc: "RFC9110",
-      searchTerms: undefined,
+      schemaVersion: 3,
+      questions: ["What is HTTP?"],
+      rfcs: ["RFC9110"],
     });
-    // Reported as the conflict it is, not as the topic schema's generic
-    // complaint that `rfc` is not null.
+    // Named RFCs and topic terms share one candidate pool.
+    expect(
+      decodeResearchRequest({
+        schemaVersion: 3,
+        questions: ["What is HTTP?", "What is a request?"],
+        rfcs: ["RFC9110"],
+        searchTerms: ["HTTP"],
+      }),
+    ).toEqual({
+      schemaVersion: 3,
+      questions: ["What is HTTP?", "What is a request?"],
+      rfcs: ["RFC9110"],
+      searchTerms: ["HTTP"],
+    });
     const decodeFailure = (input: unknown): unknown => {
       try {
         decodeResearchRequest(input);
@@ -3265,82 +3064,61 @@ describe("createRfcClient", () => {
         return error;
       }
     };
-    for (const searchTerms of [["HTTP"], []]) {
-      expect(
-        decodeFailure({
-          schemaVersion: 2,
-          question: "What is HTTP?",
-          rfc: "RFC9110",
-          searchTerms,
-        }),
-      ).toMatchObject({
-        _tag: "InvalidInputError",
-        reason: "Known-RFC research must not include topic search terms",
-      });
+    expect(decodeFailure({ schemaVersion: 3, questions: ["What is HTTP?"] })).toMatchObject({
+      _tag: "InvalidInputError",
+      reason: "Research input must include rfcs, searchTerms, or both",
+    });
+    for (const input of [
+      { schemaVersion: 3, questions: ["What is HTTP?"], rfcs: [] },
+      { schemaVersion: 3, questions: ["What is HTTP?"], searchTerms: [] },
+      { schemaVersion: 3, questions: ["What is HTTP?"], rfcs: ["1", "2", "3", "4", "5"] },
+      { schemaVersion: 3, questions: [""], rfcs: ["RFC9110"] },
+    ]) {
+      expect(decodeFailure(input)).toBeInstanceOf(InvalidInputError);
     }
-    // An explicitly undefined searchTerms is the known-RFC spelling, not a conflict.
-    expect(
-      decodeResearchRequest({
-        schemaVersion: 2,
-        question: "What is HTTP?",
-        rfc: "RFC9110",
-        searchTerms: undefined,
-      }),
-    ).toMatchObject({ rfc: "RFC9110", searchTerms: undefined });
     expect(() =>
       decodeResearchRequest({
-        schemaVersion: 2,
-        question: "What is HTTP?",
-        rfc: null,
-      }),
-    ).toThrow(InvalidInputError);
-    expect(() =>
-      decodeResearchRequest({
-        schemaVersion: 2,
-        question: "What is HTTP?",
-        rfc: null,
+        schemaVersion: 3,
+        questions: ["What is HTTP?"],
         searchTerms: ["one", "two", "three", "four", "five"],
       }),
     ).toThrow(InvalidInputError);
     expect(() =>
       decodeResearchRequest({
-        schemaVersion: 2,
-        question: "What is HTTP?",
-        rfc: null,
+        schemaVersion: 3,
+        questions: ["What is HTTP?"],
         searchTerms: [""],
       }),
     ).toThrow(InvalidInputError);
     expect(
       decodeResearchRequest({
-        schemaVersion: 2,
-        question: "What is HTTP?",
-        rfc: null,
+        schemaVersion: 3,
+        questions: ["What is HTTP?"],
         searchTerms: ["   "],
       }),
     ).toMatchObject({ searchTerms: ["   "] });
     expect(
       decodeResearchRequest({
-        schemaVersion: 2,
-        question: "What is HTTP?",
-        rfc: null,
+        schemaVersion: 3,
+        questions: ["What is HTTP?"],
         searchTerms: ["x".repeat(200)],
       }),
     ).toMatchObject({ searchTerms: ["x".repeat(200)] });
     expect(() =>
       decodeResearchRequest({
-        schemaVersion: 2,
-        question: "What is HTTP?",
-        rfc: null,
+        schemaVersion: 3,
+        questions: ["What is HTTP?"],
         searchTerms: ["x".repeat(201)],
       }),
     ).toThrow(InvalidInputError);
-    expect(() =>
-      decodeResearchRequest({
-        schemaVersion: 1,
-        question: "What is HTTP?",
-        rfc: "RFC9110",
-      }),
-    ).toThrow(InvalidInputError);
+    // Earlier protocol versions, including the single-question shape, are rejected.
+    for (const input of [
+      { schemaVersion: 2, questions: ["What is HTTP?"], rfcs: ["RFC9110"] },
+      { schemaVersion: 2, question: "What is HTTP?", rfc: "RFC9110" },
+      { schemaVersion: 1, question: "What is HTTP?", rfc: "RFC9110" },
+    ]) {
+      expect(() => decodeResearchRequest(input)).toThrow(InvalidInputError);
+    }
   });
 
   test("rejects work after explicit close and makes close idempotent", async () => {
@@ -3356,10 +3134,9 @@ describe("createRfcClient", () => {
     await expect(client.close()).resolves.toBeUndefined();
     await expect(
       client.research({
-        schemaVersion: 2,
-        question: "What is HTTP?",
-        rfc: "RFC9110",
-        searchTerms: undefined,
+        schemaVersion: 3,
+        questions: ["What is HTTP?"],
+        rfcs: ["RFC9110"],
       }),
     ).rejects.toBeInstanceOf(RfcClientClosedError);
 
@@ -3376,7 +3153,7 @@ describe("createRfcClient", () => {
     const started = new Promise<void>((resolve) => {
       markStarted = resolve;
     });
-    const base = makeDecisionModel();
+    const base = makeRoutingModel();
     const datatracker = makeDatatrackerHttpClient((url) =>
       url.pathname.endsWith("/document/rfc9110/")
         ? Response.json(datatrackerDocument)
@@ -3408,10 +3185,9 @@ describe("createRfcClient", () => {
     clients.push(client);
 
     const pending = client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-      searchTerms: undefined,
+      schemaVersion: 3,
+      questions: ["What must the client send?"],
+      rfcs: ["RFC9110"],
     });
     await started;
 
@@ -3425,7 +3201,7 @@ describe("createRfcClient", () => {
     release?.();
     // The operation returns its own result rather than failing against a
     // runtime that was torn down beneath it.
-    await expect(pending).resolves.toMatchObject({ kind: "evidence_bundle" });
+    await expect(pending).resolves.toMatchObject({ kind: "research_result" });
     await closing;
     expect(disposed).toBe(true);
 
@@ -3444,10 +3220,9 @@ describe("createRfcClient", () => {
     await client[Symbol.asyncDispose]();
     await expect(
       client.research({
-        schemaVersion: 2,
-        question: "What is HTTP?",
-        rfc: "RFC9110",
-        searchTerms: undefined,
+        schemaVersion: 3,
+        questions: ["What is HTTP?"],
+        rfcs: ["RFC9110"],
       }),
     ).rejects.toBeInstanceOf(RfcClientClosedError);
 
@@ -3479,7 +3254,7 @@ describe("createRfcClient", () => {
 
   test("maps typed failures to a safe versioned error envelope", () => {
     expect(toErrorEnvelope(new RfcClientClosedError({}))).toEqual({
-      schemaVersion: 2,
+      schemaVersion: 3,
       kind: "error",
       error: {
         code: "client_closed",
@@ -3497,7 +3272,7 @@ describe("createRfcClient", () => {
         }),
       ),
     ).toEqual({
-      schemaVersion: 2,
+      schemaVersion: 3,
       kind: "error",
       error: {
         code: "discovery_failed",
@@ -3515,7 +3290,7 @@ describe("createRfcClient", () => {
         }),
       ),
     ).toEqual({
-      schemaVersion: 2,
+      schemaVersion: 3,
       kind: "error",
       error: {
         code: "source_fetch_failed",
@@ -3536,17 +3311,16 @@ describe("createRfcClient", () => {
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      decisionModel: makeDecisionModel(),
+      decisionModel: makeRoutingModel(),
     });
     clients.push(client);
 
     const research = (rfc: string) =>
       client
         .research({
-          schemaVersion: 2,
-          question: "What must the client send?",
-          rfc,
-          searchTerms: undefined,
+          schemaVersion: 3,
+          questions: ["What must the client send?"],
+          rfcs: [rfc],
         })
         .then(
           () => undefined,

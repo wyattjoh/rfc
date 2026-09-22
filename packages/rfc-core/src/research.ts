@@ -142,6 +142,7 @@ export type RfcRelationshipStep = Schema.Schema.Type<typeof RfcRelationshipStepS
 export const RfcCurrencyReportSchema = Schema.Struct({
   requested: Schema.NonEmptyString,
   current: Schema.Array(Schema.NonEmptyString),
+  complete: Schema.Boolean,
   paths: Schema.Array(
     Schema.Struct({
       identifier: Schema.NonEmptyString,
@@ -658,6 +659,10 @@ export interface NamedRfcLookup {
    * Request-local metadata for every RFC visited during currency traversal.
    */
   readonly documents: ReadonlyArray<RfcMetadata>;
+  /**
+   * Whether live traversal fetched every successor relationship it found.
+   */
+  readonly traversalComplete: boolean;
 }
 
 type SuccessorEdge = {
@@ -727,11 +732,14 @@ type CurrentContext = {
  *
  * @param documents Request-local metadata visited by currency traversal.
  * @param requested The named RFC.
- * @returns Current successor contexts and the relationship report.
+ * @param traversalComplete Whether live traversal fetched every relationship it found.
+ * @returns Current successor contexts and the relationship report. The report is
+ * incomplete when a successor was unresolved or cut off by a traversal bound.
  */
 export const resolveRfcCurrency = (
   documents: ReadonlyArray<RfcMetadata>,
   requested: RfcMetadata,
+  traversalComplete = true,
 ): {
   readonly current: ReadonlyArray<CurrentContext>;
   readonly report: RfcCurrencyReport;
@@ -740,6 +748,7 @@ export const resolveRfcCurrency = (
   const activePath = new Set<string>();
   const current: Array<CurrentContext> = [];
   let hasSuccessors = false;
+  let complete = traversalComplete;
 
   const visit = (
     document: RfcMetadata,
@@ -750,6 +759,7 @@ export const resolveRfcCurrency = (
     activePath.add(identifier);
     const { edges, unresolved } = successorEdges(documents, document);
     hasSuccessors ||= edges.length > 0 || unresolved;
+    if (unresolved) complete = false;
     if (edges.length === 0) {
       if (document !== requested && !unresolved) current.push({ document, relationshipPath });
       activePath.delete(identifier);
@@ -757,12 +767,12 @@ export const resolveRfcCurrency = (
     }
     for (const edge of edges) {
       const successor = currencyIdentifier(edge.document);
+      if (activePath.has(successor) || expanded.has(successor)) continue;
       if (
-        activePath.has(successor) ||
         depth >= retrievalPolicy.maxCurrencyTraversalDepth ||
-        expanded.has(successor) ||
         expanded.size >= retrievalPolicy.maxCurrencyContexts
       ) {
+        complete = false;
         continue;
       }
       expanded.add(successor);
@@ -793,6 +803,7 @@ export const resolveRfcCurrency = (
       current: hasSuccessors
         ? sorted.map(({ document }) => document.identifier)
         : [requested.identifier],
+      complete,
       paths: [
         { identifier: requested.identifier, path: [] },
         ...sorted.map(({ document, relationshipPath }) => ({
@@ -829,7 +840,7 @@ export const buildCandidatePool = (
   };
   const resolutions = named.map((lookup) => ({
     lookup,
-    resolution: resolveRfcCurrency(lookup.documents, lookup.document),
+    resolution: resolveRfcCurrency(lookup.documents, lookup.document, lookup.traversalComplete),
   }));
   for (const { lookup } of resolutions) {
     add({ document: lookup.document, role: "requested", family: lookup.document.identifier });
