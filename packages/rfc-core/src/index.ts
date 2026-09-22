@@ -17,7 +17,6 @@ import {
 } from "effect";
 import * as DecisionModel from "effect/unstable/ai/DecisionModel";
 import { FetchHttpClient, HttpClient } from "effect/unstable/http";
-import { isAcceptedEvaluationReport } from "./evaluation";
 import {
   RfcSourceRevalidationError,
   hasLiveRfcSourceCacheEntry,
@@ -29,11 +28,6 @@ import {
   type LiveRfcSourceResult,
 } from "./live-source";
 import {
-  calibrationAnswerActivation,
-  makeArtifactActivation,
-  type AutomaticAnswerActivation,
-} from "./activation";
-import {
   RfcDiscovery,
   RfcDiscoveryError,
   RfcIdentifierError,
@@ -44,6 +38,8 @@ import {
   datatrackerSuccessorLimit,
   makeDefaultRfcDiscoveryLayer,
   makeRfcDiscoveryHttpLayer,
+  type LiveRfcLookup,
+  type LiveTopicDiscovery,
   type RfcMetadata,
 } from "./discovery";
 import {
@@ -55,17 +51,15 @@ import {
 import type { CitationVerificationRequest, CitationVerificationResult } from "./citation";
 import {
   DecisionModelError,
-  EvidenceBundleSchema,
-  precisionPolicy,
-  researchPolicyPresets,
-  ResearchPolicyError,
+  ResearchResultSchema,
   ResolvedModelName,
   ResolvedModelNames,
   RfcNotFoundError,
-  researchKnownRfc,
-  researchTopic,
+  buildCandidatePool,
+  researchQuestions,
+  retrievalPolicy,
 } from "./research";
-import type { EvidenceBundle } from "./research";
+import type { ResearchResult } from "./research";
 import {
   RfcSourceCacheError,
   RfcSourceFetchError,
@@ -105,51 +99,48 @@ export {
   schemaVersion,
 } from "./protocol";
 export type { LiveRetrievalTrace, RetrievalRequestTrace, RfcDocument } from "./discovery";
-export * from "./evaluation";
 export { RfcSourceRevalidationError } from "./live-source";
 export type { LiveSourceCacheOutcome, LiveRfcSourceResult } from "./live-source";
 export * from "./offsets";
 export { InputTokenCostSchema, estimateInputTokenCost, type InputTokenCost } from "./pricing";
 export {
-  AnswerRelationSchema,
   DecisionModelError,
-  EvidenceBundleSchema,
-  EvidencePassageSchema,
-  EvidenceProvenanceSchema,
+  HitRoleSchema,
+  PassageProvenanceSchema,
+  PassageSchema,
+  ResearchAnswerSchema,
   ResearchDiagnosticsSchema,
-  ResearchPolicyError,
-  ReviewCandidateSchema,
-  ResearchStatusSchema,
-  RfcContextRoleSchema,
-  RfcCurrencyCompatibilitySchema,
-  RfcCurrencyIssueSchema,
+  ResearchHitSchema,
+  ResearchResultSchema,
   RfcCurrencyReportSchema,
   RfcNotFoundError,
   RfcRelationshipStepSchema,
-  RfcResearchContextSchema,
-  SourceBlockSchema,
-  knownRfcPolicy,
-  parseSourceBlocks,
-  precisionPolicy,
-  precisionV2Policy,
-  researchPolicyPresets,
-  shortlistPassageCandidates,
-  type AnswerRelation,
-  type EvidenceBundle,
-  type EvidencePassage,
-  type EvidenceProvenance,
+  VerdictSchema,
+  buildCandidatePool,
+  resolveRfcCurrency,
+  retrievalPolicy,
+  type HitRole,
+  type NamedRfcLookup,
+  type Passage,
+  type PassageProvenance,
+  type PoolCandidate,
+  type ResearchAnswer,
   type ResearchDiagnostics,
-  type ResearchPolicy,
-  type ResearchStatus,
-  type ReviewCandidate,
-  type RfcContextRole,
-  type RfcCurrencyCompatibility,
-  type RfcCurrencyIssue,
+  type ResearchHit,
+  type ResearchResult,
+  type RetrievalPolicy,
   type RfcCurrencyReport,
   type RfcRelationshipStep,
-  type RfcResearchContext,
-  type SourceBlock,
+  type Verdict,
 } from "./research";
+export {
+  paragraphMaximumCharacters,
+  parseRfcStructure,
+  sectionAtOffset,
+  type RfcParagraph,
+  type RfcSection,
+  type RfcStructure,
+} from "./sections";
 export {
   RfcSourceCacheError,
   RfcSourceFetchError,
@@ -161,19 +152,6 @@ export {
   type RfcSourceFetcher,
   type RfcSourcePayload,
 } from "./source";
-
-export type { AutomaticAnswerActivation } from "./activation";
-
-/**
- * Decode a locally accepted calibration artifact into an activation proof.
- *
- * @param input Unknown report data from the local calibration artifact.
- * @returns An activation proof when every current release gate passes.
- */
-export const automaticAnswerActivationFromReport = (
-  input: unknown,
-): AutomaticAnswerActivation | undefined =>
-  isAcceptedEvaluationReport(input) ? makeArtifactActivation() : undefined;
 
 /**
  * Whole-operation ceiling for one research or citation call.
@@ -283,14 +261,6 @@ export interface RfcClientOptions {
    */
   readonly sourceDirectory?: string | undefined;
   /**
-   * Named policy preset recorded in research diagnostics.
-   */
-  readonly policyPreset?: string | undefined;
-  /**
-   * Opaque activation proof supplied by the validated composition root.
-   */
-  readonly automaticAnswerActivation: AutomaticAnswerActivation | undefined;
-  /**
    * A deterministic DecisionModel replacement for tests and embedded callers.
    */
   readonly decisionModel?: DecisionModel.DecisionModel | undefined;
@@ -361,7 +331,6 @@ export type RfcCoreError =
   | ResearchUnavailableError
   | RfcNotFoundError
   | DecisionModelError
-  | ResearchPolicyError
   | InvalidInputError
   | ConfigurationError
   | OperationTimeoutError;
@@ -380,7 +349,6 @@ export type ErrorCode =
   | "research_unavailable"
   | "rfc_not_found"
   | "decision_model_failed"
-  | "policy_error"
   | "invalid_input"
   | "configuration_error"
   | "credential_missing"
@@ -402,7 +370,6 @@ const ErrorCodeSchema = Schema.Literals([
   "research_unavailable",
   "rfc_not_found",
   "decision_model_failed",
-  "policy_error",
   "invalid_input",
   "configuration_error",
   "credential_missing",
@@ -447,110 +414,81 @@ export interface ErrorEnvelope {
   };
 }
 
-const KnownRfcResearchRequestInputSchema = Schema.Struct({
-  schemaVersion: Schema.Literal(schemaVersion),
-  question: Schema.NonEmptyString,
-  rfc: Schema.NonEmptyString,
-  searchTerms: Schema.optionalKey(Schema.Undefined),
-});
-
 const TopicSearchTermSchema = Schema.String.check(
   Schema.isMinLength(1),
   Schema.isMaxLength(datatrackerTopicSearchTermMaximumCharacters),
 );
 
-const TopicResearchRequestInputSchema = Schema.Struct({
+/**
+ * Schema for version-three research requests.
+ *
+ * At least one of `rfcs` or `searchTerms` is required; both may be given, in
+ * which case named RFCs and topic hits share one candidate pool.
+ */
+export const ResearchRequestSchema = Schema.Struct({
   schemaVersion: Schema.Literal(schemaVersion),
-  question: Schema.NonEmptyString,
-  rfc: Schema.Null,
-  searchTerms: Schema.Array(TopicSearchTermSchema).check(
+  questions: Schema.Array(Schema.NonEmptyString).check(
     Schema.isMinLength(1),
-    Schema.isMaxLength(datatrackerTopicSearchTermLimit),
+    Schema.isMaxLength(retrievalPolicy.maxQuestions),
+  ),
+  rfcs: Schema.optionalKey(
+    Schema.Array(Schema.NonEmptyString).check(
+      Schema.isMinLength(1),
+      Schema.isMaxLength(retrievalPolicy.maxRequestedRfcs),
+    ),
+  ),
+  searchTerms: Schema.optionalKey(
+    Schema.Array(TopicSearchTermSchema).check(
+      Schema.isMinLength(1),
+      Schema.isMaxLength(datatrackerTopicSearchTermLimit),
+    ),
   ),
 });
 
 /**
- * Schema for version-two known-RFC and topic research requests.
+ * A decoded schema-version-three research request.
  */
-export const ResearchRequestSchema = Schema.Union([
-  KnownRfcResearchRequestInputSchema,
-  TopicResearchRequestInputSchema,
-]);
-
-/**
- * A schema-version-two request for exact known-RFC research.
- */
-export interface LiveKnownRfcResearchRequest {
+export interface ResearchRequest {
+  /**
+   * Public protocol version.
+   */
   readonly schemaVersion: typeof schemaVersion;
-  readonly question: string;
-  readonly rfc: string;
-  readonly searchTerms?: undefined;
+  /**
+   * One to four independently answered questions.
+   */
+  readonly questions: ReadonlyArray<string>;
+  /**
+   * One to four named RFC identifiers, each researched with its current successors.
+   */
+  readonly rfcs?: ReadonlyArray<string> | undefined;
+  /**
+   * One to four ordered topic-discovery terms sent verbatim to Datatracker.
+   */
+  readonly searchTerms?: ReadonlyArray<string> | undefined;
 }
-
-/**
- * A schema-version-two request for bounded topic discovery.
- */
-export interface LiveTopicResearchRequest {
-  readonly schemaVersion: typeof schemaVersion;
-  readonly question: string;
-  readonly rfc: null;
-  readonly searchTerms: ReadonlyArray<string>;
-}
-
-/**
- * A decoded schema-version-two research request.
- */
-export type ResearchRequest = LiveKnownRfcResearchRequest | LiveTopicResearchRequest;
 
 /**
  * Decode unknown research input at the public JSON boundary.
  *
  * @param input The unknown value received from JSON or convenience flags.
- * @returns A validated schema-version-two known-RFC or topic request.
- * @throws InvalidInputError when the value does not satisfy the version-two contract.
+ * @returns A validated schema-version-three request.
+ * @throws InvalidInputError when the value does not satisfy the version-three contract.
  */
 export const decodeResearchRequest = (input: unknown): ResearchRequest => {
-  // Checked ahead of both schemas. The known-RFC schema admits only an absent
-  // or undefined `searchTerms`, so a request naming an RFC *and* search terms
-  // fails that decode and falls through to the topic schema, where it is
-  // refused for the unrelated reason that `rfc` is not null. Reporting the
-  // actual conflict requires seeing the raw input.
-  if (
-    typeof input === "object" &&
-    input !== null &&
-    typeof (input as { readonly rfc?: unknown }).rfc === "string" &&
-    (input as { readonly searchTerms?: unknown }).searchTerms !== undefined
-  ) {
-    throw new InvalidInputError({
-      reason: "Known-RFC research must not include topic search terms",
-    });
-  }
-
+  let request: Schema.Schema.Type<typeof ResearchRequestSchema>;
   try {
-    const request = Schema.decodeUnknownSync(KnownRfcResearchRequestInputSchema)(input);
-    return { ...request, searchTerms: undefined };
-  } catch (error) {
-    if (error instanceof InvalidInputError) throw error;
-  }
-
-  try {
-    const request = Schema.decodeUnknownSync(TopicResearchRequestInputSchema)(input);
-    if (
-      request.searchTerms.length < 1 ||
-      request.searchTerms.length > datatrackerTopicSearchTermLimit ||
-      request.searchTerms.some(
-        (term) => term.length === 0 || term.length > datatrackerTopicSearchTermMaximumCharacters,
-      )
-    ) {
-      throw new Error("invalid search terms");
-    }
-    return request;
+    request = Schema.decodeUnknownSync(ResearchRequestSchema)(input);
   } catch {
     throw new InvalidInputError({
-      reason:
-        "Research input must use schema version 2 with an RFC or one to four bounded search terms",
+      reason: `Research input must use schema version ${schemaVersion} with one to four questions, up to four rfcs, and up to four bounded search terms`,
     });
   }
+  if (request.rfcs === undefined && request.searchTerms === undefined) {
+    throw new InvalidInputError({
+      reason: "Research input must include rfcs, searchTerms, or both",
+    });
+  }
+  return request;
 };
 
 /**
@@ -601,9 +539,9 @@ export interface RfcClient {
    */
   readonly sourceCacheRemove: (rfc: string) => Promise<RfcSourceCacheRemoveResult>;
   /**
-   * Research one topic or known published RFC and return exact evidence.
+   * Research up to four questions against named RFCs, topic terms, or both.
    */
-  readonly research: (request: ResearchRequest) => Promise<EvidenceBundle>;
+  readonly research: (request: ResearchRequest) => Promise<ResearchResult>;
   /**
    * Verify one factual claim against an exact quotation from a published RFC.
    */
@@ -637,7 +575,7 @@ const makeClock = (now: () => number): Clock.Clock => ({
 const typeSafeDecisionModelLayer = (options: RfcClientOptions) => {
   const observedClientLayer = Layer.fromBuildMemo(() =>
     Effect.gen(function* () {
-      const resolvedModel = yield* Ref.make(options.modelAlias ?? precisionPolicy.pinnedModel);
+      const resolvedModel = yield* Ref.make(options.modelAlias ?? retrievalPolicy.pinnedModel);
       const resolvedModels = yield* Ref.make<ReadonlyArray<string>>([]);
       const client = yield* TypeSafeClientApi.make({
         apiKey:
@@ -671,7 +609,7 @@ const typeSafeDecisionModelLayer = (options: RfcClientOptions) => {
     ),
   );
 
-  return TypeSafeDecisionModel.model(options.modelAlias ?? precisionPolicy.pinnedModel).pipe(
+  return TypeSafeDecisionModel.model(options.modelAlias ?? retrievalPolicy.pinnedModel).pipe(
     Layer.provideMerge(observedClientLayer),
   );
 };
@@ -684,7 +622,7 @@ const decisionModelLayer = (options: RfcClientOptions) =>
         Layer.merge(
           Layer.succeed(
             ResolvedModelName,
-            Ref.makeUnsafe(options.modelAlias ?? precisionPolicy.pinnedModel),
+            Ref.makeUnsafe(options.modelAlias ?? retrievalPolicy.pinnedModel),
           ),
           Layer.succeed(ResolvedModelNames, Ref.makeUnsafe<ReadonlyArray<string>>([])),
         ),
@@ -867,75 +805,6 @@ const makeLiveSourceLoader = (sourceDirectory: string, loads: Array<LoadedLiveSo
     return outcome.success.source;
   });
 
-const liveKnownResearchProgram = Effect.fnUntraced(function* (
-  options: RfcClientOptions,
-  request: LiveKnownRfcResearchRequest,
-) {
-  const startedAt = yield* Clock.currentTimeMillis;
-  const discovery = yield* RfcDiscovery;
-  const lookup = yield* discovery.lookupKnownRfc(request.rfc);
-  const sourceDirectory = yield* resolveSourceDirectory(options);
-  const sourceLoads: Array<LoadedLiveSource> = [];
-  const sourceLoader = makeLiveSourceLoader(sourceDirectory, sourceLoads);
-  const result = yield* researchKnownRfc(request.question, request.rfc, {
-    documents: lookup.documents,
-    sourceLoader,
-    policyPreset: options.policyPreset ?? "precision-v2",
-    // Public live discovery is not covered by a reviewed precision-v2 release attestation.
-    // The private calibration capability can still measure automatic-answer behavior.
-    automaticAnswerActivation:
-      options.automaticAnswerActivation === calibrationAnswerActivation
-        ? calibrationAnswerActivation
-        : undefined,
-    modelAlias: options.modelAlias ?? precisionPolicy.pinnedModel,
-    metadataMs: lookup.metadataMs,
-    startedAt,
-  });
-  const sourceRequests = sourceRequestTraces(sourceLoads);
-  const requests = [...lookup.requests, ...sourceRequests];
-  const retrieval = {
-    schemaVersion: 2 as const,
-    requestCount: requests.length,
-    datatrackerRequestCount: lookup.requests.length,
-    sourceRequestCount: sourceRequests.length,
-    metadataMs: lookup.metadataMs,
-    sourceMs: result.diagnostics.timings.sourceMs,
-    sourceCacheOutcome: cacheOutcomeFor(sourceLoads, lookup.document.identifier),
-    traversalComplete: lookup.traversalComplete,
-    traversalContexts: lookup.traversalContexts,
-    traversalDepth: lookup.traversalDepth,
-    successorRows: lookup.successorRows,
-    boundedExits: lookup.boundedExits,
-    contextLimit: datatrackerCurrencyContextLimit,
-    depthLimit: lookup.depthLimit,
-    relationshipLimit: datatrackerSuccessorLimit,
-    requests,
-  };
-  const currency =
-    lookup.traversalComplete || result.currency === undefined
-      ? result.currency
-      : {
-          ...result.currency,
-          complete: false,
-          issues: [...new Set([...result.currency.issues, "traversal_limit" as const])],
-        };
-
-  const status = lookup.traversalComplete ? result.status : "needs_review";
-
-  return Schema.decodeUnknownSync(EvidenceBundleSchema)({
-    ...result,
-    schemaVersion: 2,
-    status,
-    currency,
-    diagnostics: {
-      ...result.diagnostics,
-      schemaVersion: 2,
-      currency,
-      retrieval,
-    },
-  });
-});
-
 /**
  * Diagnostics describing a topic search that degraded to Datatracker.
  *
@@ -953,138 +822,113 @@ const topicSearchFallbackDiagnostics = (discovered: {
         topicSearchFallbackReason: discovered.searchFallbackReason.slice(0, 512),
       };
 
-const liveTopicResearchProgram = Effect.fnUntraced(function* (
+const topicTrace = (discovered: LiveTopicDiscovery | undefined, poolSize: number) =>
+  discovered === undefined
+    ? {}
+    : {
+        upstreamRows: discovered.upstreamRows,
+        uniqueCandidates: discovered.uniqueCandidates,
+        mergeLimit: datatrackerDocumentCandidateLimit,
+        semanticCandidates: poolSize,
+        topicTruncated: discovered.truncated,
+        ...topicSearchFallbackDiagnostics(discovered),
+      };
+
+const traversalTrace = (lookups: ReadonlyArray<LiveRfcLookup>) =>
+  lookups.length === 0
+    ? {}
+    : {
+        traversalComplete: lookups.every(({ traversalComplete }) => traversalComplete),
+        traversalContexts: lookups.reduce((total, lookup) => total + lookup.traversalContexts, 0),
+        traversalDepth: Math.max(...lookups.map(({ traversalDepth }) => traversalDepth)),
+        successorRows: lookups.reduce((total, lookup) => total + lookup.successorRows, 0),
+        boundedExits: [...new Set(lookups.flatMap(({ boundedExits }) => boundedExits))],
+        contextLimit: datatrackerCurrencyContextLimit,
+        depthLimit: Math.max(...lookups.map(({ depthLimit }) => depthLimit)),
+        relationshipLimit: datatrackerSuccessorLimit,
+      };
+
+const uniqueRfcHints = (rfcs: ReadonlyArray<string>): ReadonlyArray<string> => [
+  ...new Map(rfcs.map((rfc) => [rfc.trim().toUpperCase().replace(/\s+/g, ""), rfc])).values(),
+];
+
+const researchProgram = Effect.fnUntraced(function* (
   options: RfcClientOptions,
-  request: LiveTopicResearchRequest,
+  request: ResearchRequest,
 ) {
   const startedAt = yield* Clock.currentTimeMillis;
   const discovery = yield* RfcDiscovery;
-  const discovered = yield* discovery.discoverTopic(request.searchTerms);
-  if (discovered.documents.length === 0) {
-    const policyPreset = options.policyPreset ?? "precision-v2";
-    const policy = researchPolicyPresets[policyPreset];
-    if (policy === undefined) {
-      return yield* new ResearchPolicyError({ policyPreset });
-    }
-
-    const finishedAt = yield* Clock.currentTimeMillis;
-    const requestedModel = options.modelAlias ?? precisionPolicy.pinnedModel;
-    return Schema.decodeUnknownSync(EvidenceBundleSchema)({
-      schemaVersion: 2,
-      kind: "evidence_bundle",
-      status: "needs_review",
-      question: request.question,
-      rfc: null,
-      evidence: [],
-      diagnostics: {
-        schemaVersion: 2,
-        policyVersion: policy.policyVersion,
-        requestedModel,
-        resolvedModel: requestedModel,
-        resolvedModels: [],
-        usage: { inputTokens: null, outputTokens: null },
-        inputCost: estimateInputTokenCost(null, []),
-        timings: {
-          metadataMs: discovered.metadataMs,
-          sourceMs: 0,
-          lexicalMs: 0,
-          selectionMs: 0,
-          relationMs: 0,
-          totalMs: Math.max(0, finishedAt - startedAt),
-          documentMs: 0,
-        },
-        source: null,
-        sources: [],
-        retrieval: {
-          schemaVersion: 2,
-          requestCount: discovered.requests.length,
-          datatrackerRequestCount: discovered.requests.length,
-          sourceRequestCount: 0,
-          metadataMs: discovered.metadataMs,
-          sourceMs: 0,
-          sourceCacheOutcome: "not_requested",
-          upstreamRows: discovered.upstreamRows,
-          uniqueCandidates: discovered.uniqueCandidates,
-          mergeLimit: datatrackerDocumentCandidateLimit,
-          semanticCandidates: 0,
-          selectedSources: 0,
-          topicTruncated: discovered.truncated,
-          ...topicSearchFallbackDiagnostics(discovered),
-          requests: discovered.requests,
-        },
-        candidates: {
-          sourceBlocks: 0,
-          passageCandidates: 0,
-          selectedPassages: 0,
-          discoveredDocuments: 0,
-          documentCandidates: 0,
-          acceptedDocuments: 0,
-        },
-        atomicity: null,
-        documentSelection: [],
-        selection: [],
-        classification: [],
-      },
-    });
-  }
+  const [lookups, discovered] = yield* Effect.all(
+    [
+      Effect.forEach(uniqueRfcHints(request.rfcs ?? []), (rfc) => discovery.lookupKnownRfc(rfc), {
+        concurrency: "unbounded",
+      }),
+      request.searchTerms === undefined
+        ? Effect.succeed(undefined)
+        : discovery.discoverTopic(request.searchTerms),
+    ],
+    { concurrency: "unbounded" },
+  );
+  const metadataFinished = yield* Clock.currentTimeMillis;
+  const { pool, currency } = buildCandidatePool(lookups, discovered?.documents ?? []);
 
   const sourceDirectory = yield* resolveSourceDirectory(options);
   const sourceLoads: Array<LoadedLiveSource> = [];
-  const sourceLoader = makeLiveSourceLoader(sourceDirectory, sourceLoads);
-  const result = yield* researchTopic(request.question, {
-    documents: discovered.documents,
-    sourceLoader,
-    policyPreset: options.policyPreset ?? "precision-v2",
-    automaticAnswerActivation:
-      options.automaticAnswerActivation === calibrationAnswerActivation
-        ? calibrationAnswerActivation
-        : undefined,
-    modelAlias: options.modelAlias ?? precisionPolicy.pinnedModel,
-    metadataMs: discovered.metadataMs,
-    startedAt,
+  const result = yield* researchQuestions({
+    questions: request.questions,
+    pool,
+    sourceLoader: makeLiveSourceLoader(sourceDirectory, sourceLoads),
   });
+  const finishedAt = yield* Clock.currentTimeMillis;
+
+  const fallbackResolvedModel = yield* Ref.get(yield* ResolvedModelName);
+  const observedResolvedModels = yield* Ref.get(yield* ResolvedModelNames);
+  const resolvedModels =
+    observedResolvedModels.length === 0
+      ? [fallbackResolvedModel]
+      : [...new Set(observedResolvedModels)];
+  const metadataRequests = [
+    ...lookups.flatMap(({ requests }) => requests),
+    ...(discovered?.requests ?? []),
+  ];
   const sourceRequests = sourceRequestTraces(sourceLoads);
-  const requests = [...discovered.requests, ...sourceRequests];
-  const retrieval = {
-    schemaVersion: 2 as const,
-    requestCount: requests.length,
-    datatrackerRequestCount: discovered.requests.length,
-    sourceRequestCount: sourceRequests.length,
-    metadataMs: discovered.metadataMs,
-    sourceMs: result.diagnostics.timings.sourceMs,
-    sourceCacheOutcome: cacheOutcomeFor(sourceLoads, result.rfc?.identifier),
-    upstreamRows: discovered.upstreamRows,
-    uniqueCandidates: discovered.uniqueCandidates,
-    mergeLimit: datatrackerDocumentCandidateLimit,
-    semanticCandidates: discovered.documents.length,
-    selectedSources: sourceLoads.length,
-    topicTruncated: discovered.truncated,
-    ...topicSearchFallbackDiagnostics(discovered),
-    requests,
-  };
+  const requests = [...metadataRequests, ...sourceRequests];
+  const metadataMs = Math.max(0, metadataFinished - startedAt);
+  const inputTokens = result.usage.inputTokens ?? null;
 
-  const status =
-    discovered.documents.length === 0 || discovered.truncated ? "needs_review" : result.status;
-
-  return Schema.decodeUnknownSync(EvidenceBundleSchema)({
-    ...result,
-    schemaVersion: 2,
-    status,
-    contexts: result.contexts,
-    currency: result.currency,
+  return Schema.decodeUnknownSync(ResearchResultSchema)({
+    schemaVersion,
+    kind: "research_result",
+    answers: result.answers,
+    ...(lookups.length === 0 ? {} : { currency }),
     diagnostics: {
-      ...result.diagnostics,
-      schemaVersion: 2,
-      currency: result.currency,
-      retrieval,
+      policyVersion: retrievalPolicy.policyVersion,
+      requestedModel: options.modelAlias ?? retrievalPolicy.pinnedModel,
+      resolvedModels,
+      usage: { inputTokens, outputTokens: result.usage.outputTokens ?? null },
+      inputCost: estimateInputTokenCost(inputTokens, resolvedModels),
+      timings: {
+        metadataMs,
+        ...result.timings,
+        totalMs: Math.max(0, finishedAt - startedAt),
+      },
+      retrieval: {
+        schemaVersion,
+        requestCount: requests.length,
+        datatrackerRequestCount: metadataRequests.length,
+        sourceRequestCount: sourceRequests.length,
+        metadataMs,
+        sourceMs: result.timings.sourceMs,
+        sourceCacheOutcome: cacheOutcomeFor(sourceLoads, undefined),
+        selectedSources: sourceLoads.length,
+        ...topicTrace(discovered, pool.length),
+        ...traversalTrace(lookups),
+        requests,
+      },
+      candidates: { pool: pool.length, ranked: result.rankedCount },
     },
   });
 });
-
-const researchProgram = (options: RfcClientOptions, request: ResearchRequest) =>
-  request.rfc === null
-    ? liveTopicResearchProgram(options, request)
-    : liveKnownResearchProgram(options, request);
 
 const citationProgram = (options: RfcClientOptions, request: CitationVerificationRequest) =>
   Effect.gen(function* () {
@@ -1105,7 +949,7 @@ const citationProgram = (options: RfcClientOptions, request: CitationVerificatio
           return {
             source,
             retrieval: {
-              schemaVersion: 2,
+              schemaVersion,
               requestCount: requests.length,
               datatrackerRequestCount: lookup.requests.length,
               sourceRequestCount: sourceRequests.length,
@@ -1116,7 +960,7 @@ const citationProgram = (options: RfcClientOptions, request: CitationVerificatio
             },
           };
         }),
-      modelAlias: options.modelAlias ?? precisionPolicy.pinnedModel,
+      modelAlias: options.modelAlias ?? retrievalPolicy.pinnedModel,
       metadataMs: lookup.metadataMs,
       startedAt,
     });
@@ -1126,7 +970,7 @@ const resetModelTrackingProgram = (options: RfcClientOptions) =>
   Effect.gen(function* () {
     const resolvedModel = yield* ResolvedModelName;
     const resolvedModels = yield* ResolvedModelNames;
-    yield* Ref.set(resolvedModel, options.modelAlias ?? precisionPolicy.pinnedModel);
+    yield* Ref.set(resolvedModel, options.modelAlias ?? retrievalPolicy.pinnedModel);
     yield* Ref.set(resolvedModels, []);
   });
 
@@ -1260,17 +1104,6 @@ export const toErrorEnvelope = (error: unknown): ErrorEnvelope => {
     };
   }
 
-  if (error instanceof ResearchPolicyError) {
-    return {
-      schemaVersion,
-      kind: "error",
-      error: {
-        code: "policy_error",
-        message: `Unknown research policy preset: ${error.policyPreset}`,
-      },
-    };
-  }
-
   if (error instanceof RfcClientClosedError) {
     return {
       schemaVersion,
@@ -1349,8 +1182,6 @@ const defaultClientOptions: RfcClientOptions = {
   rfcSourceFetcher: undefined,
   rfcSourceHttpClient: undefined,
   sourceDirectory: undefined,
-  policyPreset: undefined,
-  automaticAnswerActivation: undefined,
   decisionModel: undefined,
 };
 

@@ -20,29 +20,13 @@ import {
   datatrackerCurrencyContextLimit,
   datatrackerCurrencyDepthLimit,
   datatrackerDocumentCandidateLimit,
-  datatrackerMaxAttempts,
-  datatrackerMaximumResponseBytes,
-  datatrackerRequestDeadlineMilliseconds,
-  datatrackerSuccessorLimit,
-  datatrackerTopicConcurrencyLimit,
-  datatrackerTopicRequestLimit,
-  topicDatatrackerRequestLimit,
-  datatrackerTopicResultLimit,
-  datatrackerTopicSearchTermLimit,
-  datatrackerTopicSearchTermMaximumCharacters,
-  datatrackerTopicUpstreamRowLimit,
 } from "./discovery";
-import {
-  LiveRfcSource,
-  RfcSourceRevalidationError,
-  liveRfcSourceCacheVersion,
-  rfcSourceDeadlineMilliseconds,
-  rfcSourceMaximumBytes,
-} from "./live-source";
-import { RfcMetadataSchema, type RfcMetadata } from "./metadata";
-import { makeUtf8OffsetMap, moveToUtf8Boundary, utf8OffsetUnit } from "./offsets";
-import { InputTokenCostSchema, estimateInputTokenCost } from "./pricing";
-import { isAutomaticAnswerActivation, type AutomaticAnswerActivation } from "./activation";
+import { LiveRfcSource, RfcSourceRevalidationError } from "./live-source";
+import type { RfcMetadata } from "./metadata";
+import { makeUtf8OffsetMap, utf8OffsetUnit } from "./offsets";
+import { InputTokenCostSchema } from "./pricing";
+import { schemaVersion } from "./protocol";
+import { parseRfcStructure, type RfcParagraph, type RfcSection } from "./sections";
 import { RfcSourceCacheError, RfcSourceFetchError, type RfcSource } from "./source";
 
 /**
@@ -76,56 +60,67 @@ export const summarizeResolvedModels = (
 };
 
 /**
- * The answer-relation labels assigned to selected evidence passages.
- */
-export const AnswerRelationSchema = Schema.Literals([
-  "direct_answer",
-  "partial_answer",
-  "background_only",
-  "contradictory",
-  "irrelevant",
-]);
-
-/**
- * The relationship between a source block and the research question.
- */
-export type AnswerRelation = Schema.Schema.Type<typeof AnswerRelationSchema>;
-
-/**
- * The fail-closed statuses returned by semantic research.
- */
-export const ResearchStatusSchema = Schema.Literals([
-  "answered",
-  "partial",
-  "unsupported",
-  "needs_review",
-  "needs_split",
-]);
-
-/**
- * A fail-closed semantic research status.
- */
-export type ResearchStatus = Schema.Schema.Type<typeof ResearchStatusSchema>;
-
-/**
- * How many canonical passages a `needs_split` bundle surfaces for review.
+ * Every threshold and bound used by Jev-ranked retrieval.
  *
- * A compound request needs one follow-up call per part, and each part is
- * usually carried by a different passage. Returning a single candidate made
- * the caller re-retrieve the same source for every part. This is a bound on
- * returned material, not an acceptance threshold, so it is not policy state.
+ * The engine only retrieves and judges relevance; the caller reasons over the
+ * returned passages. Thresholds are uncalibrated working values chosen to keep
+ * one to three passages per question.
  */
-const splitReviewCandidateLimit = 4;
+export const retrievalPolicy = {
+  policyVersion: "jev-retrieval-v1",
+  pinnedModel: "jev-1.13.0",
+  maxQuestions: 4,
+  maxRequestedRfcs: 4,
+  maxPoolCandidates: datatrackerDocumentCandidateLimit,
+  abstractMaximumCharacters: 1_500,
+  rankFloor: 0.3,
+  maxRfcsPerQuestion: 2,
+  coverageMass: 0.8,
+  maxSections: 3,
+  maxParagraphs: 3,
+  maxChoiceOptions: 250,
+  sectionBeamWidth: 3,
+  sectionPreviewCharacters: 120,
+  chapterPreviewCharacters: 600,
+  paragraphStateCharacters: 60_000,
+  existsFloor: 0.35,
+  maxCurrencyTraversalDepth: datatrackerCurrencyDepthLimit,
+  maxCurrencyContexts: datatrackerCurrencyContextLimit,
+  providerMaxAttempts: 3,
+  providerMaxElapsedMilliseconds: 10_000,
+  providerDefaultRetryDelayMilliseconds: 100,
+} as const;
 
 /**
- * The role of an RFC in a currency-aware research result.
+ * The shape of the retrieval policy.
  */
-export const RfcContextRoleSchema = Schema.Literals(["requested", "current"]);
+export type RetrievalPolicy = typeof retrievalPolicy;
 
 /**
- * The role of an RFC in a currency-aware research result.
+ * How an RFC entered the candidate pool.
  */
-export type RfcContextRole = Schema.Schema.Type<typeof RfcContextRoleSchema>;
+export const HitRoleSchema = Schema.Literals(["requested", "current", "discovered"]);
+
+/**
+ * How an RFC entered the candidate pool: named by the caller, the current
+ * successor of a named RFC, or found by topic search.
+ */
+export type HitRole = Schema.Schema.Type<typeof HitRoleSchema>;
+
+/**
+ * How returned passages relate to a question, using citation-check semantics.
+ */
+export const VerdictSchema = Schema.Literals([
+  "supports",
+  "partial",
+  "says_nothing",
+  "contradicts",
+]);
+
+/**
+ * How returned passages relate to a question.
+ */
+export type Verdict = Schema.Schema.Type<typeof VerdictSchema>;
 
 /**
  * One directed live relationship followed while resolving RFC currency.
@@ -142,524 +137,137 @@ export const RfcRelationshipStepSchema = Schema.Struct({
 export type RfcRelationshipStep = Schema.Schema.Type<typeof RfcRelationshipStepSchema>;
 
 /**
- * A known RFC context returned with an evidence bundle.
- */
-const InternalRfcResearchContextSchema = Schema.Struct({
-  role: RfcContextRoleSchema,
-  document: RfcMetadataSchema,
-  relationshipPath: Schema.Array(RfcRelationshipStepSchema),
-  isCurrent: Schema.Boolean,
-  state: Schema.Literals(["researched", "unavailable"]),
-});
-
-type InternalRfcResearchContext = Schema.Schema.Type<typeof InternalRfcResearchContextSchema>;
-
-/**
- * Schema for one relationship-aware RFC context returned by version two.
- */
-export const RfcResearchContextSchema = Schema.Struct({
-  role: RfcContextRoleSchema,
-  document: RfcDocumentSchema,
-  relationshipPath: Schema.Array(RfcRelationshipStepSchema),
-  isCurrent: Schema.Boolean,
-  state: Schema.Literals(["researched", "unavailable"]),
-});
-
-/**
- * A requested or current RFC context included in a research result.
- */
-export type RfcResearchContext = Schema.Schema.Type<typeof RfcResearchContextSchema>;
-
-/**
- * The bounded failure modes recorded while resolving RFC currency.
- */
-export const RfcCurrencyIssueSchema = Schema.Literals([
-  "missing_successor",
-  "malformed_relationship",
-  "cycle_detected",
-  "traversal_limit",
-  "missing_current_context",
-  "missing_current_source",
-]);
-
-/**
- * A bounded issue reported by RFC relationship traversal or current-context research.
- */
-export type RfcCurrencyIssue = Schema.Schema.Type<typeof RfcCurrencyIssueSchema>;
-
-/**
- * The deterministic compatibility judgment between requested and current evidence.
- */
-export const RfcCurrencyCompatibilitySchema = Schema.Struct({
-  requested: Schema.NonEmptyString,
-  current: Schema.NonEmptyString,
-  outcome: Schema.Literals(["compatible", "conflicting", "uncertain"]),
-});
-
-/**
- * A compatibility judgment recorded for one current RFC context.
- */
-export type RfcCurrencyCompatibility = Schema.Schema.Type<typeof RfcCurrencyCompatibilitySchema>;
-
-const RfcCurrencyPathSchema = Schema.Struct({
-  identifier: Schema.NonEmptyString,
-  path: Schema.Array(RfcRelationshipStepSchema),
-});
-
-/**
- * The deterministic requested-to-current RFC relationship report.
+ * The requested-to-current relationship report for one named RFC.
  */
 export const RfcCurrencyReportSchema = Schema.Struct({
   requested: Schema.NonEmptyString,
   current: Schema.Array(Schema.NonEmptyString),
-  paths: Schema.Array(RfcCurrencyPathSchema),
-  complete: Schema.Boolean,
-  issues: Schema.Array(RfcCurrencyIssueSchema),
-  unresolved: Schema.Array(Schema.NonEmptyString),
-  compatibility: Schema.Array(RfcCurrencyCompatibilitySchema),
+  paths: Schema.Array(
+    Schema.Struct({
+      identifier: Schema.NonEmptyString,
+      path: Schema.Array(RfcRelationshipStepSchema),
+    }),
+  ),
 });
 
 /**
- * A relationship traversal report included in a research result.
+ * The requested-to-current relationship report for one named RFC.
  */
 export type RfcCurrencyReport = Schema.Schema.Type<typeof RfcCurrencyReportSchema>;
 
-const precisionV2RetrievalLimits = {
-  maxSearchTerms: datatrackerTopicSearchTermLimit,
-  maxSearchTermCharacters: datatrackerTopicSearchTermMaximumCharacters,
-  maxTopicRequests: datatrackerTopicRequestLimit,
-  maxDatatrackerTopicRequests: topicDatatrackerRequestLimit,
-  maxConcurrentDatatrackerRequests: datatrackerTopicConcurrencyLimit,
-  maxRowsPerTopicRequest: datatrackerTopicResultLimit,
-  maxUpstreamTopicRows: datatrackerTopicUpstreamRowLimit,
-  datatrackerMaxAttempts,
-  datatrackerDeadlineMilliseconds: datatrackerRequestDeadlineMilliseconds,
-  datatrackerMaximumResponseBytes,
-  sourceDeadlineMilliseconds: rfcSourceDeadlineMilliseconds,
-  sourceMaximumBytes: rfcSourceMaximumBytes,
-  sourceCacheSchemaVersion: liveRfcSourceCacheVersion,
-} as const;
-
-const precisionV2CandidateLimits = {
-  maxMergedDocumentCandidates: datatrackerDocumentCandidateLimit,
-  maxSourceRetrievalCandidates: 8,
-  maxPassageCandidates: 8,
-  maxLengthNormalizedPassageCandidates: 4,
-  sourceBlockMaxCharacters: 4_000,
-  sourceBlockOverlapCharacters: 200,
-} as const;
-
-const precisionV2TraversalLimits = {
-  maxDepth: datatrackerCurrencyDepthLimit,
-  maxContexts: datatrackerCurrencyContextLimit,
-  maxRelationshipsPerRfc: datatrackerSuccessorLimit,
-} as const;
-
-const precisionV2ProviderRetryLimits = {
-  maxAttempts: 3,
-  maxElapsedMilliseconds: 10_000,
-  defaultRetryDelayMilliseconds: 100,
-} as const;
-
-const precisionV2AcceptanceLimits = {
-  calibrationStatus: "uncalibrated",
-  documentProbabilityThreshold: 0.35,
-  selectionProbabilityThreshold: 0.45,
-  unsupportedProbabilityThreshold: 0.35,
-  relationConfidenceThreshold: 0.65,
-  directAnswerProbabilityThreshold: 0.65,
-  partialAnswerProbabilityThreshold: 0.6,
-  contradictoryProbabilityThreshold: 0.65,
-  currencyCompatibilityOverlapThreshold: 0.6,
-  minimumSupportedClaimPrecision: 0.98,
-  maxKnownRfcP95LatencyMilliseconds: 2_000,
-  maxTopicP95LatencyMilliseconds: 3_000,
-} as const;
-
 /**
- * The only schema-version-two research policy.
- *
- * Hard retrieval limits are implementation constraints. Semantic and release
- * thresholds are deliberately marked uncalibrated until a reviewed live
- * precision-v2 report is accepted; these provisional values do not carry
- * precision-v1 certification forward.
+ * Exact source identity and UTF-8 byte range of a passage.
  */
-export const precisionV2Policy = {
-  schemaVersion: 2,
-  policyVersion: "precision-v2",
-  calibrationStatus: "uncalibrated",
-  retrievalLimits: precisionV2RetrievalLimits,
-  candidateLimits: precisionV2CandidateLimits,
-  traversalLimits: precisionV2TraversalLimits,
-  providerRetryLimits: precisionV2ProviderRetryLimits,
-  acceptanceLimits: precisionV2AcceptanceLimits,
-  maxAcceptedDocumentCandidates: precisionV2CandidateLimits.maxSourceRetrievalCandidates,
-  documentProbabilityThreshold: precisionV2AcceptanceLimits.documentProbabilityThreshold,
-  maxPassageCandidates: precisionV2CandidateLimits.maxPassageCandidates,
-  maxLengthNormalizedPassageCandidates:
-    precisionV2CandidateLimits.maxLengthNormalizedPassageCandidates,
-  sourceBlockMaxCharacters: precisionV2CandidateLimits.sourceBlockMaxCharacters,
-  sourceBlockOverlapCharacters: precisionV2CandidateLimits.sourceBlockOverlapCharacters,
-  maxCurrencyTraversalDepth: precisionV2TraversalLimits.maxDepth,
-  maxCurrencyContexts: precisionV2TraversalLimits.maxContexts,
-  currencyCompatibilityOverlapThreshold:
-    precisionV2AcceptanceLimits.currencyCompatibilityOverlapThreshold,
-  selectionProbabilityThreshold: precisionV2AcceptanceLimits.selectionProbabilityThreshold,
-  unsupportedProbabilityThreshold: precisionV2AcceptanceLimits.unsupportedProbabilityThreshold,
-  relationConfidenceThreshold: precisionV2AcceptanceLimits.relationConfidenceThreshold,
-  providerMaxAttempts: precisionV2ProviderRetryLimits.maxAttempts,
-  providerMaxElapsedMilliseconds: precisionV2ProviderRetryLimits.maxElapsedMilliseconds,
-  providerDefaultRetryDelayMilliseconds:
-    precisionV2ProviderRetryLimits.defaultRetryDelayMilliseconds,
-  directAnswerProbabilityThreshold: precisionV2AcceptanceLimits.directAnswerProbabilityThreshold,
-  partialAnswerProbabilityThreshold: precisionV2AcceptanceLimits.partialAnswerProbabilityThreshold,
-  contradictoryProbabilityThreshold: precisionV2AcceptanceLimits.contradictoryProbabilityThreshold,
-  minimumSupportedClaimPrecision: precisionV2AcceptanceLimits.minimumSupportedClaimPrecision,
-  maxKnownRfcP95LatencyMilliseconds: precisionV2AcceptanceLimits.maxKnownRfcP95LatencyMilliseconds,
-  maxTopicP95LatencyMilliseconds: precisionV2AcceptanceLimits.maxTopicP95LatencyMilliseconds,
-  evaluationModelAlias: "jev-latest",
-  pinnedModel: "jev-1.13.0",
-  automaticAnswerActivation: undefined,
-} as const;
-
-/**
- * Backward-compatible name for the sole precision-v2 policy.
- *
- * @deprecated Use `precisionV2Policy` for new code.
- */
-export const knownRfcPolicy = precisionV2Policy;
-
-/**
- * The pending precision-first policy used by research and evaluation.
- */
-export const precisionPolicy = precisionV2Policy;
-
-/**
- * The acceptance and uncertainty rules for one research policy preset.
- */
-export type ResearchPolicy = Omit<typeof precisionV2Policy, "automaticAnswerActivation"> & {
-  readonly automaticAnswerActivation: AutomaticAnswerActivation | undefined;
-};
-
-/**
- * Named policy presets available to the research pipeline.
- */
-export const researchPolicyPresets: Readonly<Record<string, ResearchPolicy>> = {
-  "precision-v2": precisionV2Policy,
-};
-
-/**
- * Failure when the configured policy preset is not available.
- */
-export class ResearchPolicyError extends Schema.TaggedError<ResearchPolicyError>()(
-  "ResearchPolicyError",
-  {
-    policyPreset: Schema.String,
-  },
-) {}
-
-/**
- * A bounded section-aware range of RFC source text.
- *
- * These offsets are internal JavaScript string boundaries used while parsing;
- * returned evidence provenance converts them to UTF-8 byte offsets.
- */
-export const SourceBlockSchema = Schema.Struct({
-  id: Schema.NonEmptyString,
-  section: Schema.NullOr(Schema.String),
-  startOffset: Schema.Natural,
-  endOffset: Schema.Natural,
-  text: Schema.String,
-});
-
-/**
- * A bounded source block used as a lexical and semantic candidate.
- */
-export type SourceBlock = Schema.Schema.Type<typeof SourceBlockSchema>;
-
-/**
- * Exact provenance for an evidence passage.
- *
- * The start and end offsets are UTF-8 byte offsets into the exact source text
- * represented by sourceHash, so they compose with citation verification.
- */
-export const EvidenceProvenanceSchema = Schema.Struct({
-  identifier: Schema.NonEmptyString,
-  rfcNumber: Schema.Natural,
-  context: RfcContextRoleSchema,
-  relationshipPath: Schema.Array(RfcRelationshipStepSchema),
+export const PassageProvenanceSchema = Schema.Struct({
   sourceUrl: Schema.NonEmptyString,
-  canonicalUrl: Schema.NonEmptyString,
   sourceHash: Schema.NonEmptyString,
   offsetUnit: Schema.Literal(utf8OffsetUnit),
   startOffset: Schema.Natural,
   endOffset: Schema.Natural,
-  section: Schema.NullOr(Schema.String),
   fetchedAt: Schema.String,
 });
 
 /**
- * Source identity and range metadata for an exact quotation.
+ * Exact source identity and UTF-8 byte range of a passage.
  */
-export type EvidenceProvenance = Schema.Schema.Type<typeof EvidenceProvenanceSchema>;
-
-const ProbabilityMapSchema = Schema.Record(Schema.String, Schema.Finite);
+export type PassageProvenance = Schema.Schema.Type<typeof PassageProvenanceSchema>;
 
 /**
- * A selected exact quotation and its independent semantic judgments.
+ * One exact paragraph copied from canonical RFC text.
  */
-export const EvidencePassageSchema = Schema.Struct({
-  id: Schema.NonEmptyString,
-  context: RfcContextRoleSchema,
+export const PassageSchema = Schema.Struct({
   quote: Schema.String,
-  relation: AnswerRelationSchema,
-  selectionProbability: Schema.Number,
-  relationProbabilities: ProbabilityMapSchema,
-  confidence: Schema.NullOr(Schema.Number),
-  provenance: EvidenceProvenanceSchema,
+  section: Schema.NullOr(Schema.String),
+  probability: Schema.Number,
+  verdict: VerdictSchema,
+  provenance: PassageProvenanceSchema,
 });
 
 /**
- * A returned evidence passage copied from authoritative RFC text.
+ * One exact paragraph copied from canonical RFC text.
  */
-export type EvidencePassage = Schema.Schema.Type<typeof EvidencePassageSchema>;
+export type Passage = Schema.Schema.Type<typeof PassageSchema>;
 
 /**
- * An exact canonical passage surfaced for bounded human or agent review.
- *
- * Review candidates were not accepted as evidence and must never be
- * represented as accepted evidence.
+ * One RFC judged relevant to a question, with its best paragraphs.
  */
-export const ReviewCandidateSchema = Schema.Struct({
-  id: Schema.NonEmptyString,
-  context: RfcContextRoleSchema,
-  quote: Schema.String,
-  selectionProbability: Schema.Number,
-  provenance: EvidenceProvenanceSchema,
+export const ResearchHitSchema = Schema.Struct({
+  rfc: RfcDocumentSchema,
+  role: HitRoleSchema,
+  relevance: Schema.NullOr(Schema.Number),
+  verdict: VerdictSchema,
+  passages: Schema.Array(PassageSchema),
 });
 
 /**
- * A request-local source passage that requires independent review.
+ * One RFC judged relevant to a question, with its best paragraphs.
  */
-export type ReviewCandidate = Schema.Schema.Type<typeof ReviewCandidateSchema>;
+export type ResearchHit = Schema.Schema.Type<typeof ResearchHitSchema>;
+
+/**
+ * The ranked hits for one caller question.
+ */
+export const ResearchAnswerSchema = Schema.Struct({
+  question: Schema.NonEmptyString,
+  found: Schema.Boolean,
+  searched: Schema.Array(Schema.NonEmptyString),
+  hits: Schema.Array(ResearchHitSchema),
+});
+
+/**
+ * The ranked hits for one caller question.
+ */
+export type ResearchAnswer = Schema.Schema.Type<typeof ResearchAnswerSchema>;
 
 const TokenUsageSchema = Schema.Struct({
   inputTokens: Schema.NullOr(Schema.Number),
   outputTokens: Schema.NullOr(Schema.Number),
 });
 
-const TimingSchema = Schema.Struct({
-  metadataMs: Schema.Number,
-  sourceMs: Schema.Number,
-  lexicalMs: Schema.Number,
-  selectionMs: Schema.Number,
-  relationMs: Schema.Number,
-  totalMs: Schema.Number,
-  documentMs: Schema.Union([Schema.Number, Schema.Undefined]),
-});
-
-const CandidateCountsSchema = Schema.Struct({
-  sourceBlocks: Schema.Natural,
-  passageCandidates: Schema.Natural,
-  selectedPassages: Schema.Natural,
-  discoveredDocuments: Schema.Union([Schema.Natural, Schema.Undefined]),
-  documentCandidates: Schema.Union([Schema.Natural, Schema.Undefined]),
-  acceptedDocuments: Schema.Union([Schema.Natural, Schema.Undefined]),
-});
-
-const SelectionDiagnosticSchema = Schema.Struct({
-  candidateId: Schema.NonEmptyString,
-  probability: Schema.Number,
-});
-
-const ClassificationDiagnosticSchema = Schema.Struct({
-  candidateId: Schema.NonEmptyString,
-  relation: AnswerRelationSchema,
-  probabilities: ProbabilityMapSchema,
-  confidence: Schema.NullOr(Schema.Number),
-});
-
-const AtomicityDiagnosticSchema = Schema.Struct({
-  label: Schema.Literals(["atomic", "compound"]),
-  probabilities: ProbabilityMapSchema,
-  confidence: Schema.NullOr(Schema.Number),
-});
-
-const SourceDiagnosticSchema = Schema.Struct({
-  identifier: Schema.NonEmptyString,
-  rfcNumber: Schema.Number.check(Schema.isGreaterThan(0)),
-  sourceUrl: Schema.NonEmptyString,
-  sourceHash: Schema.NonEmptyString,
-  fetchedAt: Schema.String,
-});
-
-const ContextSourceDiagnosticSchema = Schema.Struct({
-  context: RfcContextRoleSchema,
-  source: SourceDiagnosticSchema,
-});
-
-const ContextDiagnosticsSchema = Schema.Struct({
-  context: RfcContextRoleSchema,
-  identifier: Schema.NonEmptyString,
-  relationshipPath: Schema.Array(RfcRelationshipStepSchema),
-  state: Schema.Literals(["researched", "unavailable"]),
-  status: Schema.NullOr(ResearchStatusSchema),
-  source: Schema.NullOr(SourceDiagnosticSchema),
-  usage: TokenUsageSchema,
-  timings: TimingSchema,
-  candidates: CandidateCountsSchema,
-  atomicity: Schema.NullOr(AtomicityDiagnosticSchema),
-  selection: Schema.Array(SelectionDiagnosticSchema),
-  classification: Schema.Array(ClassificationDiagnosticSchema),
-});
-
 /**
- * Bounded diagnostics for one semantic research operation.
- */
-const InternalResearchDiagnosticsSchema = Schema.Struct({
-  schemaVersion: Schema.Literal(2),
-  policyVersion: Schema.NonEmptyString,
-  requestedModel: Schema.NonEmptyString,
-  resolvedModel: Schema.NonEmptyString,
-  resolvedModels: Schema.Array(Schema.NonEmptyString),
-  usage: TokenUsageSchema,
-  inputCost: InputTokenCostSchema,
-  timings: TimingSchema,
-  source: Schema.NullOr(SourceDiagnosticSchema),
-  sources: Schema.Union([
-    Schema.Array(SourceDiagnosticSchema),
-    Schema.Array(ContextSourceDiagnosticSchema),
-    Schema.Undefined,
-  ]),
-  retrieval: Schema.optionalKey(LiveRetrievalTraceSchema),
-  currency: Schema.optionalKey(RfcCurrencyReportSchema),
-  candidates: CandidateCountsSchema,
-  atomicity: AtomicityDiagnosticSchema,
-  documentSelection: Schema.Union([Schema.Array(SelectionDiagnosticSchema), Schema.Undefined]),
-  selection: Schema.Array(SelectionDiagnosticSchema),
-  classification: Schema.Array(ClassificationDiagnosticSchema),
-  contexts: Schema.optionalKey(Schema.Array(ContextDiagnosticsSchema)),
-});
-
-/**
- * Diagnostics returned with an evidence bundle.
- */
-export type InternalResearchDiagnostics = Schema.Schema.Type<
-  typeof InternalResearchDiagnosticsSchema
->;
-
-const InternalEvidenceBundleSchema = Schema.Struct({
-  schemaVersion: Schema.Literal(2),
-  kind: Schema.Literal("evidence_bundle"),
-  status: ResearchStatusSchema,
-  question: Schema.NonEmptyString,
-  rfc: Schema.NullOr(RfcMetadataSchema),
-  contexts: Schema.optionalKey(Schema.Array(InternalRfcResearchContextSchema)),
-  currency: Schema.optionalKey(RfcCurrencyReportSchema),
-  evidence: Schema.Array(EvidencePassageSchema),
-  reviewCandidates: Schema.optionalKey(Schema.Array(ReviewCandidateSchema)),
-  diagnostics: InternalResearchDiagnosticsSchema,
-});
-
-type InternalEvidenceBundle = Schema.Schema.Type<typeof InternalEvidenceBundleSchema>;
-
-const DiscoveryTimingSchema = Schema.Struct({
-  metadataMs: Schema.Number,
-  sourceMs: Schema.Number,
-  lexicalMs: Schema.Number,
-  selectionMs: Schema.Number,
-  relationMs: Schema.Number,
-  totalMs: Schema.Number,
-  documentMs: Schema.optionalKey(Schema.Union([Schema.Number, Schema.Undefined])),
-});
-
-const DiscoveryCandidateCountsSchema = Schema.Struct({
-  sourceBlocks: Schema.Natural,
-  passageCandidates: Schema.Natural,
-  selectedPassages: Schema.Natural,
-  discoveredDocuments: Schema.Natural,
-  documentCandidates: Schema.optionalKey(Schema.Union([Schema.Natural, Schema.Undefined])),
-  acceptedDocuments: Schema.optionalKey(Schema.Union([Schema.Natural, Schema.Undefined])),
-});
-
-const DiscoveryContextDiagnosticsSchema = Schema.Struct({
-  context: RfcContextRoleSchema,
-  identifier: Schema.NonEmptyString,
-  relationshipPath: Schema.Array(RfcRelationshipStepSchema),
-  state: Schema.Literals(["researched", "unavailable"]),
-  status: Schema.NullOr(ResearchStatusSchema),
-  source: Schema.NullOr(SourceDiagnosticSchema),
-  usage: TokenUsageSchema,
-  timings: DiscoveryTimingSchema,
-  candidates: DiscoveryCandidateCountsSchema,
-  atomicity: Schema.NullOr(AtomicityDiagnosticSchema),
-  selection: Schema.Array(SelectionDiagnosticSchema),
-  classification: Schema.Array(ClassificationDiagnosticSchema),
-});
-
-/**
- * Schema for version-two research diagnostics backed by live discovery.
+ * Bounded diagnostics for one research operation.
  */
 export const ResearchDiagnosticsSchema = Schema.Struct({
-  schemaVersion: Schema.Literal(2),
   policyVersion: Schema.NonEmptyString,
   requestedModel: Schema.NonEmptyString,
-  resolvedModel: Schema.NonEmptyString,
   resolvedModels: Schema.Array(Schema.NonEmptyString),
   usage: TokenUsageSchema,
   inputCost: InputTokenCostSchema,
-  timings: DiscoveryTimingSchema,
-  source: Schema.NullOr(SourceDiagnosticSchema),
-  sources: Schema.optionalKey(
-    Schema.Union([
-      Schema.Array(SourceDiagnosticSchema),
-      Schema.Array(ContextSourceDiagnosticSchema),
-      Schema.Undefined,
-    ]),
-  ),
+  timings: Schema.Struct({
+    metadataMs: Schema.Number,
+    sourceMs: Schema.Number,
+    rankMs: Schema.Number,
+    sectionMs: Schema.Number,
+    paragraphMs: Schema.Number,
+    totalMs: Schema.Number,
+  }),
   retrieval: LiveRetrievalTraceSchema,
-  currency: Schema.optionalKey(Schema.Union([RfcCurrencyReportSchema, Schema.Undefined])),
-  candidates: DiscoveryCandidateCountsSchema,
-  atomicity: Schema.NullOr(AtomicityDiagnosticSchema),
-  documentSelection: Schema.optionalKey(
-    Schema.Union([Schema.Array(SelectionDiagnosticSchema), Schema.Undefined]),
-  ),
-  selection: Schema.Array(SelectionDiagnosticSchema),
-  classification: Schema.Array(ClassificationDiagnosticSchema),
-  contexts: Schema.optionalKey(
-    Schema.Union([Schema.Array(DiscoveryContextDiagnosticsSchema), Schema.Undefined]),
-  ),
+  candidates: Schema.Struct({
+    pool: Schema.Natural,
+    ranked: Schema.Natural,
+  }),
 });
 
 /**
- * Diagnostics returned with a version-two evidence bundle.
+ * Bounded diagnostics for one research operation.
  */
 export type ResearchDiagnostics = Schema.Schema.Type<typeof ResearchDiagnosticsSchema>;
 
 /**
- * Strict version-two public result of RFC research.
+ * The public result of one research operation.
  */
-export const EvidenceBundleSchema = Schema.Struct({
-  schemaVersion: Schema.Literal(2),
-  kind: Schema.Literal("evidence_bundle"),
-  status: ResearchStatusSchema,
-  question: Schema.NonEmptyString,
-  rfc: Schema.NullOr(RfcDocumentSchema),
-  contexts: Schema.optionalKey(
-    Schema.Union([Schema.Array(RfcResearchContextSchema), Schema.Undefined]),
-  ),
-  currency: Schema.optionalKey(Schema.Union([RfcCurrencyReportSchema, Schema.Undefined])),
-  evidence: Schema.Array(EvidencePassageSchema),
-  reviewCandidates: Schema.optionalKey(
-    Schema.Union([Schema.Array(ReviewCandidateSchema), Schema.Undefined]),
-  ),
+export const ResearchResultSchema = Schema.Struct({
+  schemaVersion: Schema.Literal(schemaVersion),
+  kind: Schema.Literal("research_result"),
+  answers: Schema.Array(ResearchAnswerSchema),
+  currency: Schema.optionalKey(Schema.Array(RfcCurrencyReportSchema)),
   diagnostics: ResearchDiagnosticsSchema,
 });
 
 /**
- * A strict version-two evidence bundle returned by the Promise facade.
+ * The public result of one research operation.
  */
-export type EvidenceBundle = Schema.Schema.Type<typeof EvidenceBundleSchema>;
+export type ResearchResult = Schema.Schema.Type<typeof ResearchResultSchema>;
 
 /**
  * A typed failure when a requested RFC is not an exact published document.
@@ -674,165 +282,28 @@ export class RfcNotFoundError extends Schema.TaggedError<RfcNotFoundError>()("Rf
 export class DecisionModelError extends Schema.TaggedError<DecisionModelError>()(
   "DecisionModelError",
   {
-    stage: Schema.Literals(["document", "selection", "relation", "citation"]),
+    stage: Schema.Literals(["rank", "section", "paragraph", "citation"]),
     reason: Schema.String,
     attempts: Schema.optionalKey(Schema.Natural),
   },
 ) {}
 
-/**
- * Configuration needed by a semantic RFC research pipeline.
- */
-export interface ResearchPipelineOptions {
-  /**
-   * Request-local RFC metadata returned by live discovery.
-   */
-  readonly documents: ReadonlyArray<RfcMetadata>;
-  /**
-   * Named policy preset recorded in diagnostics.
-   */
-  readonly policyPreset: string;
-  /**
-   * Opaque proof supplied by the composition root for automatic answered statuses.
-   */
-  readonly automaticAnswerActivation: AutomaticAnswerActivation | undefined;
-  /**
-   * Model alias requested from the official provider.
-   */
-  readonly modelAlias: string;
-  /**
-   * Time spent retrieving request-local RFC metadata.
-   */
-  readonly metadataMs: number;
-  /**
-   * Start timestamp for the complete operation.
-   */
-  readonly startedAt: number;
-  /**
-   * Request-local source loader used by schema-version-two research.
-   */
-  readonly sourceLoader: (
-    document: RfcMetadata,
-  ) => Effect.Effect<
-    RfcSource,
-    RfcSourceCacheError | RfcSourceFetchError | RfcSourceRevalidationError,
-    FileSystem.FileSystem | LiveRfcSource | Path.Path
-  >;
-}
+type DecisionStage = "rank" | "section" | "paragraph";
 
-interface LineRecord {
-  readonly start: number;
-  readonly end: number;
-  readonly text: string;
-}
-
-const answerRelationCriteria = {
-  direct_answer: "The passage directly answers the atomic question.",
-  partial_answer: "The passage answers only part of the atomic question.",
-  background_only: "The passage provides relevant background but no answer.",
-  contradictory: "The passage conflicts with the answer implied by the question.",
-  irrelevant: "The passage does not address the atomic question.",
-} as const;
-
-const atomicityCriteria = {
-  atomic:
-    "Exactly one fact is requested. Asking to also cite where that fact appears, whether by section, RFC number, or quotation, is part of the same request and is never a second fact.",
-  compound:
-    "Two or more unrelated facts are requested, each one a different passage would answer, such as two different header fields, two different protocols, or two different parameters.",
-} as const;
-
-const atomicityInstructions =
-  "Count the distinct facts the request asks for, then choose a label. Naming the section or RFC that carries a fact is part of requesting that fact, not an extra one.";
-
-type AtomicityLabel = keyof typeof atomicityCriteria;
-
-const PassageInputSchema = Schema.Struct({
-  id: Schema.NonEmptyString,
-  section: Schema.NullOr(Schema.String),
-  text: Schema.String,
-});
-
-const PassageBatchInputSchema = Schema.Struct({
-  question: Schema.NonEmptyString,
-  passages: Schema.Record(Schema.String, PassageInputSchema),
-});
-
-const DocumentInputSchema = Schema.Struct({
-  identifier: Schema.NonEmptyString,
-  title: Schema.String,
-  abstract: Schema.String,
-});
-
-const DocumentBatchInputSchema = Schema.Struct({
-  question: Schema.NonEmptyString,
-  documents: Schema.Record(Schema.String, DocumentInputSchema),
-});
-
-type AtomicityResult = {
-  readonly label: AtomicityLabel;
-  readonly probabilities: Readonly<Record<string, number>>;
-  readonly confidence: number | undefined;
-};
-
-type DocumentCandidate = {
-  readonly document: RfcMetadata;
-  readonly priority: number;
-};
-
-type DocumentSelectionResult = {
-  readonly accepted: ReadonlyArray<{
-    readonly document: RfcMetadata;
-    readonly probability: number;
-  }>;
-  readonly atomicity: AtomicityResult;
-  readonly diagnostics: ReadonlyArray<{
-    readonly candidateId: string;
-    readonly probability: number;
-  }>;
-  readonly usage: DecisionModel.DecisionUsage;
-};
-
-type SelectionResult = {
-  readonly selected: ReadonlyArray<{ readonly block: SourceBlock; readonly probability: number }>;
-  readonly atomicity: AtomicityResult | undefined;
-  readonly diagnostics: ReadonlyArray<{
-    readonly candidateId: string;
-    readonly probability: number;
-  }>;
-  readonly usage: DecisionModel.DecisionUsage;
-};
-
-type RelationResult = {
-  readonly answers: ReadonlyArray<{
-    readonly block: SourceBlock;
-    readonly selectionProbability: number;
-    readonly relation: AnswerRelation;
-    readonly probabilities: Readonly<Record<string, number>>;
-    readonly confidence: number | undefined;
-  }>;
-  readonly diagnostics: ReadonlyArray<{
-    readonly candidateId: string;
-    readonly relation: AnswerRelation;
-    readonly probabilities: Readonly<Record<string, number>>;
-    readonly confidence: number | null;
-  }>;
-  readonly usage: DecisionModel.DecisionUsage;
-};
-
-type DecisionStage = "document" | "selection" | "relation";
+const ProbabilityMapSchema = Schema.Record(Schema.String, Schema.Finite);
 
 const providerErrorTag = (error: unknown): string =>
   AiError.isAiError(error) ? error.reason._tag : "UnknownProviderError";
 
-const retryDelayMilliseconds = (error: unknown, policy: ResearchPolicy): number => {
+const retryDelayMilliseconds = (error: unknown): number => {
   if (!AiError.isAiError(error) || error.retryAfter === undefined) {
-    return policy.providerDefaultRetryDelayMilliseconds;
+    return retrievalPolicy.providerDefaultRetryDelayMilliseconds;
   }
 
   const delay = Duration.toMillis(error.retryAfter);
   return Number.isFinite(delay) && delay >= 0
     ? delay
-    : policy.providerDefaultRetryDelayMilliseconds;
+    : retrievalPolicy.providerDefaultRetryDelayMilliseconds;
 };
 
 const providerFailure = (
@@ -878,28 +349,6 @@ const decodeProbabilityMap = (
         reason: `Provider returned an invalid probability distribution for ${candidateId}`,
       }),
   });
-
-const decodeConfidence = (
-  stage: DecisionStage,
-  candidateId: string,
-  value: unknown,
-): Effect.Effect<number | undefined, DecisionModelError> =>
-  value === undefined
-    ? Effect.succeed(undefined)
-    : Effect.try({
-        try: () => {
-          const confidence = Schema.decodeUnknownSync(Schema.Finite)(value);
-          if (confidence < 0 || confidence > 1) {
-            throw new Error("invalid confidence");
-          }
-          return confidence;
-        },
-        catch: () =>
-          new DecisionModelError({
-            stage,
-            reason: `Provider returned invalid confidence for ${candidateId}`,
-          }),
-      });
 
 const decodeProbability = (
   stage: DecisionStage,
@@ -969,8 +418,8 @@ const providerAnswers = (
 const decideWithRetry = Effect.fnUntraced(function* <A>(
   stage: DecisionStage,
   operation: () => Effect.Effect<A, AiError.AiError>,
-  policy: ResearchPolicy,
 ): Effect.fn.Return<A, DecisionModelError> {
+  const policy = retrievalPolicy;
   const startedAt = yield* Clock.currentTimeMillis;
   let scheduledDelay = 0;
 
@@ -1014,7 +463,7 @@ const decideWithRetry = Effect.fnUntraced(function* <A>(
       return yield* providerFailure(stage, error, attempt, false);
     }
 
-    const delay = retryDelayMilliseconds(error, policy);
+    const delay = retryDelayMilliseconds(error);
     const now = yield* Clock.currentTimeMillis;
     const elapsedMs = Math.max(0, now - startedAt, scheduledDelay);
     if (
@@ -1035,14 +484,10 @@ const decideWithRetry = Effect.fnUntraced(function* <A>(
   });
 });
 
-const policyFor = (policyPreset: string): Effect.Effect<ResearchPolicy, ResearchPolicyError> => {
-  const policy = researchPolicyPresets[policyPreset];
-  return policy === undefined
-    ? Effect.fail(new ResearchPolicyError({ policyPreset }))
-    : Effect.succeed(policy);
+type Usage = {
+  readonly inputTokens: number | undefined;
+  readonly outputTokens: number | undefined;
 };
-
-const elapsed = (start: number, end: number): number => Math.max(0, end - start);
 
 const addUsage = (left: number | undefined, right: number | undefined): number | undefined => {
   if (left === undefined) return right;
@@ -1050,21 +495,8 @@ const addUsage = (left: number | undefined, right: number | undefined): number |
   return left + right;
 };
 
-const combineUsage = (
-  left: DecisionModel.DecisionUsage,
-  right: DecisionModel.DecisionUsage,
-): { readonly inputTokens: number | undefined; readonly outputTokens: number | undefined } => ({
-  inputTokens: addUsage(left.inputTokens, right.inputTokens),
-  outputTokens: addUsage(left.outputTokens, right.outputTokens),
-});
-
-const combineUsages = (
-  usages: ReadonlyArray<DecisionModel.DecisionUsage>,
-): { readonly inputTokens: number | undefined; readonly outputTokens: number | undefined } =>
-  usages.reduce<{
-    readonly inputTokens: number | undefined;
-    readonly outputTokens: number | undefined;
-  }>(
+const combineUsages = (usages: ReadonlyArray<Usage>): Usage =>
+  usages.reduce<Usage>(
     (total, usage) => ({
       inputTokens: addUsage(total.inputTokens, usage.inputTokens),
       outputTokens: addUsage(total.outputTokens, usage.outputTokens),
@@ -1072,744 +504,165 @@ const combineUsages = (
     { inputTokens: undefined, outputTokens: undefined },
   );
 
-const linesOf = (text: string): ReadonlyArray<LineRecord> => {
-  const lines: Array<LineRecord> = [];
-  let start = 0;
-  while (start <= text.length) {
-    const newline = text.indexOf("\n", start);
-    const end = newline === -1 ? text.length : newline;
-    const contentEnd = end > start && text[end - 1] === "\r" ? end - 1 : end;
-    lines.push({
-      start,
-      end: newline === -1 ? text.length : newline + 1,
-      text: text.slice(start, contentEnd),
-    });
-    if (newline === -1) break;
-    start = newline + 1;
-  }
-  return lines;
-};
+const noUsage: Usage = { inputTokens: undefined, outputTokens: undefined };
 
-const sectionHeading = (line: string): string | undefined => {
-  const withoutPageBreak = line.replace(/\f/g, "");
-  // RFC plain text starts headings at column 0 and indents everything else, so
-  // the indentation is what separates a real heading from a table-of-contents
-  // entry or from body prose whose first word happens to be a bare capital.
-  if (/^\s/.test(withoutPageBreak)) return undefined;
-  const normalized = withoutPageBreak.trim();
-  if (normalized.length === 0 || normalized.length > 240) return undefined;
-  const match =
-    /^(?:(?:\d+(?:\.\d+)*\.?)|(?:[A-Z](?:\.\d+)*\.?)|(?:Appendix\s+[A-Z](?:\.\d+)*\.?))\s+(.+?)\s*$/.exec(
-      normalized,
-    );
-  if (match === null) return undefined;
-  const title = match[1];
-  if (title === undefined || title.length === 0 || /^[\d\W]+$/.test(title)) return undefined;
-  return normalized;
+type DecisionBatch = {
+  readonly answers: Readonly<Record<string, unknown>>;
+  readonly usage: Usage;
 };
 
 /**
- * Parse RFC plain text into bounded, section-aware source blocks.
- *
- * @param text Exact RFC Editor plain-text source.
- * @param maxCharacters Maximum source characters per block.
- * @param overlapCharacters Bounded overlap between blocks from one oversized section.
- * @returns Blocks with exact absolute source offsets and nullable section labels.
+ * Send one batch of independent decisions over a shared state.
  */
-export const parseSourceBlocks = (
-  text: string,
-  maxCharacters: number = precisionV2Policy.sourceBlockMaxCharacters,
-  overlapCharacters: number = precisionV2Policy.sourceBlockOverlapCharacters,
-): ReadonlyArray<SourceBlock> => {
-  const lines = linesOf(text);
-  const headings = lines.flatMap((line) => {
-    const section = sectionHeading(line.text);
-    return section === undefined ? [] : [{ start: line.start, section }];
-  });
-  const headingSections = headings.map((heading, index) => ({
-    start: heading.start,
-    end: headings[index + 1]?.start ?? text.length,
-    section: heading.section,
-  }));
-  const sections =
-    headings.length === 0
-      ? [{ start: 0, end: text.length, section: null }]
-      : headings[0] !== undefined && headings[0].start > 0
-        ? [{ start: 0, end: headings[0].start, section: null }, ...headingSections]
-        : headingSections;
-  const blocks: Array<SourceBlock> = [];
-  let blockIndex = 0;
-
-  for (const section of sections) {
-    if (section.end <= section.start) continue;
-    const size = Math.max(1, maxCharacters);
-    const overlap = Math.min(Math.max(0, overlapCharacters), Math.max(0, size - 1));
-    let start = section.start;
-    while (start < section.end) {
-      const boundedEnd = Math.min(section.end, start + size);
-      const backedUpEnd = moveToUtf8Boundary(text, boundedEnd, "backward");
-      const end =
-        backedUpEnd > start
-          ? backedUpEnd
-          : Math.min(section.end, moveToUtf8Boundary(text, boundedEnd, "forward"));
-      const blockText = text.slice(start, end);
-      if (blockText.trim().length > 0) {
-        const block = {
-          id: `block-${blockIndex}`,
-          section: section.section,
-          startOffset: start,
-          endOffset: end,
-          text: blockText,
-        };
-        blocks.push(Schema.decodeUnknownSync(SourceBlockSchema)(block));
-        blockIndex += 1;
-      }
-      if (end >= section.end) break;
-      start = moveToUtf8Boundary(text, Math.max(start + 1, end - overlap), "forward");
-    }
-  }
-
-  return blocks;
-};
-
-const lexicalTerms = (value: string): ReadonlyArray<string> => [
-  ...new Set(
-    [
-      ...value
-        .toLowerCase()
-        .replace(/\brfc[\s-]*\d+\b/g, " ")
-        .matchAll(/[a-z0-9]+(?:[./-][a-z0-9]+)*/g),
-    ]
-      .map(([term]) => term)
-      .filter((term) => term.length > 1),
-  ),
-];
-
-const termMatches = (value: string, term: string): number => value.split(term).length - 1;
-
-const passageLexicalScore = (
-  block: SourceBlock,
-  terms: ReadonlyArray<string>,
-  documentFrequencies: ReadonlyMap<string, number>,
-  documentCount: number,
-): number => {
-  const text = block.text.toLowerCase();
-  const section = block.section?.toLowerCase() ?? "";
-  return terms.reduce((score, term) => {
-    const textFrequency = termMatches(text, term);
-    const sectionFrequency = termMatches(section, term);
-    if (textFrequency === 0 && sectionFrequency === 0) return score;
-    const inverseDocumentFrequency = Math.log(
-      1 + documentCount / (1 + (documentFrequencies.get(term) ?? 0)),
-    );
-    const saturatedTextFrequency = 1 + Math.log2(Math.max(1, textFrequency));
-    const anchorWeight = /^\d+$/.test(term) || term.includes("/") ? 4 : 1;
-    return (
-      score +
-      inverseDocumentFrequency *
-        anchorWeight *
-        (saturatedTextFrequency + Math.min(sectionFrequency, 1) * 2)
-    );
-  }, 0);
-};
-
-const lengthNormalizedSaturation = 1.2;
-const lengthNormalizationStrength = 0.5;
-
-// BM25-style score: term frequency saturates against the block's length
-// relative to the average, so short focused sections are not buried under
-// long blocks that accumulate incidental matches.
-const passageLengthNormalizedScore = (
-  block: SourceBlock,
-  terms: ReadonlyArray<string>,
-  documentFrequencies: ReadonlyMap<string, number>,
-  documentCount: number,
-  averageLength: number,
-): number => {
-  const text = block.text.toLowerCase();
-  const section = block.section?.toLowerCase() ?? "";
-  const lengthFactor =
-    1 - lengthNormalizationStrength + lengthNormalizationStrength * (text.length / averageLength);
-  return terms.reduce((score, term) => {
-    const textFrequency = termMatches(text, term);
-    const sectionFrequency = termMatches(section, term);
-    if (textFrequency === 0 && sectionFrequency === 0) return score;
-    const inverseDocumentFrequency = Math.log(
-      1 + documentCount / (1 + (documentFrequencies.get(term) ?? 0)),
-    );
-    const saturatedTextFrequency =
-      (textFrequency * (lengthNormalizedSaturation + 1)) /
-      (textFrequency + lengthNormalizedSaturation * lengthFactor);
-    const anchorWeight = /^\d+$/.test(term) || term.includes("/") ? 4 : 1;
-    return (
-      score +
-      inverseDocumentFrequency *
-        anchorWeight *
-        (saturatedTextFrequency + Math.min(sectionFrequency, 1) * 2)
-    );
-  }, 0);
-};
-
-type ScoredBlock = { readonly block: SourceBlock; readonly score: number };
-
-const rankScoredBlocks = (scored: ReadonlyArray<ScoredBlock>): ReadonlyArray<SourceBlock> =>
-  [...scored]
-    .filter(({ score }) => score > 0)
-    .sort(
-      (left, right) => right.score - left.score || left.block.startOffset - right.block.startOffset,
-    )
-    .map(({ block }) => block);
-
-/**
- * Deterministically shortlist request-local source blocks before semantic judgment.
- *
- * The primary ranking fills `limit` slots. Up to `lengthNormalizedLimit` further
- * blocks are then appended from a length-normalized ranking, skipping blocks
- * already shortlisted. The union never displaces a primary candidate, so a
- * short answering section can enter without evicting evidence the primary
- * ranking already surfaces.
- *
- * @param blocks Parsed source blocks.
- * @param question Atomic research question.
- * @param limit Maximum number of primary candidates.
- * @param lengthNormalizedLimit Maximum number of appended length-normalized candidates.
- * @returns Ranked, bounded passage candidates with stable offset tie-breaking.
- */
-export const shortlistPassageCandidates = (
-  blocks: ReadonlyArray<SourceBlock>,
-  question: string,
-  limit: number = precisionV2Policy.maxPassageCandidates,
-  lengthNormalizedLimit: number = precisionV2Policy.maxLengthNormalizedPassageCandidates,
-): ReadonlyArray<SourceBlock> => {
-  if (blocks.length === 0 || question.trim().length === 0 || limit <= 0) return [];
-  const terms = lexicalTerms(question);
-  if (terms.length === 0) return [];
-  const documentFrequencies = new Map(
-    terms.map((term) => [
-      term,
-      blocks.reduce(
-        (count, block) =>
-          count +
-          (termMatches(block.text.toLowerCase(), term) > 0 ||
-          termMatches(block.section?.toLowerCase() ?? "", term) > 0
-            ? 1
-            : 0),
-        0,
-      ),
-    ]),
-  );
-
-  const primary = rankScoredBlocks(
-    blocks.map((block) => ({
-      block,
-      score: passageLexicalScore(block, terms, documentFrequencies, blocks.length),
-    })),
-  ).slice(0, limit);
-  if (lengthNormalizedLimit <= 0) return primary;
-
-  const averageLength =
-    blocks.reduce((total, block) => total + block.text.length, 0) / blocks.length;
-  const shortlisted = new Set(primary.map((block) => block.id));
-  const appended = rankScoredBlocks(
-    blocks.map((block) => ({
-      block,
-      score: passageLengthNormalizedScore(
-        block,
-        terms,
-        documentFrequencies,
-        blocks.length,
-        averageLength,
-      ),
-    })),
-  )
-    .filter((block) => !shortlisted.has(block.id))
-    .slice(0, lengthNormalizedLimit);
-  return [...primary, ...appended];
-};
-
-/**
- * Whether an atomicity judgment is decisive enough to act on.
- *
- * Atomicity is a binary property of the question text alone, so the label
- * probability already states how sure the provider is. The separate
- * self-reported confidence was ANDed against the same threshold, which
- * double-counted the same judgment and discarded well-classified questions: an
- * 0.8 atomic label carrying 0.5 confidence selected no passage at all. Passage
- * relation keeps its own confidence check, because there the confidence
- * describes passage ambiguity rather than the question.
- *
- * @param atomicity The atomicity judgment for the question.
- * @param policy Acceptance policy supplying the probability threshold.
- * @returns Whether the judged label may be acted on.
- */
-const isDecisiveAtomicity = (atomicity: AtomicityResult, policy: ResearchPolicy): boolean =>
-  (atomicity.probabilities[atomicity.label] ?? 0) >= policy.relationConfidenceThreshold;
-
-const isConfidentAtomic = (atomicity: AtomicityResult, policy: ResearchPolicy): boolean =>
-  atomicity.label === "atomic" && isDecisiveAtomicity(atomicity, policy);
-
-/**
- * Whether a question was decisively judged to ask more than one thing.
- *
- * Mirrors {@link isConfidentAtomic} so both document selection and relation
- * scoring reach the same verdict for the same classification.
- *
- * @param atomicity The atomicity judgment for the question.
- * @param policy Acceptance policy supplying the probability threshold.
- * @returns Whether the compound label may be acted on.
- */
-const isConfidentCompound = (atomicity: AtomicityResult, policy: ResearchPolicy): boolean =>
-  atomicity.label === "compound" && isDecisiveAtomicity(atomicity, policy);
-
-const documentDecisionKey = (index: number): string => `document_${index}`;
-
-const passageDecisionKey = (index: number): string => `passage_${index}`;
-
-const documentDecision = (candidate: DocumentCandidate, index: number): Decision.Any => {
-  const key = documentDecisionKey(index);
-  const { document } = candidate;
-  return Decision.probability({
-    instructions: [
-      `Evaluate only published RFC candidate ${key} at index ${index}.`,
-      `The exact candidate is keyed as input.documents["${key}"], with identifier, title, and abstract fields.`,
-      `Its identifier is ${document.identifier}, its title is ${document.title}, and its abstract is ${document.abstract}.`,
-      "Ignore every other document candidate when answering this decision.",
-    ].join(" "),
-    criteria: {
-      false: `Candidate ${key} (${document.identifier}) is not likely to contain evidence that answers the question.`,
-      true: `Candidate ${key} (${document.identifier}) is likely to contain evidence that answers the question.`,
-    },
-  });
-};
-
-const passageSelectionDecision = (candidate: SourceBlock, index: number): Decision.Any => {
-  const key = passageDecisionKey(index);
-  return Decision.probability({
-    instructions: [
-      `Evaluate only exact RFC source block candidate ${key} at index ${index}.`,
-      `The exact candidate is keyed as input.passages["${key}"], and its full passage content is input.passages["${key}"].text.`,
-      `Its source-block identifier is ${candidate.id} and its section is ${candidate.section ?? "unknown"}.`,
-      "Ignore every other passage candidate when answering this decision.",
-    ].join(" "),
-    criteria: {
-      false: `Source block ${key} (${candidate.id}) does not contain evidence that answers the question.`,
-      true: `Source block ${key} (${candidate.id}) contains evidence that answers the question.`,
-    },
-  });
-};
-
-const passageRelationDecision = (candidate: SourceBlock, index: number): Decision.Any => {
-  const key = passageDecisionKey(index);
-  return Decision.classify({
-    instructions: [
-      `Classify only exact RFC source block candidate ${key} at index ${index}.`,
-      `The exact candidate is keyed as input.passages["${key}"], and its full passage content is input.passages["${key}"].text.`,
-      `Its source-block identifier is ${candidate.id} and its section is ${candidate.section ?? "unknown"}.`,
-      "Ignore every other passage candidate when answering this decision.",
-    ].join(" "),
-    criteria: Object.fromEntries(
-      Object.entries(answerRelationCriteria).map(([label, description]) => [
-        label,
-        `Candidate ${key} (${candidate.id}): ${description}`,
-      ]),
-    ),
-  });
-};
-
-const documentSelectionStage = Effect.fnUntraced(function* (
-  question: string,
-  candidates: ReadonlyArray<DocumentCandidate>,
-  policy: ResearchPolicy,
-): Effect.fn.Return<DocumentSelectionResult, DecisionModelError, DecisionModel.DecisionModel> {
-  const decisions = Object.fromEntries([
-    [
-      "question_atomicity",
-      Decision.classify({
-        instructions: atomicityInstructions,
-        criteria: atomicityCriteria,
-      }),
-    ],
-    ...candidates.map((candidate, index) => [
-      documentDecisionKey(index),
-      documentDecision(candidate, index),
-    ]),
-  ]) as Record<string, Decision.Any>;
-  const definition = Decision.make({ input: DocumentBatchInputSchema, decisions });
+const decide = Effect.fnUntraced(function* <S extends Schema.Codec<any, any, never, never>>(
+  stage: DecisionStage,
+  input: S,
+  state: S["Type"],
+  decisions: Readonly<Record<string, Decision.Any>>,
+): Effect.fn.Return<DecisionBatch, DecisionModelError, DecisionModel.DecisionModel> {
   const model = yield* DecisionModel.DecisionModel;
-  const response = yield* decideWithRetry(
-    "document",
-    () =>
-      model.decide(definition, {
-        input: {
-          question,
-          documents: Object.fromEntries(
-            candidates.map(({ document }, index) => [
-              documentDecisionKey(index),
-              {
-                identifier: document.identifier,
-                title: document.title,
-                abstract: document.abstract,
-              },
-            ]),
-          ),
-        },
-      }),
-    policy,
-  );
-  const answers = yield* providerAnswers("document", response);
-  const atomicityAnswer = answers.question_atomicity;
-  if (!Predicate.isObject(atomicityAnswer)) {
-    return yield* new DecisionModelError({
-      stage: "document",
-      reason: "Provider omitted the question atomicity answer",
-    });
-  }
-  const label = atomicityAnswer.label;
-  if (
-    !Predicate.isString(label) ||
-    !Object.prototype.hasOwnProperty.call(atomicityCriteria, label)
-  ) {
-    return yield* new DecisionModelError({
-      stage: "document",
-      reason: "Provider returned an unknown question atomicity label",
-    });
-  }
-  const atomicity: AtomicityResult = {
-    label: label as AtomicityLabel,
-    probabilities: yield* decodeProbabilityMap(
-      "document",
-      "question_atomicity",
-      atomicityAnswer.probabilities,
-      Object.keys(atomicityCriteria),
-    ),
-    confidence: yield* decodeConfidence(
-      "document",
-      "question_atomicity",
-      atomicityAnswer.confidence,
-    ),
-  };
-  const diagnostics: Array<{ readonly candidateId: string; readonly probability: number }> = [];
-  for (const [index, candidate] of candidates.entries()) {
-    const candidateId = documentDecisionKey(index);
-    const answer = answers[candidateId];
-    if (!Predicate.isObject(answer)) {
-      return yield* new DecisionModelError({
-        stage: "document",
-        reason: `Provider omitted the document probability for ${candidate.document.identifier}`,
-      });
-    }
-    diagnostics.push({
-      candidateId: candidate.document.identifier,
-      probability: yield* decodeProbability(
-        "document",
-        candidate.document.identifier,
-        answer.probability,
-      ),
-    });
-  }
+  const definition = Decision.make({
+    input,
+    decisions: decisions as Record<string, Decision.Any>,
+  });
+  const response = yield* decideWithRetry(stage, () => model.decide(definition, { input: state }));
+  const answers = yield* providerAnswers(stage, response);
   const usage = yield* decodeUsage(
-    "document",
+    stage,
     Predicate.isObject(response) ? response.usage : undefined,
   );
-  // Document relevance is independent of how many questions the request
-  // bundles, so atomicity does not gate it. Refusing every document for a
-  // compound request returned a bundle with no RFC and no passage, which reads
-  // as a retrieval failure and makes callers rephrase rather than split.
-  // Passage selection and statusFromRelations still apply their own atomicity
-  // gates, so nothing accepted here can reach answered or partial.
-  const accepted = candidates
-    .map((candidate, index) => ({
-      document: candidate.document,
-      priority: candidate.priority,
-      probability: diagnostics[index]?.probability ?? 0,
-    }))
-    .filter(({ probability }) => probability >= policy.documentProbabilityThreshold)
-    .sort(
-      (left, right) =>
-        right.probability - left.probability ||
-        left.priority - right.priority ||
-        left.document.rfcNumber - right.document.rfcNumber,
-    )
-    .slice(0, policy.maxAcceptedDocumentCandidates);
-  return { accepted, atomicity, diagnostics, usage };
+  return { answers, usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens } };
 });
 
-const selectionStage = Effect.fnUntraced(function* (
-  question: string,
-  candidates: ReadonlyArray<SourceBlock>,
-  policy: ResearchPolicy,
-  includeAtomicity: boolean,
-  // The topic path already judged atomicity during document selection and does
-  // not re-ask here. Passing that judgment back in keeps the passage gate
-  // identical on both paths; without it an undefined atomicity opened the gate.
-  priorAtomicity?: AtomicityResult,
-): Effect.fn.Return<SelectionResult, DecisionModelError, DecisionModel.DecisionModel> {
-  const decisions = Object.fromEntries([
-    ...(includeAtomicity
-      ? [
-          [
-            "question_atomicity",
-            Decision.classify({
-              instructions: atomicityInstructions,
-              criteria: atomicityCriteria,
-            }),
-          ],
-        ]
-      : []),
-    ...candidates.map((candidate, index) => [
-      passageDecisionKey(index),
-      passageSelectionDecision(candidate, index),
-    ]),
-  ]) as Record<string, Decision.Any>;
-  const definition = Decision.make({ input: PassageBatchInputSchema, decisions });
-  const model = yield* DecisionModel.DecisionModel;
-  const response = yield* decideWithRetry(
-    "selection",
-    () =>
-      model.decide(definition, {
-        input: {
-          question,
-          passages: Object.fromEntries(
-            candidates.map((candidate, index) => [
-              passageDecisionKey(index),
-              {
-                id: candidate.id,
-                section: candidate.section,
-                text: candidate.text,
-              },
-            ]),
-          ),
-        },
-      }),
-    policy,
-  );
-  const answers = yield* providerAnswers("selection", response);
-  let atomicity: AtomicityResult | undefined;
-  if (includeAtomicity) {
-    const atomicityAnswer = answers.question_atomicity;
-    if (!Predicate.isObject(atomicityAnswer)) {
-      return yield* new DecisionModelError({
-        stage: "selection",
-        reason: "Provider omitted the question atomicity answer",
-      });
-    }
-    const label = atomicityAnswer.label;
-    if (
-      !Predicate.isString(label) ||
-      !Object.prototype.hasOwnProperty.call(atomicityCriteria, label)
-    ) {
-      return yield* new DecisionModelError({
-        stage: "selection",
-        reason: "Provider returned an unknown question atomicity label",
-      });
-    }
-    atomicity = {
-      label: label as AtomicityLabel,
-      probabilities: yield* decodeProbabilityMap(
-        "selection",
-        "question_atomicity",
-        atomicityAnswer.probabilities,
-        Object.keys(atomicityCriteria),
-      ),
-      confidence: yield* decodeConfidence(
-        "selection",
-        "question_atomicity",
-        atomicityAnswer.confidence,
-      ),
-    };
-  }
-  const diagnostics: Array<{ readonly candidateId: string; readonly probability: number }> = [];
-  for (const [index, candidate] of candidates.entries()) {
-    const candidateId = passageDecisionKey(index);
-    const answer = answers[candidateId];
+type ChoiceResult = {
+  readonly label: string;
+  readonly probabilities: Readonly<Record<string, number>>;
+};
+
+const choiceAnswer = (
+  stage: DecisionStage,
+  answers: Readonly<Record<string, unknown>>,
+  key: string,
+  labels: ReadonlyArray<string>,
+): Effect.Effect<ChoiceResult, DecisionModelError> =>
+  Effect.gen(function* () {
+    const answer = answers[key];
     if (!Predicate.isObject(answer)) {
+      return yield* new DecisionModelError({ stage, reason: `Provider omitted ${key}` });
+    }
+    const label = answer.label;
+    if (!Predicate.isString(label) || !labels.includes(label)) {
       return yield* new DecisionModelError({
-        stage: "selection",
-        reason: `Provider omitted the passage probability for ${candidate.id}`,
+        stage,
+        reason: `Provider returned an unknown label for ${key}`,
       });
     }
-    diagnostics.push({
-      candidateId: candidate.id,
-      probability: yield* decodeProbability("selection", candidate.id, answer.probability),
-    });
-  }
-  const usage = yield* decodeUsage(
-    "selection",
-    Predicate.isObject(response) ? response.usage : undefined,
-  );
-  const gateAtomicity = atomicity ?? priorAtomicity;
-  return {
-    selected:
-      gateAtomicity === undefined || isConfidentAtomic(gateAtomicity, policy)
-        ? candidates.flatMap((candidate, index) => {
-            const probability = diagnostics[index]?.probability ?? 0;
-            return probability >= policy.selectionProbabilityThreshold
-              ? [{ block: candidate, probability }]
-              : [];
-          })
-        : [],
-    atomicity,
-    diagnostics,
-    usage,
-  };
-});
+    const probabilities = yield* decodeProbabilityMap(stage, key, answer.probabilities, labels);
+    return { label, probabilities };
+  });
 
-const relationStage = Effect.fnUntraced(function* (
-  question: string,
-  selected: ReadonlyArray<{ readonly block: SourceBlock; readonly probability: number }>,
-  policy: ResearchPolicy,
-): Effect.fn.Return<RelationResult, DecisionModelError, DecisionModel.DecisionModel> {
-  if (selected.length === 0) {
-    return {
-      answers: [],
-      diagnostics: [],
-      usage: new DecisionModel.DecisionUsage({ inputTokens: undefined, outputTokens: undefined }),
-    };
-  }
-  const decisions = Object.fromEntries(
-    selected.map(({ block }, index) => [
-      passageDecisionKey(index),
-      passageRelationDecision(block, index),
-    ]),
-  ) as Record<string, Decision.Any>;
-  const definition = Decision.make({ input: PassageBatchInputSchema, decisions });
-  const model = yield* DecisionModel.DecisionModel;
-  const response = yield* decideWithRetry(
-    "relation",
-    () =>
-      model.decide(definition, {
-        input: {
-          question,
-          passages: Object.fromEntries(
-            selected.map(({ block }, index) => [
-              passageDecisionKey(index),
-              {
-                id: block.id,
-                section: block.section,
-                text: block.text,
-              },
-            ]),
-          ),
-        },
-      }),
-    policy,
-  );
-  const answers = yield* providerAnswers("relation", response);
-  const decodedAnswers: Array<RelationResult["answers"][number]> = [];
-  for (const [index, candidate] of selected.entries()) {
-    const candidateId = passageDecisionKey(index);
-    const answer = answers[candidateId];
+const noulAnswer = (
+  stage: DecisionStage,
+  answers: Readonly<Record<string, unknown>>,
+  key: string,
+): Effect.Effect<number, DecisionModelError> =>
+  Effect.gen(function* () {
+    const answer = answers[key];
     if (!Predicate.isObject(answer)) {
-      return yield* new DecisionModelError({
-        stage: "relation",
-        reason: `Provider omitted the answer relation for ${candidate.block.id}`,
-      });
+      return yield* new DecisionModelError({ stage, reason: `Provider omitted ${key}` });
     }
-    const relation = answer.label;
-    if (
-      !Predicate.isString(relation) ||
-      !Object.prototype.hasOwnProperty.call(answerRelationCriteria, relation)
-    ) {
-      return yield* new DecisionModelError({
-        stage: "relation",
-        reason: `Provider returned an unknown answer relation for ${candidate.block.id}`,
-      });
-    }
-    decodedAnswers.push({
-      block: candidate.block,
-      selectionProbability: candidate.probability,
-      relation: relation as AnswerRelation,
-      probabilities: yield* decodeProbabilityMap(
-        "relation",
-        candidate.block.id,
-        answer.probabilities,
-        Object.keys(answerRelationCriteria),
-      ),
-      confidence: yield* decodeConfidence("relation", candidate.block.id, answer.confidence),
-    });
-  }
-  const usage = yield* decodeUsage(
-    "relation",
-    Predicate.isObject(response) ? response.usage : undefined,
-  );
-  return {
-    answers: decodedAnswers,
-    diagnostics: decodedAnswers.map((answer) => ({
-      candidateId: answer.block.id,
-      relation: answer.relation,
-      probabilities: answer.probabilities,
-      confidence: answer.confidence ?? null,
-    })),
-    usage,
-  };
-});
+    return yield* decodeProbability(stage, key, answer.probability);
+  });
 
-const resolveRfcNumber = (hint: string): number | undefined => {
-  const normalized = hint.trim();
-  const match = /^(?:rfc\s*)?(\d+)$/i.exec(normalized);
-  if (match === null) return undefined;
-  const value = Number(match[1]);
-  return Number.isSafeInteger(value) && value > 0 ? value : undefined;
+/**
+ * Keep options in probability order until they cover the policy's share of
+ * the non-`none` mass, up to a count limit.
+ */
+const coverageSelect = (
+  probabilities: Readonly<Record<string, number>>,
+  labels: ReadonlyArray<string>,
+  limit: number,
+): ReadonlyArray<{ readonly label: string; readonly probability: number }> => {
+  const ranked = labels
+    .map((label) => ({ label, probability: probabilities[label] ?? 0 }))
+    .sort((left, right) => right.probability - left.probability);
+  const total = ranked.reduce((sum, { probability }) => sum + probability, 0);
+  if (total <= 0) return [];
+  const picked: Array<{ readonly label: string; readonly probability: number }> = [];
+  let covered = 0;
+  for (const option of ranked) {
+    if (picked.length >= limit || covered >= retrievalPolicy.coverageMass) break;
+    picked.push(option);
+    covered += option.probability / total;
+  }
+  return picked;
 };
 
 /**
- * Resolve a research hint against exact request-local RFC metadata.
- *
- * @param documents Request-local published RFC metadata.
- * @param hint RFC identifier or number supplied by the caller.
- * @returns The exact RFC metadata value.
- * @throws RfcNotFoundError when the hint is invalid or absent from the request metadata.
+ * Keep the highest-probability options regardless of coverage, for a beam.
  */
-export const resolveKnownRfc = (
-  documents: ReadonlyArray<RfcMetadata>,
-  hint: string,
-): RfcMetadata => {
-  const rfcNumber = resolveRfcNumber(hint);
-  const document =
-    rfcNumber === undefined
-      ? undefined
-      : documents.find(
-          (candidate) =>
-            candidate.rfcNumber === rfcNumber &&
-            candidate.identifier.toUpperCase() === `RFC${rfcNumber}`,
-        );
-  if (document === undefined) {
-    throw new RfcNotFoundError({ rfc: hint });
-  }
-  return document;
-};
+const topSelect = (
+  probabilities: Readonly<Record<string, number>>,
+  labels: ReadonlyArray<string>,
+  width: number,
+): ReadonlyArray<{ readonly label: string; readonly probability: number }> =>
+  labels
+    .map((label) => ({ label, probability: probabilities[label] ?? 0 }))
+    .sort((left, right) => right.probability - left.probability)
+    .slice(0, width);
 
-type PlannedRfcContext = {
-  readonly role: RfcContextRole;
+const noneLabel = "none";
+
+const questionKey = (index: number): string => `q${index}`;
+
+const collapse = (value: string): string => value.replace(/\s+/g, " ").trim();
+
+const truncate = (value: string, limit: number): string =>
+  value.length <= limit ? value : `${value.slice(0, limit - 1)}…`;
+
+const QuestionsSchema = Schema.Record(Schema.String, Schema.String);
+
+// ---------------------------------------------------------------------------
+// Candidate pool and RFC currency
+// ---------------------------------------------------------------------------
+
+/**
+ * One RFC eligible for ranking, with how it entered the pool.
+ */
+export interface PoolCandidate {
+  /**
+   * Request-local RFC metadata.
+   */
   readonly document: RfcMetadata;
-  readonly relationshipPath: ReadonlyArray<RfcRelationshipStep>;
-  readonly isCurrent: boolean;
-};
+  /**
+   * How the RFC entered the pool.
+   */
+  readonly role: HitRole;
+  /**
+   * Identifier of the named RFC this candidate descends from, or undefined for
+   * a topic hit. A requested RFC and its current successors share a family.
+   */
+  readonly family: string | undefined;
+}
 
 /**
- * The resolved RFC contexts and relationship report used by research.
+ * One named RFC resolved by live lookup, with the documents its currency
+ * traversal visited.
  */
-export interface RfcCurrencyResolution {
+export interface NamedRfcLookup {
   /**
-   * The requested RFC and the applicable current RFC contexts.
+   * Exact metadata for the named RFC.
    */
-  readonly contexts: ReadonlyArray<InternalRfcResearchContext>;
+  readonly document: RfcMetadata;
   /**
-   * The deterministic relationship report for those contexts.
+   * Request-local metadata for every RFC visited during currency traversal.
    */
-  readonly report: RfcCurrencyReport;
+  readonly documents: ReadonlyArray<RfcMetadata>;
 }
 
 type SuccessorEdge = {
   readonly document: RfcMetadata;
   readonly relationship: RfcRelationshipStep["relationship"];
-};
-
-type SuccessorLookup = {
-  readonly edges: ReadonlyArray<SuccessorEdge>;
-  readonly issues: ReadonlyArray<RfcCurrencyIssue>;
-  readonly unresolved: ReadonlyArray<string>;
-  readonly hasSuccessorMetadata: boolean;
 };
 
 const normalizedRfcIdentifier = (value: string): string | undefined => {
@@ -1825,1319 +678,940 @@ const currencyIdentifier = (document: RfcMetadata): string =>
 const compareRfcDocuments = (left: RfcMetadata, right: RfcMetadata): number =>
   left.rfcNumber - right.rfcNumber || left.identifier.localeCompare(right.identifier);
 
-const uniqueCurrencyIssues = (
-  issues: ReadonlyArray<RfcCurrencyIssue>,
-): ReadonlyArray<RfcCurrencyIssue> => [...new Set(issues)];
-
-const uniqueIdentifiers = (identifiers: ReadonlyArray<string>): ReadonlyArray<string> => [
-  ...new Set(identifiers),
-];
-
-const successorLookup = (
+const successorEdges = (
   documents: ReadonlyArray<RfcMetadata>,
   document: RfcMetadata,
-): SuccessorLookup => {
+): { readonly edges: ReadonlyArray<SuccessorEdge>; readonly unresolved: boolean } => {
   const documentsByIdentifier = new Map<string, RfcMetadata>();
   for (const candidate of documents) {
     documentsByIdentifier.set(currencyIdentifier(candidate), candidate);
-    documentsByIdentifier.set(candidate.identifier.toUpperCase(), candidate);
   }
-
   const edges = new Map<string, SuccessorEdge>();
-  const issues: Array<RfcCurrencyIssue> = [];
-  const unresolved: Array<string> = [];
-  let hasSuccessorMetadata = false;
-
+  let unresolved = false;
   const addEdge = (identifier: string, relationship: RfcRelationshipStep["relationship"]): void => {
     const normalized = normalizedRfcIdentifier(identifier);
-    if (normalized === undefined) {
-      issues.push("malformed_relationship");
-      return;
-    }
-    const successor = documentsByIdentifier.get(normalized);
+    const successor = normalized === undefined ? undefined : documentsByIdentifier.get(normalized);
     if (successor === undefined) {
-      issues.push("missing_successor");
-      unresolved.push(normalized);
+      unresolved = true;
       return;
     }
-    const key = `${relationship}:${currencyIdentifier(successor)}`;
-    edges.set(key, { document: successor, relationship });
+    edges.set(`${relationship}:${currencyIdentifier(successor)}`, {
+      document: successor,
+      relationship,
+    });
   };
-
-  for (const identifier of document.updatedBy) {
-    hasSuccessorMetadata = true;
-    addEdge(identifier, "updates");
-  }
-  for (const identifier of document.obsoletedBy) {
-    hasSuccessorMetadata = true;
-    addEdge(identifier, "obsoletes");
-  }
-
-  // Successors are read only from the requested document's own `updatedBy`
-  // and `obsoletedBy`. There is deliberately no reverse scan over every other
-  // candidate's `updates`/`obsoletes`: live discovery constructs those two
-  // fields as empty on every document, so such a scan can never add an edge,
-  // while making currency depend on how many unrelated documents happen to be
-  // in the request-local set.
-
-  const sortedEdges = [...edges.values()].sort(
-    (left, right) =>
-      compareRfcDocuments(left.document, right.document) ||
-      left.relationship.localeCompare(right.relationship),
-  );
+  // Successors are read only from the document's own `updatedBy` and
+  // `obsoletedBy`; live discovery leaves `updates` and `obsoletes` empty.
+  for (const identifier of document.updatedBy) addEdge(identifier, "updates");
+  for (const identifier of document.obsoletedBy) addEdge(identifier, "obsoletes");
   return {
-    edges: sortedEdges,
-    issues: uniqueCurrencyIssues(issues),
-    unresolved: uniqueIdentifiers(unresolved),
-    hasSuccessorMetadata,
+    edges: [...edges.values()].sort(
+      (left, right) =>
+        compareRfcDocuments(left.document, right.document) ||
+        left.relationship.localeCompare(right.relationship),
+    ),
+    unresolved,
   };
 };
 
-const resolveRfcCurrencyFromDocument = (
+type CurrentContext = {
+  readonly document: RfcMetadata;
+  readonly relationshipPath: ReadonlyArray<RfcRelationshipStep>;
+};
+
+/**
+ * Resolve the bounded current successors of a requested RFC.
+ *
+ * A current RFC is a leaf of the successor graph reachable from the requested
+ * RFC. A requested RFC with no successors is its own current RFC.
+ *
+ * @param documents Request-local metadata visited by currency traversal.
+ * @param requested The named RFC.
+ * @returns Current successor contexts and the relationship report.
+ */
+export const resolveRfcCurrency = (
   documents: ReadonlyArray<RfcMetadata>,
   requested: RfcMetadata,
-  maxDepth: number = precisionV2Policy.maxCurrencyTraversalDepth,
-  maxContexts: number = precisionV2Policy.maxCurrencyContexts,
-): RfcCurrencyResolution => {
-  const requestedContext: PlannedRfcContext = {
-    role: "requested",
-    document: requested,
-    relationshipPath: [],
-    isCurrent: false,
-  };
-  const expanded = new Set<string>();
+): {
+  readonly current: ReadonlyArray<CurrentContext>;
+  readonly report: RfcCurrencyReport;
+} => {
+  const expanded = new Set<string>([currencyIdentifier(requested)]);
   const activePath = new Set<string>();
-  const successorLookups = new Map<string, SuccessorLookup>();
-  const currentContexts: Array<PlannedRfcContext> = [];
-  const issues: Array<RfcCurrencyIssue> = [];
-  const unresolved: Array<string> = [];
-  let hasSuccessorMetadata = false;
-  const contextLimit = Math.max(1, maxContexts);
-  const depthLimit = Math.max(0, maxDepth);
-
-  const lookupSuccessors = (document: RfcMetadata): SuccessorLookup => {
-    const identifier = currencyIdentifier(document);
-    const cached = successorLookups.get(identifier);
-    if (cached !== undefined) return cached;
-    const lookup = successorLookup(documents, document);
-    successorLookups.set(identifier, lookup);
-    return lookup;
-  };
+  const current: Array<CurrentContext> = [];
+  let hasSuccessors = false;
 
   const visit = (
     document: RfcMetadata,
     relationshipPath: ReadonlyArray<RfcRelationshipStep>,
     depth: number,
   ): void => {
-    const documentIdentifier = currencyIdentifier(document);
-    activePath.add(documentIdentifier);
-    const lookup = lookupSuccessors(document);
-    issues.push(...lookup.issues);
-    unresolved.push(...lookup.unresolved);
-    hasSuccessorMetadata ||= lookup.hasSuccessorMetadata;
-
-    if (lookup.edges.length === 0) {
-      if (document !== requested && lookup.unresolved.length === 0) {
-        currentContexts.push({
-          role: "current",
-          document,
-          relationshipPath,
-          isCurrent: true,
-        });
-      }
-      activePath.delete(documentIdentifier);
-      expanded.add(documentIdentifier);
+    const identifier = currencyIdentifier(document);
+    activePath.add(identifier);
+    const { edges, unresolved } = successorEdges(documents, document);
+    hasSuccessors ||= edges.length > 0 || unresolved;
+    if (edges.length === 0) {
+      if (document !== requested && !unresolved) current.push({ document, relationshipPath });
+      activePath.delete(identifier);
       return;
     }
-
-    for (const edge of lookup.edges) {
-      const edgePath: RfcRelationshipStep = {
-        from: document.identifier,
-        to: edge.document.identifier,
-        relationship: edge.relationship,
-      };
-      const successorIdentifier = currencyIdentifier(edge.document);
-      if (activePath.has(successorIdentifier)) {
-        issues.push("cycle_detected");
+    for (const edge of edges) {
+      const successor = currencyIdentifier(edge.document);
+      if (
+        activePath.has(successor) ||
+        depth >= retrievalPolicy.maxCurrencyTraversalDepth ||
+        expanded.has(successor) ||
+        expanded.size >= retrievalPolicy.maxCurrencyContexts
+      ) {
         continue;
       }
-      if (depth >= depthLimit) {
-        issues.push("traversal_limit");
-        continue;
-      }
-      if (expanded.has(successorIdentifier)) continue;
-      if (expanded.size >= contextLimit) {
-        issues.push("traversal_limit");
-        continue;
-      }
-
-      expanded.add(successorIdentifier);
-      visit(edge.document, [...relationshipPath, edgePath], depth + 1);
+      expanded.add(successor);
+      visit(
+        edge.document,
+        [
+          ...relationshipPath,
+          {
+            from: document.identifier,
+            to: edge.document.identifier,
+            relationship: edge.relationship,
+          },
+        ],
+        depth + 1,
+      );
     }
-
-    activePath.delete(documentIdentifier);
+    activePath.delete(identifier);
   };
 
-  const requestedIdentifier = currencyIdentifier(requested);
-  expanded.add(requestedIdentifier);
   visit(requested, [], 0);
-
-  const sortedCurrentContexts = currentContexts
+  const sorted = current
     .sort((left, right) => compareRfcDocuments(left.document, right.document))
-    .slice(0, Math.max(1, maxContexts));
-  if (hasSuccessorMetadata && sortedCurrentContexts.length === 0) {
-    issues.push("missing_current_context");
-  }
+    .slice(0, retrievalPolicy.maxCurrencyContexts);
+  return {
+    current: sorted,
+    report: {
+      requested: requested.identifier,
+      current: hasSuccessors
+        ? sorted.map(({ document }) => document.identifier)
+        : [requested.identifier],
+      paths: [
+        { identifier: requested.identifier, path: [] },
+        ...sorted.map(({ document, relationshipPath }) => ({
+          identifier: document.identifier,
+          path: relationshipPath,
+        })),
+      ],
+    },
+  };
+};
 
-  const currentIdentifiers =
-    hasSuccessorMetadata && sortedCurrentContexts.length > 0
-      ? sortedCurrentContexts.map(({ document }) => document.identifier)
-      : hasSuccessorMetadata
-        ? []
-        : [requested.identifier];
-  const contexts = [requestedContext, ...sortedCurrentContexts].map((context) => ({
-    ...context,
-    isCurrent: hasSuccessorMetadata ? context.role === "current" : context.role === "requested",
-    state: "researched" as const,
+/**
+ * Merge named RFCs, their current successors, and topic hits into one
+ * deduplicated, bounded candidate pool.
+ *
+ * Named RFCs come first, then their successors, then topic hits, so the pool
+ * bound only ever drops topic hits before caller-named material.
+ *
+ * @param named Named RFC lookups with their currency traversal documents.
+ * @param discovered Topic-discovery candidates in discovery order.
+ * @returns The candidate pool and one currency report per named RFC.
+ */
+export const buildCandidatePool = (
+  named: ReadonlyArray<NamedRfcLookup>,
+  discovered: ReadonlyArray<RfcMetadata>,
+): {
+  readonly pool: ReadonlyArray<PoolCandidate>;
+  readonly currency: ReadonlyArray<RfcCurrencyReport>;
+} => {
+  const pool = new Map<string, PoolCandidate>();
+  const add = (candidate: PoolCandidate): void => {
+    const identifier = currencyIdentifier(candidate.document);
+    if (!pool.has(identifier)) pool.set(identifier, candidate);
+  };
+  const resolutions = named.map((lookup) => ({
+    lookup,
+    resolution: resolveRfcCurrency(lookup.documents, lookup.document),
   }));
-  const report: RfcCurrencyReport = {
-    requested: requested.identifier,
-    current: currentIdentifiers,
-    paths: contexts.map((context) => ({
-      identifier: context.document.identifier,
-      path: context.relationshipPath,
-    })),
-    complete: uniqueCurrencyIssues(issues).length === 0,
-    issues: uniqueCurrencyIssues(issues),
-    unresolved: uniqueIdentifiers(unresolved),
-    compatibility: [],
+  for (const { lookup } of resolutions) {
+    add({ document: lookup.document, role: "requested", family: lookup.document.identifier });
+  }
+  for (const { lookup, resolution } of resolutions) {
+    for (const { document } of resolution.current) {
+      add({ document, role: "current", family: lookup.document.identifier });
+    }
+  }
+  for (const document of discovered) add({ document, role: "discovered", family: undefined });
+  return {
+    pool: [...pool.values()].slice(0, retrievalPolicy.maxPoolCandidates),
+    currency: resolutions.map(({ resolution }) => resolution.report),
   };
-  return { contexts, report };
 };
 
-/**
- * Resolve the requested RFC and its bounded current RFC contexts.
- *
- * @param documents Request-local published RFC metadata.
- * @param hint RFC identifier or number supplied by the caller.
- * @returns Requested and current contexts plus their relationship report.
- * @throws RfcNotFoundError when the hint is absent from the request metadata.
- */
-export const resolveRfcCurrency = (
-  documents: ReadonlyArray<RfcMetadata>,
-  hint: string,
-): RfcCurrencyResolution =>
-  resolveRfcCurrencyFromDocument(documents, resolveKnownRfc(documents, hint));
+// ---------------------------------------------------------------------------
+// Stage 1: rank RFCs
+// ---------------------------------------------------------------------------
 
-/**
- * Resolve current contexts from an already resolved requested RFC.
- *
- * @param documents Request-local published RFC metadata.
- * @param requested Requested RFC metadata from the same request.
- * @returns Requested and current contexts plus their relationship report.
- */
-export const resolveRfcContexts = (
-  documents: ReadonlyArray<RfcMetadata>,
-  requested: RfcMetadata,
-): RfcCurrencyResolution => resolveRfcCurrencyFromDocument(documents, requested);
+const RankInputSchema = Schema.Struct({
+  questions: QuestionsSchema,
+  candidates: Schema.Record(
+    Schema.String,
+    Schema.Struct({
+      identifier: Schema.String,
+      title: Schema.String,
+      abstract: Schema.String,
+    }),
+  ),
+});
 
-const relationIsConfident = (confidence: number | undefined, policy: ResearchPolicy): boolean =>
-  confidence !== undefined && confidence >= policy.relationConfidenceThreshold;
-
-const acceptedRelation = (
-  relation: AnswerRelation,
-  probabilities: Readonly<Record<string, number>>,
-  confidence: number | undefined,
-  policy: ResearchPolicy,
-): boolean => {
-  if (!relationIsConfident(confidence, policy)) return false;
-  const probability = probabilities[relation] ?? 0;
-  if (relation === "direct_answer") return probability >= policy.directAnswerProbabilityThreshold;
-  if (relation === "partial_answer") return probability >= policy.partialAnswerProbabilityThreshold;
-  if (relation === "contradictory") {
-    return probability >= policy.contradictoryProbabilityThreshold;
-  }
-  return false;
+type RankedCandidate = {
+  readonly candidate: PoolCandidate;
+  readonly relevance: number | null;
 };
 
-const confidentNegativeRelation = (
-  answer: RelationResult["answers"][number],
-  policy: ResearchPolicy,
-): boolean =>
-  (answer.relation === "background_only" || answer.relation === "irrelevant") &&
-  relationIsConfident(answer.confidence, policy) &&
-  (answer.probabilities[answer.relation] ?? 0) >= policy.relationConfidenceThreshold;
+const candidateKey = (index: number): string => `c${index}`;
 
-const statusFromRelations = (
-  answers: ReadonlyArray<RelationResult["answers"][number]>,
-  atomicity: SelectionResult["atomicity"] | AtomicityResult | undefined,
-  selectionDiagnostics: ReadonlyArray<SelectionResult["diagnostics"][number]>,
-  policy: ResearchPolicy,
-): ResearchStatus => {
-  if (atomicity === undefined) return "needs_review";
-  const atomicityConfident = isDecisiveAtomicity(atomicity, policy);
-  if (atomicity.label === "compound" && atomicityConfident) {
-    return "needs_split";
-  }
-  if (!atomicityConfident) return "needs_review";
-
-  const accepted = answers.filter((answer) =>
-    acceptedRelation(answer.relation, answer.probabilities, answer.confidence, policy),
+const rankDecisions = (
+  questions: ReadonlyArray<string>,
+  pool: ReadonlyArray<PoolCandidate>,
+): Record<string, Decision.Any> =>
+  Object.fromEntries(
+    questions.flatMap((_, questionIndex) => {
+      const question = `\`questions.${questionKey(questionIndex)}\``;
+      return [
+        [
+          `rank_${questionKey(questionIndex)}`,
+          Decision.classify({
+            instructions: `Which candidate RFC in \`candidates\` defines or normatively specifies what the question ${question} asks about? Tell apart RFCs that specify the subject from lookalikes that only mention it.`,
+            criteria: Object.fromEntries([
+              ...pool.map(({ document }, index) => [
+                candidateKey(index),
+                `\`candidates.${candidateKey(index)}\` (${document.identifier}, ${truncate(collapse(document.title), 120)}) specifies what the question asks about`,
+              ]),
+              [noneLabel, "No candidate RFC specifies what the question asks about"],
+            ]),
+          }),
+        ],
+        ...pool.map(({ document }, index) => [
+          `relevant_${questionKey(questionIndex)}_${candidateKey(index)}`,
+          Decision.probability({
+            instructions: `Does the candidate RFC \`candidates.${candidateKey(index)}\` (${document.identifier}) define or normatively specify what the question ${question} asks about?`,
+            criteria: {
+              true: "The candidate RFC defines or normatively specifies what the question asks about.",
+              false:
+                "The candidate RFC is only on a related topic; it does not specify what the question asks about.",
+            },
+          }),
+        ]),
+      ];
+    }),
   );
-  const contradictory = answers.some((answer) => answer.relation === "contradictory");
-  // Once one or more passages pass the relation gates, rejected distractors
-  // are not evidence and must not suppress an otherwise accepted answer. A
-  // contradictory label remains disqualifying above, so this relaxation does
-  // not permit conflicting evidence to become automatic.
-  const uncertainAnswer =
-    accepted.length === 0 &&
-    answers.some(
-      (answer) =>
-        !acceptedRelation(answer.relation, answer.probabilities, answer.confidence, policy) &&
-        !confidentNegativeRelation(answer, policy),
+
+const rankStage = Effect.fnUntraced(function* (
+  questions: ReadonlyArray<string>,
+  pool: ReadonlyArray<PoolCandidate>,
+): Effect.fn.Return<
+  { readonly kept: ReadonlyArray<ReadonlyArray<RankedCandidate>>; readonly usage: Usage },
+  DecisionModelError,
+  DecisionModel.DecisionModel
+> {
+  if (pool.length === 0) {
+    return { kept: questions.map(() => []), usage: noUsage };
+  }
+  const only = pool[0];
+  if (pool.length === 1 && only !== undefined) {
+    return { kept: questions.map(() => [{ candidate: only, relevance: null }]), usage: noUsage };
+  }
+
+  const batch = yield* decide(
+    "rank",
+    RankInputSchema,
+    {
+      questions: Object.fromEntries(
+        questions.map((question, index) => [questionKey(index), question]),
+      ),
+      candidates: Object.fromEntries(
+        pool.map(({ document }, index) => [
+          candidateKey(index),
+          {
+            identifier: document.identifier,
+            title: document.title,
+            abstract: truncate(document.abstract, retrievalPolicy.abstractMaximumCharacters),
+          },
+        ]),
+      ),
+    },
+    rankDecisions(questions, pool),
+  );
+
+  const labels = [...pool.map((_, index) => candidateKey(index)), noneLabel];
+  const kept: Array<ReadonlyArray<RankedCandidate>> = [];
+  for (const [questionIndex] of questions.entries()) {
+    const choice = yield* choiceAnswer(
+      "rank",
+      batch.answers,
+      `rank_${questionKey(questionIndex)}`,
+      labels,
     );
-  const direct = accepted.some((answer) => answer.relation === "direct_answer");
-  const partial = accepted.some((answer) => answer.relation === "partial_answer");
-  if (contradictory || uncertainAnswer) return "needs_review";
-  if (direct && isAutomaticAnswerActivation(policy.automaticAnswerActivation)) return "answered";
-  if (partial) return "partial";
-  if (answers.length > 0 && answers.every((answer) => confidentNegativeRelation(answer, policy))) {
-    return "unsupported";
+    const scored: Array<{
+      readonly candidate: PoolCandidate;
+      readonly index: number;
+      readonly relevance: number;
+      readonly choice: number;
+    }> = [];
+    for (const [index, candidate] of pool.entries()) {
+      scored.push({
+        candidate,
+        index,
+        relevance: yield* noulAnswer(
+          "rank",
+          batch.answers,
+          `relevant_${questionKey(questionIndex)}_${candidateKey(index)}`,
+        ),
+        choice: choice.probabilities[candidateKey(index)] ?? 0,
+      });
+    }
+    const eligible = scored
+      .filter(({ relevance }) => relevance >= retrievalPolicy.rankFloor)
+      .sort(
+        (left, right) =>
+          right.relevance - left.relevance ||
+          right.choice - left.choice ||
+          left.index - right.index,
+      );
+    const top = eligible.slice(0, retrievalPolicy.maxRfcsPerQuestion);
+    // A requested RFC and its current successor are both kept when both clear
+    // the floor, so a successor never silently replaces what the caller named.
+    const families = new Set(top.flatMap(({ candidate }) => candidate.family ?? []));
+    const selected = eligible.filter(
+      (entry) =>
+        top.includes(entry) ||
+        (entry.candidate.family !== undefined && families.has(entry.candidate.family)),
+    );
+    kept.push(selected.map(({ candidate, relevance }) => ({ candidate, relevance })));
   }
-  if (
-    answers.length === 0 &&
-    selectionDiagnostics.length > 0 &&
-    selectionDiagnostics.every(
-      (candidate) => candidate.probability <= policy.unsupportedProbabilityThreshold,
-    )
-  ) {
-    return "unsupported";
+  return { kept, usage: batch.usage };
+});
+
+// ---------------------------------------------------------------------------
+// Stage 2: pick sections
+// ---------------------------------------------------------------------------
+
+const SectionInputSchema = Schema.Struct({
+  questions: QuestionsSchema,
+  toc: Schema.Record(
+    Schema.String,
+    Schema.Struct({
+      heading: Schema.String,
+      preview: Schema.String,
+    }),
+  ),
+});
+
+type LoadedRfc = {
+  readonly candidate: PoolCandidate;
+  readonly source: RfcSource;
+  readonly sections: ReadonlyArray<RfcSection>;
+  readonly paragraphs: ReadonlyArray<RfcParagraph>;
+  readonly paragraphsBySection: ReadonlyMap<number, ReadonlyArray<RfcParagraph>>;
+};
+
+type PickedSection = { readonly section: RfcSection; readonly probability: number };
+
+const sectionKey = (section: RfcSection): string => `s${section.index}`;
+
+type TocEntry = { readonly heading: string; readonly preview: string };
+
+const sectionEntry = (rfc: LoadedRfc, section: RfcSection): TocEntry => ({
+  heading: collapse(section.heading),
+  preview: truncate(
+    collapse(rfc.paragraphsBySection.get(section.index)?.[0]?.text ?? ""),
+    retrievalPolicy.sectionPreviewCharacters,
+  ),
+});
+
+// A chapter is summarized by the titles of the sections inside it, which is
+// where a large RFC names the fields, codes, and procedures a question targets.
+const chapterEntry = (rfc: LoadedRfc, chapter: RfcSection): TocEntry => ({
+  heading: collapse(chapter.heading),
+  preview: truncate(
+    rfc.sections
+      .filter(
+        (section) =>
+          section.index !== chapter.index &&
+          topLevelAncestor(rfc.sections, section) === chapter.index,
+      )
+      .map((section) => collapse(section.heading))
+      .join("; "),
+    retrievalPolicy.chapterPreviewCharacters,
+  ),
+});
+
+const sectionChoice = (
+  questionIndex: number,
+  sections: ReadonlyArray<RfcSection>,
+  identifier: string,
+): Decision.Any =>
+  Decision.classify({
+    instructions: `Which section of ${identifier}, listed in \`toc\`, contains the text that answers the question \`questions.${questionKey(questionIndex)}\`?`,
+    criteria: Object.fromEntries([
+      ...sections.map((section) => [
+        sectionKey(section),
+        `Section \`toc.${sectionKey(section)}\` (${truncate(collapse(section.heading), 120)}) contains the answer`,
+      ]),
+      [noneLabel, "No listed section contains the answer"],
+    ]),
+  });
+
+const topLevelAncestor = (sections: ReadonlyArray<RfcSection>, section: RfcSection): number => {
+  let current = section;
+  while (current.parent !== undefined) {
+    const parent = sections[current.parent];
+    if (parent === undefined) break;
+    current = parent;
   }
-  return "needs_review";
+  return current.index;
 };
 
-type ContextResearchResult = {
-  readonly context: InternalRfcResearchContext;
-  readonly source: RfcSource;
-  readonly status: ResearchStatus;
-  readonly evidence: ReadonlyArray<EvidencePassage>;
-  readonly reviewCandidates: ReadonlyArray<ReviewCandidate>;
-  readonly diagnostics: Schema.Schema.Type<typeof ContextDiagnosticsSchema>;
-  readonly usage: {
-    readonly inputTokens: number | undefined;
-    readonly outputTokens: number | undefined;
-  };
-  readonly timings: Schema.Schema.Type<typeof TimingSchema>;
-};
-
-type UnavailableContextResult = {
-  readonly context: InternalRfcResearchContext;
-  readonly diagnostics: Schema.Schema.Type<typeof ContextDiagnosticsSchema>;
-};
-
-type PassageSource = {
-  readonly document: RfcMetadata;
-  readonly source: RfcSource;
-  readonly context: RfcContextRole;
-  readonly relationshipPath: ReadonlyArray<RfcRelationshipStep>;
-};
-
-const reviewCandidatesFromSelection = (
-  candidates: ReadonlyArray<SourceBlock>,
-  diagnostics: ReadonlyArray<SelectionResult["diagnostics"][number]>,
-  sourceForCandidate: (candidateId: string) => PassageSource | undefined,
-  excludedCandidateIds: ReadonlySet<string>,
-  selectionProbabilityThreshold: number,
-  limit: number,
-): ReadonlyArray<ReviewCandidate> => {
-  const blocks = new Map(candidates.map((candidate) => [candidate.id, candidate]));
-  const available = diagnostics.filter(
-    (candidate) => !excludedCandidateIds.has(candidate.candidateId),
+const pickSections = Effect.fnUntraced(function* (
+  rfc: LoadedRfc,
+  questions: ReadonlyMap<number, string>,
+): Effect.fn.Return<
+  { readonly picked: ReadonlyMap<number, ReadonlyArray<PickedSection>>; readonly usage: Usage },
+  DecisionModelError,
+  DecisionModel.DecisionModel
+> {
+  const identifier = rfc.candidate.document.identifier;
+  const withText = rfc.sections.filter((section) => rfc.paragraphsBySection.has(section.index));
+  const questionState = Object.fromEntries(
+    [...questions].map(([index, question]) => [questionKey(index), question]),
   );
-  const qualified = [...available]
-    .sort((left, right) => right.probability - left.probability)
-    .filter((candidate) => candidate.probability >= selectionProbabilityThreshold);
-  // Nothing cleared the semantic threshold, so one weak passage is the most
-  // that can honestly be offered for review.
-  const reviewable =
-    qualified.length > 0 ? qualified.slice(0, Math.max(1, limit)) : available.slice(0, 1);
-  return reviewable.flatMap((candidate) => {
-    const block = blocks.get(candidate.candidateId);
-    const context = sourceForCandidate(candidate.candidateId);
-    if (block === undefined || context === undefined) return [];
-    const offsets = makeUtf8OffsetMap(context.source.text);
-    const startOffset = offsets.byteOffsetAtCodeUnit(block.startOffset);
-    const endOffset = offsets.byteOffsetAtCodeUnit(block.endOffset);
-    if (startOffset === undefined || endOffset === undefined) return [];
-    return [
-      {
-        id: block.id,
-        context: context.context,
-        quote: context.source.text.slice(block.startOffset, block.endOffset),
-        selectionProbability: candidate.probability,
-        provenance: {
-          identifier: context.document.identifier,
-          rfcNumber: context.document.rfcNumber,
-          context: context.context,
-          relationshipPath: context.relationshipPath,
-          sourceUrl: context.source.sourceUrl,
-          canonicalUrl: context.document.canonicalUrl,
-          sourceHash: context.source.contentHash,
-          offsetUnit: utf8OffsetUnit,
-          startOffset,
-          endOffset,
-          section: block.section,
-          fetchedAt: context.source.fetchedAt,
-        },
-      } satisfies ReviewCandidate,
-    ];
+  const usages: Array<Usage> = [];
+
+  const choose = Effect.fnUntraced(function* (
+    options: ReadonlyMap<number, ReadonlyArray<RfcSection>>,
+    entry: (rfc: LoadedRfc, section: RfcSection) => TocEntry,
+    select: "coverage" | "beam",
+  ) {
+    const toc = Object.fromEntries(
+      [...new Set([...options.values()].flat())].map((section) => [
+        sectionKey(section),
+        entry(rfc, section),
+      ]),
+    );
+    const batch = yield* decide(
+      "section",
+      SectionInputSchema,
+      { questions: questionState, toc },
+      Object.fromEntries(
+        [...options].map(([questionIndex, sections]) => [
+          `section_${questionKey(questionIndex)}`,
+          sectionChoice(questionIndex, sections, identifier),
+        ]),
+      ),
+    );
+    usages.push(batch.usage);
+    const picked = new Map<number, ReadonlyArray<PickedSection>>();
+    for (const [questionIndex, sections] of options) {
+      const labels = sections.map(sectionKey);
+      const choice = yield* choiceAnswer(
+        "section",
+        batch.answers,
+        `section_${questionKey(questionIndex)}`,
+        [...labels, noneLabel],
+      );
+      const byKey = new Map(sections.map((section) => [sectionKey(section), section]));
+      picked.set(
+        questionIndex,
+        (select === "coverage"
+          ? coverageSelect(choice.probabilities, labels, retrievalPolicy.maxSections)
+          : topSelect(choice.probabilities, labels, retrievalPolicy.sectionBeamWidth)
+        ).flatMap(({ label, probability }) => {
+          const section = byKey.get(label);
+          return section === undefined ? [] : [{ section, probability }];
+        }),
+      );
+    }
+    return picked;
+  });
+
+  if (withText.length === 0) {
+    return { picked: new Map([...questions.keys()].map((index) => [index, []])), usage: noUsage };
+  }
+
+  if (withText.length <= retrievalPolicy.maxChoiceOptions) {
+    const picked = yield* choose(
+      new Map([...questions.keys()].map((index) => [index, withText])),
+      sectionEntry,
+      "coverage",
+    );
+    return { picked, usage: combineUsages(usages) };
+  }
+
+  // Too many sections for one Choice: pick top-level chapters first, then
+  // choose among the sections inside the best few.
+  const chapters = rfc.sections
+    .filter((section) => section.depth === 1)
+    .slice(0, retrievalPolicy.maxChoiceOptions);
+  const beams = yield* choose(
+    new Map([...questions.keys()].map((index) => [index, chapters])),
+    chapterEntry,
+    "beam",
+  );
+  const inner = new Map(
+    [...beams].map(([questionIndex, beam]) => {
+      const roots = new Set(beam.map(({ section }) => section.index));
+      return [
+        questionIndex,
+        withText
+          .filter((section) => roots.has(topLevelAncestor(rfc.sections, section)))
+          .slice(0, retrievalPolicy.maxChoiceOptions),
+      ] as const;
+    }),
+  );
+  const answerable = new Map([...inner].filter(([, sections]) => sections.length > 0));
+  const picked =
+    answerable.size === 0
+      ? new Map<number, ReadonlyArray<PickedSection>>()
+      : yield* choose(answerable, sectionEntry, "coverage");
+  for (const index of questions.keys()) {
+    if (!picked.has(index)) picked.set(index, []);
+  }
+  return { picked, usage: combineUsages(usages) };
+});
+
+// ---------------------------------------------------------------------------
+// Stage 3: pick paragraphs and judge them
+// ---------------------------------------------------------------------------
+
+const ParagraphInputSchema = Schema.Struct({
+  questions: QuestionsSchema,
+  paragraphs: Schema.Record(Schema.String, Schema.String),
+});
+
+const paragraphKey = (paragraph: RfcParagraph): string => `p${paragraph.index}`;
+
+const verdictCriteria = {
+  supports: "The paragraph states the answer to the question or directly implies it",
+  partial: "The paragraph answers only part of the question",
+  says_nothing: "The paragraph does not address what the question asks, either way",
+  contradicts:
+    "The paragraph states the opposite of what the question presumes or implies it is false",
+} as const satisfies Record<Verdict, string>;
+
+const verdictLabels = Object.keys(verdictCriteria) as ReadonlyArray<Verdict>;
+
+type JudgedPassage = {
+  readonly paragraph: RfcParagraph;
+  readonly probability: number;
+  readonly verdict: Verdict;
+};
+
+type RfcJudgment = {
+  readonly exists: number;
+  readonly passages: ReadonlyArray<JudgedPassage>;
+};
+
+const paragraphScope = (candidates: ReadonlyArray<RfcParagraph>, all: number): string =>
+  candidates.length === all
+    ? "`paragraphs`"
+    : `the paragraphs ${candidates.map((paragraph) => `\`paragraphs.${paragraphKey(paragraph)}\``).join(", ")}`;
+
+const judgeParagraphs = Effect.fnUntraced(function* (
+  rfc: LoadedRfc,
+  questions: ReadonlyMap<number, string>,
+  sections: ReadonlyMap<number, ReadonlyArray<PickedSection>>,
+): Effect.fn.Return<
+  { readonly judged: ReadonlyMap<number, RfcJudgment>; readonly usage: Usage },
+  DecisionModelError,
+  DecisionModel.DecisionModel
+> {
+  // Fill the shared state in section-rank order across questions until the
+  // character budget or the Choice option limit is reached.
+  const included = new Map<number, RfcParagraph>();
+  let characters = 0;
+  const depth = Math.max(0, ...[...sections.values()].map((picked) => picked.length));
+  fill: for (let rank = 0; rank < depth; rank += 1) {
+    for (const picked of sections.values()) {
+      const section = picked[rank]?.section;
+      if (section === undefined) continue;
+      for (const paragraph of rfc.paragraphsBySection.get(section.index) ?? []) {
+        if (included.has(paragraph.index)) continue;
+        if (
+          included.size >= retrievalPolicy.maxChoiceOptions ||
+          characters + paragraph.text.length > retrievalPolicy.paragraphStateCharacters
+        ) {
+          break fill;
+        }
+        included.set(paragraph.index, paragraph);
+        characters += paragraph.text.length;
+      }
+    }
+  }
+
+  const candidates = new Map(
+    [...questions.keys()].map((questionIndex) => {
+      const chosen = new Set(
+        (sections.get(questionIndex) ?? []).map(({ section }) => section.index),
+      );
+      return [
+        questionIndex,
+        [...included.values()]
+          .filter((paragraph) => paragraph.section !== undefined && chosen.has(paragraph.section))
+          .sort((left, right) => left.index - right.index),
+      ] as const;
+    }),
+  );
+  const answerable = [...candidates].filter(([, paragraphs]) => paragraphs.length > 0);
+  if (answerable.length === 0) return { judged: new Map(), usage: noUsage };
+
+  const identifier = rfc.candidate.document.identifier;
+  const decisions = Object.fromEntries(
+    answerable.flatMap(([questionIndex, paragraphs]) => {
+      const question = `\`questions.${questionKey(questionIndex)}\``;
+      const scope = paragraphScope(paragraphs, included.size);
+      return [
+        [
+          `paragraph_${questionKey(questionIndex)}`,
+          Decision.classify({
+            instructions: `Which paragraph of ${identifier} in ${scope} best answers the question ${question}?`,
+            criteria: Object.fromEntries([
+              ...paragraphs.map((paragraph) => [
+                paragraphKey(paragraph),
+                `Paragraph \`paragraphs.${paragraphKey(paragraph)}\` answers the question`,
+              ]),
+              [noneLabel, "No listed paragraph answers the question"],
+            ]),
+          }),
+        ],
+        [
+          `exists_${questionKey(questionIndex)}`,
+          Decision.probability({
+            instructions: `Does any paragraph of ${identifier} in ${scope} state or directly imply the answer to the question ${question}?`,
+            criteria: {
+              true: "At least one of these paragraphs states the answer or directly implies it.",
+              false: "None of these paragraphs states or directly implies the answer.",
+            },
+          }),
+        ],
+        ...paragraphs.map((paragraph) => [
+          `verdict_${questionKey(questionIndex)}_${paragraphKey(paragraph)}`,
+          Decision.classify({
+            instructions: `How does the paragraph \`paragraphs.${paragraphKey(paragraph)}\` relate to the question ${question}?`,
+            criteria: verdictCriteria,
+          }),
+        ]),
+      ];
+    }),
+  );
+  const batch = yield* decide(
+    "paragraph",
+    ParagraphInputSchema,
+    {
+      questions: Object.fromEntries(
+        answerable.map(([questionIndex]) => [
+          questionKey(questionIndex),
+          questions.get(questionIndex) ?? "",
+        ]),
+      ),
+      paragraphs: Object.fromEntries(
+        [...included.values()].map((paragraph) => [paragraphKey(paragraph), paragraph.text]),
+      ),
+    },
+    decisions,
+  );
+
+  const judged = new Map<number, RfcJudgment>();
+  for (const [questionIndex, paragraphs] of answerable) {
+    const key = questionKey(questionIndex);
+    const labels = paragraphs.map(paragraphKey);
+    const choice = yield* choiceAnswer("paragraph", batch.answers, `paragraph_${key}`, [
+      ...labels,
+      noneLabel,
+    ]);
+    const exists = yield* noulAnswer("paragraph", batch.answers, `exists_${key}`);
+    const byKey = new Map(paragraphs.map((paragraph) => [paragraphKey(paragraph), paragraph]));
+    const passages: Array<JudgedPassage> = [];
+    for (const { label, probability } of coverageSelect(
+      choice.probabilities,
+      labels,
+      retrievalPolicy.maxParagraphs,
+    )) {
+      const paragraph = byKey.get(label);
+      if (paragraph === undefined) continue;
+      const verdict = yield* choiceAnswer(
+        "paragraph",
+        batch.answers,
+        `verdict_${key}_${label}`,
+        verdictLabels,
+      );
+      passages.push({ paragraph, probability, verdict: verdict.label as Verdict });
+    }
+    judged.set(questionIndex, { exists, passages });
+  }
+  return { judged, usage: batch.usage };
+});
+
+const verdictPrecedence: ReadonlyArray<Verdict> = [
+  "supports",
+  "partial",
+  "contradicts",
+  "says_nothing",
+];
+
+const hitVerdict = (passages: ReadonlyArray<JudgedPassage>): Verdict =>
+  verdictPrecedence.find((verdict) => passages.some((passage) => passage.verdict === verdict)) ??
+  "says_nothing";
+
+// ---------------------------------------------------------------------------
+// Pipeline
+// ---------------------------------------------------------------------------
+
+/**
+ * Inputs to one research pipeline run.
+ */
+export interface ResearchPipelineOptions {
+  /**
+   * Caller questions, each answered independently.
+   */
+  readonly questions: ReadonlyArray<string>;
+  /**
+   * Deduplicated candidate pool from {@link buildCandidatePool}.
+   */
+  readonly pool: ReadonlyArray<PoolCandidate>;
+  /**
+   * Request-local source loader.
+   */
+  readonly sourceLoader: (
+    document: RfcMetadata,
+  ) => Effect.Effect<
+    RfcSource,
+    RfcSourceCacheError | RfcSourceFetchError | RfcSourceRevalidationError,
+    FileSystem.FileSystem | LiveRfcSource | Path.Path
+  >;
+}
+
+/**
+ * The engine-side output of one research pipeline run.
+ */
+export interface ResearchPipelineResult {
+  /**
+   * One answer per caller question, in order.
+   */
+  readonly answers: ReadonlyArray<ResearchAnswer>;
+  /**
+   * Combined provider usage across every request.
+   */
+  readonly usage: Usage;
+  /**
+   * Distinct RFCs kept by ranking across all questions.
+   */
+  readonly rankedCount: number;
+  /**
+   * Wall-clock stage timings.
+   */
+  readonly timings: {
+    readonly sourceMs: number;
+    readonly rankMs: number;
+    readonly sectionMs: number;
+    readonly paragraphMs: number;
+  };
+}
+
+const elapsed = (start: number, end: number): number => Math.max(0, end - start);
+
+const loadRfc = Effect.fnUntraced(function* (
+  candidate: PoolCandidate,
+  options: ResearchPipelineOptions,
+) {
+  const source = yield* options.sourceLoader(candidate.document);
+  const { sections, paragraphs } = parseRfcStructure(source.text);
+  const paragraphsBySection = new Map<number, Array<RfcParagraph>>();
+  for (const paragraph of paragraphs) {
+    if (paragraph.section === undefined) continue;
+    const list = paragraphsBySection.get(paragraph.section) ?? [];
+    list.push(paragraph);
+    paragraphsBySection.set(paragraph.section, list);
+  }
+  return { candidate, source, sections, paragraphs, paragraphsBySection } satisfies LoadedRfc;
+});
+
+const toPassage = (
+  rfc: LoadedRfc,
+  offsets: ReturnType<typeof makeUtf8OffsetMap>,
+  judged: JudgedPassage,
+): Effect.Effect<Passage, DecisionModelError> => {
+  const startOffset = offsets.byteOffsetAtCodeUnit(judged.paragraph.startOffset);
+  const endOffset = offsets.byteOffsetAtCodeUnit(judged.paragraph.endOffset);
+  if (startOffset === undefined || endOffset === undefined) {
+    return Effect.fail(
+      new DecisionModelError({
+        stage: "paragraph",
+        reason: "A selected paragraph is not on a UTF-8 source boundary",
+      }),
+    );
+  }
+  const section =
+    judged.paragraph.section === undefined ? undefined : rfc.sections[judged.paragraph.section];
+  return Effect.succeed({
+    quote: rfc.source.text.slice(judged.paragraph.startOffset, judged.paragraph.endOffset),
+    section: section?.heading ?? null,
+    probability: judged.probability,
+    verdict: judged.verdict,
+    provenance: {
+      sourceUrl: rfc.source.sourceUrl,
+      sourceHash: rfc.source.contentHash,
+      offsetUnit: utf8OffsetUnit,
+      startOffset,
+      endOffset,
+      fetchedAt: rfc.source.fetchedAt,
+    },
   });
 };
 
-const sourceDiagnostic = (
-  source: RfcSource,
-): Schema.Schema.Type<typeof SourceDiagnosticSchema> => ({
-  identifier: source.identifier,
-  rfcNumber: source.rfcNumber,
-  sourceUrl: source.sourceUrl,
-  sourceHash: source.contentHash,
-  fetchedAt: source.fetchedAt,
-});
+const rfcDocument = (document: RfcMetadata) =>
+  Schema.decodeUnknownSync(RfcDocumentSchema)({
+    identifier: document.identifier,
+    rfcNumber: document.rfcNumber,
+    title: document.title,
+    abstract: document.abstract,
+    status: document.status,
+    stream: document.stream,
+    canonicalUrl: document.canonicalUrl,
+  });
 
-const evidenceFromRelations = (
-  answers: ReadonlyArray<RelationResult["answers"][number]>,
-  sources: ReadonlyMap<string, PassageSource>,
-  policy: ResearchPolicy,
-): ReadonlyArray<EvidencePassage> =>
-  answers
-    .filter((answer) =>
-      acceptedRelation(answer.relation, answer.probabilities, answer.confidence, policy),
-    )
-    .flatMap((answer) => {
-      const context = sources.get(answer.block.id);
-      if (context === undefined) return [];
-      const offsets = makeUtf8OffsetMap(context.source.text);
-      const startOffset = offsets.byteOffsetAtCodeUnit(answer.block.startOffset);
-      const endOffset = offsets.byteOffsetAtCodeUnit(answer.block.endOffset);
-      if (startOffset === undefined || endOffset === undefined) return [];
-      const quote = context.source.text.slice(answer.block.startOffset, answer.block.endOffset);
-      return [
-        {
-          id: answer.block.id,
-          context: context.context,
-          quote,
-          relation: answer.relation,
-          selectionProbability: answer.selectionProbability,
-          relationProbabilities: answer.probabilities,
-          confidence: answer.confidence ?? null,
-          provenance: {
-            identifier: context.document.identifier,
-            rfcNumber: context.document.rfcNumber,
-            context: context.context,
-            relationshipPath: context.relationshipPath,
-            sourceUrl: context.source.sourceUrl,
-            canonicalUrl: context.document.canonicalUrl,
-            sourceHash: context.source.contentHash,
-            offsetUnit: utf8OffsetUnit,
-            startOffset,
-            endOffset,
-            section: answer.block.section,
-            fetchedAt: context.source.fetchedAt,
-          },
-        } satisfies EvidencePassage,
-      ];
-    });
-
-const zeroUsage = (): Schema.Schema.Type<typeof TokenUsageSchema> => ({
-  inputTokens: null,
-  outputTokens: null,
-});
-
-const zeroTimings = (): Schema.Schema.Type<typeof TimingSchema> => ({
-  metadataMs: 0,
-  sourceMs: 0,
-  lexicalMs: 0,
-  selectionMs: 0,
-  relationMs: 0,
-  totalMs: 0,
-  documentMs: undefined,
-});
-
-const emptyCandidates = (): Schema.Schema.Type<typeof CandidateCountsSchema> => ({
-  sourceBlocks: 0,
-  passageCandidates: 0,
-  selectedPassages: 0,
-  discoveredDocuments: 0,
-  documentCandidates: undefined,
-  acceptedDocuments: undefined,
-});
-
-const researchContext = Effect.fnUntraced(function* (
-  question: string,
-  plannedContext: PlannedRfcContext,
+/**
+ * Rank candidate RFCs, pick sections and paragraphs, and return exact
+ * passages for every question.
+ *
+ * @param options Questions, candidate pool, and source loader.
+ * @returns One ranked answer per question with provider usage and timings.
+ */
+export const researchQuestions = Effect.fnUntraced(function* (
   options: ResearchPipelineOptions,
-  policy: ResearchPolicy,
 ): Effect.fn.Return<
-  ContextResearchResult,
+  ResearchPipelineResult,
   RfcSourceCacheError | RfcSourceFetchError | RfcSourceRevalidationError | DecisionModelError,
   FileSystem.FileSystem | LiveRfcSource | DecisionModel.DecisionModel | Path.Path
 > {
-  const sourceStarted = yield* Clock.currentTimeMillis;
-  const source = yield* options.sourceLoader(plannedContext.document);
-  const sourceFinished = yield* Clock.currentTimeMillis;
-  const lexicalStarted = sourceFinished;
-  const blocks = parseSourceBlocks(
-    source.text,
-    policy.sourceBlockMaxCharacters,
-    policy.sourceBlockOverlapCharacters,
-  );
-  const candidates = shortlistPassageCandidates(
-    blocks,
-    question,
-    policy.maxPassageCandidates,
-    policy.maxLengthNormalizedPassageCandidates,
-  );
-  const lexicalFinished = yield* Clock.currentTimeMillis;
-  const selectionStarted = lexicalFinished;
-  const selection = yield* selectionStage(question, candidates, policy, true);
-  const selectionFinished = yield* Clock.currentTimeMillis;
-  if (selection.atomicity === undefined) {
-    return yield* new DecisionModelError({
-      stage: "selection",
-      reason: "Provider response did not include atomicity diagnostics",
-    });
+  const { questions, pool } = options;
+  const rankStarted = yield* Clock.currentTimeMillis;
+  const ranking = yield* rankStage(questions, pool);
+  const rankFinished = yield* Clock.currentTimeMillis;
+
+  const keptByIdentifier = new Map<string, PoolCandidate>();
+  for (const kept of ranking.kept) {
+    for (const { candidate } of kept) {
+      keptByIdentifier.set(candidate.document.identifier, candidate);
+    }
   }
-  const relationStarted = selectionFinished;
-  const relation = yield* relationStage(question, selection.selected, policy);
-  const relationFinished = yield* Clock.currentTimeMillis;
-  const status = statusFromRelations(
-    relation.answers,
-    selection.atomicity,
-    selection.diagnostics,
-    policy,
+
+  const loads = yield* Effect.forEach(
+    [...keptByIdentifier.values()],
+    (candidate) => Effect.result(loadRfc(candidate, options)),
+    { concurrency: "unbounded" },
   );
-  const usage = combineUsage(selection.usage, relation.usage);
-  const timings = {
-    metadataMs: 0,
-    sourceMs: elapsed(sourceStarted, sourceFinished),
-    lexicalMs: elapsed(lexicalStarted, lexicalFinished),
-    selectionMs: elapsed(selectionStarted, selectionFinished),
-    relationMs: elapsed(relationStarted, relationFinished),
-    totalMs: elapsed(sourceStarted, relationFinished),
-    documentMs: undefined,
-  } satisfies Schema.Schema.Type<typeof TimingSchema>;
-  const context: InternalRfcResearchContext = {
-    ...plannedContext,
-    state: "researched",
-  };
-  const offsets = makeUtf8OffsetMap(source.text);
-  const evidence: Array<EvidencePassage> = [];
-  for (const answer of relation.answers.filter((candidate) =>
-    acceptedRelation(candidate.relation, candidate.probabilities, candidate.confidence, policy),
-  )) {
-    const startOffset = offsets.byteOffsetAtCodeUnit(answer.block.startOffset);
-    const endOffset = offsets.byteOffsetAtCodeUnit(answer.block.endOffset);
-    if (startOffset === undefined || endOffset === undefined) {
-      return yield* new DecisionModelError({
-        stage: "relation",
-        reason: "The accepted evidence range is not a UTF-8 source boundary",
+  const sourceFinished = yield* Clock.currentTimeMillis;
+  const loaded = new Map<string, LoadedRfc>();
+  for (const [index, load] of loads.entries()) {
+    const candidate = [...keptByIdentifier.values()][index];
+    if (candidate === undefined) continue;
+    if (Result.isSuccess(load)) {
+      loaded.set(candidate.document.identifier, load.success);
+      continue;
+    }
+    // Only a named RFC's source is required; a successor or topic hit that
+    // cannot be fetched is dropped rather than failing every question.
+    const error = load.failure;
+    const tolerable =
+      candidate.role !== "requested" &&
+      (error instanceof RfcSourceCacheError || error instanceof RfcSourceFetchError);
+    if (!tolerable) return yield* Effect.fail(error);
+  }
+
+  const questionsByRfc = new Map<string, Map<number, string>>();
+  for (const [questionIndex, kept] of ranking.kept.entries()) {
+    for (const { candidate } of kept) {
+      const identifier = candidate.document.identifier;
+      if (!loaded.has(identifier)) continue;
+      const entry = questionsByRfc.get(identifier) ?? new Map<number, string>();
+      entry.set(questionIndex, questions[questionIndex] ?? "");
+      questionsByRfc.set(identifier, entry);
+    }
+  }
+
+  const sectionStarted = yield* Clock.currentTimeMillis;
+  const sectionResults = yield* Effect.forEach(
+    [...questionsByRfc],
+    ([identifier, rfcQuestions]) =>
+      Effect.map(pickSections(loaded.get(identifier) as LoadedRfc, rfcQuestions), (result) => ({
+        identifier,
+        rfcQuestions,
+        ...result,
+      })),
+    { concurrency: "unbounded" },
+  );
+  const sectionFinished = yield* Clock.currentTimeMillis;
+
+  const paragraphResults = yield* Effect.forEach(
+    sectionResults,
+    ({ identifier, rfcQuestions, picked }) =>
+      Effect.map(
+        judgeParagraphs(loaded.get(identifier) as LoadedRfc, rfcQuestions, picked),
+        (result) => ({ identifier, ...result }),
+      ),
+    { concurrency: "unbounded" },
+  );
+  const paragraphFinished = yield* Clock.currentTimeMillis;
+  const judgments = new Map(paragraphResults.map(({ identifier, judged }) => [identifier, judged]));
+
+  const offsetMaps = new Map(
+    [...loaded].map(([identifier, rfc]) => [identifier, makeUtf8OffsetMap(rfc.source.text)]),
+  );
+  const answers: Array<ResearchAnswer> = [];
+  for (const [questionIndex, question] of questions.entries()) {
+    const kept = (ranking.kept[questionIndex] ?? []).filter(({ candidate }) =>
+      loaded.has(candidate.document.identifier),
+    );
+    const hits: Array<ResearchHit> = [];
+    for (const { candidate, relevance } of kept) {
+      const identifier = candidate.document.identifier;
+      const rfc = loaded.get(identifier);
+      const offsets = offsetMaps.get(identifier);
+      const judgment = judgments.get(identifier)?.get(questionIndex);
+      if (rfc === undefined || offsets === undefined || judgment === undefined) continue;
+      if (judgment.exists < retrievalPolicy.existsFloor || judgment.passages.length === 0) continue;
+      const passages: Array<Passage> = [];
+      for (const passage of judgment.passages) {
+        passages.push(yield* toPassage(rfc, offsets, passage));
+      }
+      hits.push({
+        rfc: rfcDocument(candidate.document),
+        role: candidate.role,
+        relevance,
+        verdict: hitVerdict(judgment.passages),
+        passages,
       });
     }
-    const quote = source.text.slice(answer.block.startOffset, answer.block.endOffset);
-    evidence.push({
-      id: answer.block.id,
-      context: plannedContext.role,
-      quote,
-      relation: answer.relation,
-      selectionProbability: answer.selectionProbability,
-      relationProbabilities: answer.probabilities,
-      confidence: answer.confidence ?? null,
-      provenance: {
-        identifier: plannedContext.document.identifier,
-        rfcNumber: plannedContext.document.rfcNumber,
-        context: plannedContext.role,
-        relationshipPath: plannedContext.relationshipPath,
-        sourceUrl: source.sourceUrl,
-        canonicalUrl: plannedContext.document.canonicalUrl,
-        sourceHash: source.contentHash,
-        offsetUnit: utf8OffsetUnit,
-        startOffset,
-        endOffset,
-        section: answer.block.section,
-        fetchedAt: source.fetchedAt,
-      },
-    });
-  }
-  const reviewCandidates =
-    evidence.length === 0
-      ? reviewCandidatesFromSelection(
-          candidates,
-          selection.diagnostics,
-          () => ({
-            document: plannedContext.document,
-            source,
-            context: plannedContext.role,
-            relationshipPath: plannedContext.relationshipPath,
-          }),
-          new Set(evidence.map((passage) => passage.id)),
-          policy.selectionProbabilityThreshold,
-          status === "needs_split" ? splitReviewCandidateLimit : 1,
-        )
-      : [];
-  const diagnostics = {
-    context: plannedContext.role,
-    identifier: plannedContext.document.identifier,
-    relationshipPath: plannedContext.relationshipPath,
-    state: "researched" as const,
-    status,
-    source: sourceDiagnostic(source),
-    usage: {
-      inputTokens: usage.inputTokens ?? null,
-      outputTokens: usage.outputTokens ?? null,
-    },
-    timings,
-    candidates: {
-      sourceBlocks: blocks.length,
-      passageCandidates: candidates.length,
-      selectedPassages: selection.selected.length,
-      discoveredDocuments: 1,
-      documentCandidates: undefined,
-      acceptedDocuments: undefined,
-    },
-    atomicity: {
-      label: selection.atomicity.label,
-      probabilities: selection.atomicity.probabilities,
-      confidence: selection.atomicity.confidence ?? null,
-    },
-    selection: selection.diagnostics,
-    classification: relation.diagnostics,
-  } satisfies Schema.Schema.Type<typeof ContextDiagnosticsSchema>;
-  return { context, source, status, evidence, reviewCandidates, diagnostics, usage, timings };
-});
-
-const unavailableContext = (plannedContext: PlannedRfcContext): UnavailableContextResult => {
-  const context: InternalRfcResearchContext = {
-    ...plannedContext,
-    state: "unavailable",
-  };
-  return {
-    context,
-    diagnostics: {
-      context: plannedContext.role,
-      identifier: plannedContext.document.identifier,
-      relationshipPath: plannedContext.relationshipPath,
-      state: "unavailable",
-      status: null,
-      source: null,
-      usage: zeroUsage(),
-      timings: zeroTimings(),
-      candidates: emptyCandidates(),
-      atomicity: null,
-      selection: [],
-      classification: [],
-    },
-  };
-};
-
-const addNumbers = (left: number, right: number): number => left + right;
-
-const sumUsage = (
-  results: ReadonlyArray<ContextResearchResult>,
-): { readonly inputTokens: number | undefined; readonly outputTokens: number | undefined } =>
-  results.reduce<{
-    readonly inputTokens: number | undefined;
-    readonly outputTokens: number | undefined;
-  }>(
-    (usage, result) => ({
-      inputTokens: addUsage(usage.inputTokens, result.usage.inputTokens),
-      outputTokens: addUsage(usage.outputTokens, result.usage.outputTokens),
-    }),
-    { inputTokens: undefined, outputTokens: undefined },
-  );
-
-const sumTimings = (
-  results: ReadonlyArray<ContextResearchResult>,
-): Schema.Schema.Type<typeof TimingSchema> =>
-  results.reduce(
-    (timings, result) => ({
-      metadataMs: timings.metadataMs,
-      sourceMs: addNumbers(timings.sourceMs, result.timings.sourceMs),
-      lexicalMs: addNumbers(timings.lexicalMs, result.timings.lexicalMs),
-      selectionMs: addNumbers(timings.selectionMs, result.timings.selectionMs),
-      relationMs: addNumbers(timings.relationMs, result.timings.relationMs),
-      totalMs: addNumbers(timings.totalMs, result.timings.totalMs),
-      documentMs: undefined,
-    }),
-    zeroTimings(),
-  );
-
-const compatibilityStatements = (quote: string): ReadonlyArray<string> => {
-  const statements = quote
-    .split(/(?:\r?\n+|(?<=[.!?])\s+)/)
-    .map((statement) => statement.trim())
-    .filter((statement) => statement.length > 0);
-  const normative = statements.filter((statement) =>
-    /\b(?:must|shall|should|may|required|prohibited)\b/i.test(statement),
-  );
-  return normative.length > 0 ? normative : statements;
-};
-
-type CompatibilityStatement = {
-  readonly tokens: ReadonlyArray<string>;
-  readonly tokenSet: ReadonlySet<string>;
-};
-
-const compatibilityTokens = (statement: string): CompatibilityStatement => {
-  const normalized = statement
-    .toLowerCase()
-    .replace(/\brequest\s+for\s+comments\s*:?\s*\d+\b/g, " ")
-    .replace(/\brfc\s*\d+\b/g, " ")
-    .replace(/\b(?:is|are)\s+(?:required|obligated)\s+to\b/g, " must ")
-    .replace(/\b(?:must|shall)\s+not\b/g, " must_not ")
-    .replace(/\b(?:must|shall)\b/g, " must ")
-    .replace(/\bshould\s+not\b/g, " should_not ")
-    .replace(/\bshould\b/g, " should ")
-    .replace(/\bmay\s+not\b/g, " may_not ")
-    .replace(/\bmay\b/g, " may ")
-    .replace(/\b(?:the|a|an|of|to|that|which|is|are|be|as|for)\b/g, " ")
-    .replace(/[^a-z0-9_]+/g, " ");
-  const tokens = normalized.split(/\s+/).filter((token) => token.length > 0);
-  return { tokens, tokenSet: new Set(tokens) };
-};
-
-const tokenOverlap = (left: ReadonlySet<string>, right: ReadonlySet<string>): number => {
-  if (left.size === 0 || right.size === 0) return 0;
-  let intersection = 0;
-  for (const token of left) {
-    if (right.has(token)) intersection += 1;
-  }
-  return intersection / new Set([...left, ...right]).size;
-};
-
-const requirementModal = (tokens: ReadonlySet<string>): string | undefined =>
-  ["must", "must_not", "should", "should_not", "may", "may_not"].find((token) => tokens.has(token));
-
-const hasOpposingRequirement = (left: ReadonlySet<string>, right: ReadonlySet<string>): boolean => {
-  const leftModal = requirementModal(left);
-  const rightModal = requirementModal(right);
-  if (leftModal === undefined || rightModal === undefined || leftModal === rightModal) {
-    return false;
-  }
-  const shared = [...left].filter((token) => !token.endsWith("_not") && right.has(token));
-  return shared.length >= 2;
-};
-
-const sameTokens = (left: ReadonlyArray<string>, right: ReadonlyArray<string>): boolean =>
-  left.length === right.length && left.every((token, index) => token === right[index]);
-
-const compareCurrencyQuotes = (
-  requestedQuote: string,
-  currentQuote: string,
-  threshold: number,
-): RfcCurrencyCompatibility["outcome"] => {
-  const requestedStatements = compatibilityStatements(requestedQuote).map(compatibilityTokens);
-  const currentStatements = compatibilityStatements(currentQuote).map(compatibilityTokens);
-  for (const requestedStatement of requestedStatements) {
-    for (const currentStatement of currentStatements) {
-      const overlap = tokenOverlap(requestedStatement.tokenSet, currentStatement.tokenSet);
-      if (
-        hasOpposingRequirement(requestedStatement.tokenSet, currentStatement.tokenSet) &&
-        overlap >= 0.3
-      ) {
-        return "conflicting";
-      }
-    }
-  }
-  const requestedStatementsMatch = requestedStatements.every((requestedStatement) =>
-    currentStatements.some(
-      (currentStatement) =>
-        sameTokens(requestedStatement.tokens, currentStatement.tokens) &&
-        tokenOverlap(requestedStatement.tokenSet, currentStatement.tokenSet) >= threshold,
-    ),
-  );
-  const currentStatementsMatch = currentStatements.every((currentStatement) =>
-    requestedStatements.some(
-      (requestedStatement) =>
-        sameTokens(requestedStatement.tokens, currentStatement.tokens) &&
-        tokenOverlap(requestedStatement.tokenSet, currentStatement.tokenSet) >= threshold,
-    ),
-  );
-  return requestedStatementsMatch && currentStatementsMatch ? "compatible" : "uncertain";
-};
-
-const currencyCompatibility = (
-  requested: ContextResearchResult,
-  current: ReadonlyArray<ContextResearchResult>,
-  policy: ResearchPolicy,
-): ReadonlyArray<RfcCurrencyCompatibility> => {
-  if (requested.status !== "answered") return [];
-  const requestedEvidence = requested.evidence.filter(
-    (passage) => passage.relation === "direct_answer",
-  );
-  if (requestedEvidence.length === 0) return [];
-
-  return current.flatMap((currentContext) => {
-    if (currentContext.status !== "answered") return [];
-    const currentEvidence = currentContext.evidence.filter(
-      (passage) => passage.relation === "direct_answer",
-    );
-    if (currentEvidence.length === 0) return [];
-    let outcome: RfcCurrencyCompatibility["outcome"] = "compatible";
-    let comparedPairs = 0;
-    for (const requestedPassage of requestedEvidence) {
-      for (const currentPassage of currentEvidence) {
-        comparedPairs += 1;
-        const comparison = compareCurrencyQuotes(
-          requestedPassage.quote,
-          currentPassage.quote,
-          policy.currencyCompatibilityOverlapThreshold,
-        );
-        if (comparison === "conflicting") {
-          outcome = comparison;
-          break;
-        }
-        if (comparison === "uncertain") outcome = comparison;
-      }
-      if (outcome === "conflicting") break;
-    }
-    if (comparedPairs === 0) outcome = "uncertain";
-    return [
-      {
-        requested: requested.context.document.identifier,
-        current: currentContext.context.document.identifier,
-        outcome,
-      },
-    ];
-  });
-};
-
-const combinedCurrencyStatus = (
-  requested: ContextResearchResult,
-  current: ReadonlyArray<ContextResearchResult>,
-  unavailable: ReadonlyArray<UnavailableContextResult>,
-  report: RfcCurrencyReport,
-): ResearchStatus => {
-  const contextResults = [requested, ...current];
-  const statuses = contextResults.map(({ status }) => status);
-  if (statuses.includes("needs_split")) return "needs_split";
-  const unsafeIssues = report.issues.some((issue) =>
-    ["malformed_relationship", "cycle_detected", "traversal_limit"].includes(issue),
-  );
-  const contradictoryContext = contextResults.some(({ diagnostics }) =>
-    diagnostics.classification.some(({ relation }) => relation === "contradictory"),
-  );
-  const compatibilityNeedsReview = report.compatibility.some((comparison) => {
-    if (comparison.outcome === "compatible" || comparison.outcome === "conflicting") {
-      return comparison.outcome === "conflicting";
-    }
-    const requestedContext = contextResults.find(
-      ({ context }) => context.document.identifier === comparison.requested,
-    );
-    const currentContext = contextResults.find(
-      ({ context }) => context.document.identifier === comparison.current,
-    );
-    // If one side has no accepted evidence, an uncertain overlap is a
-    // coverage gap and is represented as partial below. If both sides have
-    // accepted evidence, uncertainty still fails closed.
-    return (
-      (requestedContext?.evidence.length ?? 0) > 0 && (currentContext?.evidence.length ?? 0) > 0
-    );
-  });
-  if (unsafeIssues || contradictoryContext || compatibilityNeedsReview) {
-    return "needs_review";
-  }
-  // An ambiguous requested/current context alongside accepted evidence is a
-  // bounded partial result, not an automatic answer. Preserve review for an
-  // operation with no accepted context at all.
-  const hasAcceptedContext = statuses.some(
-    (status) => status === "answered" || status === "partial",
-  );
-  if (statuses.includes("needs_review") && !hasAcceptedContext) return "needs_review";
-  // No context at all cannot support any outcome. Checked before the aggregate
-  // predicates below, which are vacuously true over an empty set.
-  if (statuses.length === 0) return "needs_review";
-  // An incomplete traversal cannot upgrade a result. Contexts that all found
-  // nothing stay unsupported, and an incomplete traversal with nothing accepted
-  // is a review case rather than a bounded partial answer: knowing a successor
-  // exists without being able to identify it is exactly when reporting support
-  // would overstate the evidence.
-  if (statuses.every((status) => status === "unsupported")) return "unsupported";
-  const incomplete = !report.complete || unavailable.length > 0;
-  if (incomplete) return hasAcceptedContext ? "partial" : "needs_review";
-  if (statuses.every((status) => status === "answered")) return "answered";
-  if (hasAcceptedContext) return "partial";
-  return "needs_review";
-};
-
-const updateCurrencyReport = (
-  report: RfcCurrencyReport,
-  unavailable: ReadonlyArray<UnavailableContextResult>,
-): RfcCurrencyReport => {
-  if (unavailable.length === 0) return report;
-  return {
-    ...report,
-    complete: false,
-    issues: uniqueCurrencyIssues([...report.issues, "missing_current_source"]),
-  };
-};
-
-/**
- * Run the complete known-RFC retrieval and semantic evidence pipeline.
- *
- * @param question Atomic research question.
- * @param hint Exact RFC identifier or number.
- * @param options Request-local metadata, source cache, provider, and timing configuration.
- * @returns A versioned evidence bundle with exact provenance for requested and current contexts.
- */
-export const researchKnownRfc = Effect.fnUntraced(function* (
-  question: string,
-  hint: string,
-  options: ResearchPipelineOptions,
-): Effect.fn.Return<
-  InternalEvidenceBundle,
-  | RfcNotFoundError
-  | RfcSourceCacheError
-  | RfcSourceFetchError
-  | RfcSourceRevalidationError
-  | DecisionModelError
-  | ResearchPolicyError,
-  | FileSystem.FileSystem
-  | LiveRfcSource
-  | DecisionModel.DecisionModel
-  | Path.Path
-  | ResolvedModelName
-  | ResolvedModelNames
-> {
-  const policyPreset = yield* policyFor(options.policyPreset);
-  const policy: ResearchPolicy = {
-    ...policyPreset,
-    automaticAnswerActivation: options.automaticAnswerActivation,
-  };
-  const resolvedModelRef = yield* ResolvedModelName;
-  const resolvedModelsRef = yield* ResolvedModelNames;
-  const requested = resolveKnownRfc(options.documents, hint);
-  const resolution = resolveRfcCurrencyFromDocument(options.documents, requested);
-  const plannedContexts: Array<PlannedRfcContext> = resolution.contexts.map((context) => ({
-    role: context.role,
-    document: context.document,
-    relationshipPath: context.relationshipPath,
-    isCurrent: context.isCurrent,
-  }));
-  const requestedContext = plannedContexts[0];
-  if (requestedContext === undefined) {
-    return yield* new RfcNotFoundError({ rfc: hint });
-  }
-
-  const requestedResult = yield* researchContext(question, requestedContext, options, policy);
-  const currentResults: Array<ContextResearchResult> = [];
-  const unavailableResults: Array<UnavailableContextResult> = [];
-  for (const plannedContext of plannedContexts.slice(1)) {
-    const currentResult = yield* Effect.result(
-      researchContext(question, plannedContext, options, policy),
-    );
-    if (Result.isSuccess(currentResult)) {
-      currentResults.push(currentResult.success);
-      continue;
-    }
-    const currentError = currentResult.failure;
-    if (
-      currentError instanceof RfcSourceCacheError ||
-      currentError instanceof RfcSourceFetchError
-    ) {
-      unavailableResults.push(unavailableContext(plannedContext));
-      continue;
-    }
-    return yield* Effect.fail(currentError);
-  }
-
-  const allResults = [requestedResult, ...currentResults];
-  const compatibility = currencyCompatibility(requestedResult, currentResults, policy);
-  const report = {
-    ...updateCurrencyReport(resolution.report, unavailableResults),
-    compatibility,
-  } satisfies RfcCurrencyReport;
-  const status = combinedCurrencyStatus(
-    requestedResult,
-    currentResults,
-    unavailableResults,
-    report,
-  );
-  const finishedAt = yield* Clock.currentTimeMillis;
-  const usage = sumUsage(allResults);
-  const timings = sumTimings(allResults);
-  const requestedSource = sourceDiagnostic(requestedResult.source);
-  const contexts = [
-    ...allResults.map(({ context }) => context),
-    ...unavailableResults.map(({ context }) => context),
-  ];
-  const contextDiagnostics = [
-    ...allResults.map(({ diagnostics }) => diagnostics),
-    ...unavailableResults.map(({ diagnostics }) => diagnostics),
-  ];
-  const multiContext = plannedContexts.length > 1;
-  const evidence = allResults.flatMap(({ evidence: passages }) =>
-    passages.map((passage) =>
-      multiContext ? { ...passage, id: `${passage.provenance.identifier}:${passage.id}` } : passage,
-    ),
-  );
-  const reviewCandidates = allResults
-    .flatMap(({ reviewCandidates: passages }) =>
-      passages.map((passage) =>
-        multiContext
-          ? { ...passage, id: `${passage.provenance.identifier}:${passage.id}` }
-          : passage,
-      ),
-    )
-    // A compound request is researched once per part, and each part usually
-    // lands in a different passage. Capping the bundle at one candidate forced
-    // the caller to re-retrieve the same source for every follow-up.
-    .slice(0, status === "needs_split" ? splitReviewCandidateLimit : 1);
-  const sourceDiagnostics = allResults.map((result) => ({
-    context: result.context.role,
-    source: sourceDiagnostic(result.source),
-  }));
-  const candidates = allResults.reduce(
-    (counts, result) => ({
-      sourceBlocks: counts.sourceBlocks + result.diagnostics.candidates.sourceBlocks,
-      passageCandidates: counts.passageCandidates + result.diagnostics.candidates.passageCandidates,
-      selectedPassages: counts.selectedPassages + result.diagnostics.candidates.selectedPassages,
-      discoveredDocuments: options.documents.length,
-      documentCandidates: undefined,
-      acceptedDocuments: undefined,
-    }),
-    emptyCandidates(),
-  );
-  const selection = allResults.flatMap((result) =>
-    result.diagnostics.selection.map((candidate) => ({
-      ...candidate,
-      candidateId: multiContext
-        ? `${result.context.document.identifier}:${candidate.candidateId}`
-        : candidate.candidateId,
-    })),
-  );
-  const classification = allResults.flatMap((result) =>
-    result.diagnostics.classification.map((candidate) => ({
-      ...candidate,
-      candidateId: multiContext
-        ? `${result.context.document.identifier}:${candidate.candidateId}`
-        : candidate.candidateId,
-    })),
-  );
-  const requestedDiagnostics = requestedResult.diagnostics;
-  const requestedAtomicity = requestedDiagnostics.atomicity;
-  if (requestedAtomicity === null) {
-    return yield* new DecisionModelError({
-      stage: "selection",
-      reason: "The requested RFC context did not produce atomicity diagnostics",
-    });
-  }
-  const fallbackResolvedModel = yield* Ref.get(resolvedModelRef);
-  const observedResolvedModels = yield* Ref.get(resolvedModelsRef);
-  const resolvedModel = summarizeResolvedModels(fallbackResolvedModel, observedResolvedModels);
-  const resolvedModels =
-    observedResolvedModels.length === 0 ? [fallbackResolvedModel] : observedResolvedModels;
-  const diagnostics = {
-    schemaVersion: 2 as const,
-    policyVersion: policy.policyVersion,
-    requestedModel: options.modelAlias,
-    resolvedModel,
-    resolvedModels,
-    usage: {
-      inputTokens: usage.inputTokens ?? null,
-      outputTokens: usage.outputTokens ?? null,
-    },
-    inputCost: estimateInputTokenCost(usage.inputTokens ?? null, resolvedModels),
-    timings: {
-      ...timings,
-      metadataMs: options.metadataMs,
-      totalMs: elapsed(options.startedAt, finishedAt),
-    },
-    source: requestedSource,
-    sources: sourceDiagnostics,
-    currency: report,
-    candidates,
-    atomicity: requestedAtomicity,
-    documentSelection: undefined,
-    selection,
-    classification,
-    contexts: contextDiagnostics,
-  } satisfies InternalResearchDiagnostics;
-
-  return Schema.decodeUnknownSync(InternalEvidenceBundleSchema)({
-    schemaVersion: 2,
-    kind: "evidence_bundle",
-    status,
-    question,
-    rfc: requested,
-    contexts,
-    currency: report,
-    evidence,
-    reviewCandidates,
-    diagnostics,
-  });
-});
-
-/**
- * Run topic-only RFC discovery, retrieval, and semantic evidence research.
- *
- * @param question Atomic research question without an RFC hint.
- * @param options Request-local discovery candidates, source cache, provider, and timing configuration.
- * @returns A versioned evidence bundle with exact provenance and discovery diagnostics.
- */
-export const researchTopic = Effect.fnUntraced(function* (
-  question: string,
-  options: ResearchPipelineOptions,
-): Effect.fn.Return<
-  InternalEvidenceBundle,
-  | RfcSourceCacheError
-  | RfcSourceFetchError
-  | RfcSourceRevalidationError
-  | DecisionModelError
-  | ResearchPolicyError,
-  | FileSystem.FileSystem
-  | LiveRfcSource
-  | DecisionModel.DecisionModel
-  | Path.Path
-  | ResolvedModelName
-  | ResolvedModelNames
-> {
-  const policyPreset = yield* policyFor(options.policyPreset);
-  const policy: ResearchPolicy = {
-    ...policyPreset,
-    automaticAnswerActivation: options.automaticAnswerActivation,
-  };
-  const resolvedModelRef = yield* ResolvedModelName;
-  const resolvedModelsRef = yield* ResolvedModelNames;
-  const documentPreparationStarted = yield* Clock.currentTimeMillis;
-  const documentCandidates = options.documents.map((document, priority) => ({
-    document,
-    priority,
-  }));
-  const documentPreparationFinished = yield* Clock.currentTimeMillis;
-  const documentStarted = documentPreparationFinished;
-  const documentSelection = yield* documentSelectionStage(question, documentCandidates, policy);
-  const documentFinished = yield* Clock.currentTimeMillis;
-
-  const makeEmptyDiagnostics = (
-    finishedAt: number,
-    resolvedModel: string,
-    resolvedModels: ReadonlyArray<string>,
-  ): InternalResearchDiagnostics => ({
-    schemaVersion: 2,
-    policyVersion: policy.policyVersion,
-    requestedModel: options.modelAlias,
-    resolvedModel,
-    resolvedModels,
-    usage: {
-      inputTokens: documentSelection.usage.inputTokens ?? null,
-      outputTokens: documentSelection.usage.outputTokens ?? null,
-    },
-    inputCost: estimateInputTokenCost(documentSelection.usage.inputTokens ?? null, resolvedModels),
-    timings: {
-      metadataMs: options.metadataMs,
-      sourceMs: 0,
-      lexicalMs: elapsed(documentPreparationStarted, documentPreparationFinished),
-      selectionMs: 0,
-      relationMs: 0,
-      totalMs: elapsed(options.startedAt, finishedAt),
-      documentMs: elapsed(documentStarted, documentFinished),
-    },
-    source: null,
-    sources: [],
-    candidates: {
-      discoveredDocuments: options.documents.length,
-      documentCandidates: documentCandidates.length,
-      acceptedDocuments: 0,
-      sourceBlocks: 0,
-      passageCandidates: 0,
-      selectedPassages: 0,
-    },
-    atomicity: {
-      label: documentSelection.atomicity.label,
-      probabilities: documentSelection.atomicity.probabilities,
-      confidence: documentSelection.atomicity.confidence ?? null,
-    },
-    documentSelection: documentSelection.diagnostics,
-    selection: [],
-    classification: [],
-  });
-
-  if (documentSelection.accepted.length === 0) {
-    const finishedAt = yield* Clock.currentTimeMillis;
-    const fallbackResolvedModel = yield* Ref.get(resolvedModelRef);
-    const observedResolvedModels = yield* Ref.get(resolvedModelsRef);
-    const resolvedModel = summarizeResolvedModels(fallbackResolvedModel, observedResolvedModels);
-    const resolvedModels =
-      observedResolvedModels.length === 0 ? [fallbackResolvedModel] : observedResolvedModels;
-    const diagnostics = makeEmptyDiagnostics(finishedAt, resolvedModel, resolvedModels);
-    // A confidently compound question is reported as such even when no
-    // document was accepted. needs_review tells the caller nothing it can act
-    // on, and the relation path already returns needs_split for this exact
-    // classification.
-    const emptyStatus = isConfidentCompound(documentSelection.atomicity, policy)
-      ? "needs_split"
-      : "needs_review";
-    return Schema.decodeUnknownSync(InternalEvidenceBundleSchema)({
-      schemaVersion: 2,
-      kind: "evidence_bundle",
-      status: emptyStatus,
+    answers.push({
       question,
-      rfc: null,
-      evidence: [],
-      reviewCandidates: [],
-      diagnostics,
+      found: hits.length > 0,
+      searched: kept.map(({ candidate }) => candidate.document.identifier),
+      hits,
     });
   }
 
-  const primaryDocument = documentSelection.accepted[0]?.document;
-  if (primaryDocument === undefined) {
-    return yield* new DecisionModelError({
-      stage: "document",
-      reason: "No accepted document was available for source research",
-    });
-  }
-
-  const sourceStarted = yield* Clock.currentTimeMillis;
-  const sourceContexts: Array<PassageSource> = [];
-  for (const accepted of documentSelection.accepted) {
-    sourceContexts.push({
-      document: accepted.document,
-      source: yield* options.sourceLoader(accepted.document),
-      context: "requested",
-      relationshipPath: [],
-    });
-  }
-  const sourceFinished = yield* Clock.currentTimeMillis;
-  const primarySource = sourceContexts[0];
-  if (primarySource === undefined) {
-    return yield* new DecisionModelError({
-      stage: "document",
-      reason: "No accepted document source was loaded",
-    });
-  }
-  const allBlocks: Array<SourceBlock> = [];
-  const blockSources = new Map<string, PassageSource>();
-  for (const context of sourceContexts) {
-    const blocks = parseSourceBlocks(
-      context.source.text,
-      policy.sourceBlockMaxCharacters,
-      policy.sourceBlockOverlapCharacters,
-    );
-    for (const block of blocks) {
-      const namespacedBlock = {
-        ...block,
-        id: `${context.document.identifier}:${block.id}`,
-      };
-      const decodedBlock = Schema.decodeUnknownSync(SourceBlockSchema)(namespacedBlock);
-      allBlocks.push(decodedBlock);
-      blockSources.set(decodedBlock.id, context);
-    }
-  }
-  const candidates = shortlistPassageCandidates(
-    allBlocks,
-    question,
-    policy.maxPassageCandidates,
-    policy.maxLengthNormalizedPassageCandidates,
-  );
-  const lexicalFinished = yield* Clock.currentTimeMillis;
-  const selectionStarted = lexicalFinished;
-  const selection = yield* selectionStage(
-    question,
-    candidates,
-    policy,
-    false,
-    documentSelection.atomicity,
-  );
-  const selectionFinished = yield* Clock.currentTimeMillis;
-  const relationStarted = selectionFinished;
-  const relation = yield* relationStage(question, selection.selected, policy);
-  const relationFinished = yield* Clock.currentTimeMillis;
-  const finishedAt = yield* Clock.currentTimeMillis;
-  const fallbackResolvedModel = yield* Ref.get(resolvedModelRef);
-  const observedResolvedModels = yield* Ref.get(resolvedModelsRef);
-  const resolvedModel = summarizeResolvedModels(fallbackResolvedModel, observedResolvedModels);
-  const resolvedModels =
-    observedResolvedModels.length === 0 ? [fallbackResolvedModel] : observedResolvedModels;
-  const usage = combineUsages([documentSelection.usage, selection.usage, relation.usage]);
-  const evidence = evidenceFromRelations(relation.answers, blockSources, policy);
-  const status = statusFromRelations(
-    relation.answers,
-    documentSelection.atomicity,
-    selection.diagnostics,
-    policy,
-  );
-  // `statusFromRelations` derives support from the accepted answers, while
-  // `evidenceFromRelations` drops any answer it cannot resolve to an exact
-  // source range. Losing one silently would report support with no quotation
-  // behind it, so the topic path fails closed exactly as the known-RFC path does.
-  const acceptedAnswerCount = relation.answers.filter((answer) =>
-    acceptedRelation(answer.relation, answer.probabilities, answer.confidence, policy),
-  ).length;
-  if (evidence.length !== acceptedAnswerCount) {
-    return yield* new DecisionModelError({
-      stage: "relation",
-      reason: "An accepted passage could not be resolved to its exact source range",
-    });
-  }
-  const reviewCandidates =
-    evidence.length === 0
-      ? reviewCandidatesFromSelection(
-          candidates,
-          selection.diagnostics,
-          (candidateId) => blockSources.get(candidateId),
-          new Set(evidence.map((passage) => passage.id)),
-          policy.selectionProbabilityThreshold,
-          status === "needs_split" ? splitReviewCandidateLimit : 1,
-        )
-      : [];
-  const diagnostics = {
-    schemaVersion: 2 as const,
-    policyVersion: policy.policyVersion,
-    requestedModel: options.modelAlias,
-    resolvedModel,
-    resolvedModels,
-    usage: {
-      inputTokens: usage.inputTokens ?? null,
-      outputTokens: usage.outputTokens ?? null,
-    },
-    inputCost: estimateInputTokenCost(usage.inputTokens ?? null, resolvedModels),
+  return {
+    answers,
+    usage: combineUsages([
+      ranking.usage,
+      ...sectionResults.map(({ usage }) => usage),
+      ...paragraphResults.map(({ usage }) => usage),
+    ]),
+    rankedCount: keptByIdentifier.size,
     timings: {
-      metadataMs: options.metadataMs,
-      sourceMs: elapsed(sourceStarted, sourceFinished),
-      lexicalMs: elapsed(documentPreparationStarted, lexicalFinished),
-      selectionMs: elapsed(selectionStarted, selectionFinished),
-      relationMs: elapsed(relationStarted, relationFinished),
-      totalMs: elapsed(options.startedAt, finishedAt),
-      documentMs: elapsed(documentStarted, documentFinished),
+      rankMs: elapsed(rankStarted, rankFinished),
+      sourceMs: elapsed(rankFinished, sourceFinished),
+      sectionMs: elapsed(sectionStarted, sectionFinished),
+      paragraphMs: elapsed(sectionFinished, paragraphFinished),
     },
-    source: sourceDiagnostic(primarySource.source),
-    sources: sourceContexts.map((context) => sourceDiagnostic(context.source)),
-    candidates: {
-      discoveredDocuments: options.documents.length,
-      documentCandidates: documentCandidates.length,
-      acceptedDocuments: documentSelection.accepted.length,
-      sourceBlocks: allBlocks.length,
-      passageCandidates: candidates.length,
-      selectedPassages: selection.selected.length,
-    },
-    atomicity: {
-      label: documentSelection.atomicity.label,
-      probabilities: documentSelection.atomicity.probabilities,
-      confidence: documentSelection.atomicity.confidence ?? null,
-    },
-    documentSelection: documentSelection.diagnostics,
-    selection: selection.diagnostics,
-    classification: relation.diagnostics,
-  } satisfies InternalResearchDiagnostics;
-
-  return Schema.decodeUnknownSync(InternalEvidenceBundleSchema)({
-    schemaVersion: 2,
-    kind: "evidence_bundle",
-    status,
-    question,
-    rfc: primaryDocument,
-    evidence,
-    reviewCandidates,
-    diagnostics,
-  });
+  };
 });

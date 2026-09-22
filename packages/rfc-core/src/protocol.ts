@@ -1,7 +1,7 @@
 /**
  * The version of the public JSON contracts exposed by the RFC evidence engine.
  */
-export const schemaVersion = 2 as const;
+export const schemaVersion = 3 as const;
 
 /**
  * Maximum number of caller-supplied terms in one topic request.

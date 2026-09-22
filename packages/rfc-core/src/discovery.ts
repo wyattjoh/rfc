@@ -20,7 +20,7 @@ import {
   writeFreshMetadata,
 } from "./metadata-cache";
 import type { RfcMetadata } from "./metadata";
-import { datatrackerTopicSearchTermLimit } from "./protocol";
+import { datatrackerTopicSearchTermLimit, schemaVersion } from "./protocol";
 
 export type { RfcMetadata } from "./metadata";
 export {
@@ -237,7 +237,7 @@ export type RetrievalRequestTrace = Schema.Schema.Type<typeof RetrievalRequestTr
  * bounded upstream attempt count and status sequence independently.
  */
 export const LiveRetrievalTraceSchema = Schema.Struct({
-  schemaVersion: Schema.Literal(2),
+  schemaVersion: Schema.Literal(schemaVersion),
   requestCount: Schema.Natural,
   datatrackerRequestCount: Schema.Natural,
   sourceRequestCount: Schema.Natural,

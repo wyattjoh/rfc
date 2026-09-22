@@ -1,5 +1,5 @@
 import { performance } from "node:perf_hooks";
-import { createRfcClient, evaluationPolicy, pinnedJevModel } from "../src/index";
+import { createRfcClient, datatrackerTopicSearchTermLimit, retrievalPolicy } from "../src/index";
 import { makeDefaultCredentialStore, resolveStoredCredential } from "../../rfc/src/credentials";
 
 const parsePositiveInteger = (value: string | undefined, fallback: number): number => {
@@ -13,7 +13,7 @@ const parseSearchTerms = (value: string | undefined): ReadonlyArray<string> => {
   if (
     !Array.isArray(parsed) ||
     parsed.length < 1 ||
-    parsed.length > evaluationPolicy.retrievalLimits.maxSearchTerms ||
+    parsed.length > datatrackerTopicSearchTermLimit ||
     parsed.some((term) => typeof term !== "string" || term.length === 0)
   ) {
     throw new Error(
@@ -41,34 +41,30 @@ const main = async (): Promise<void> => {
   }
 
   const iterations = parsePositiveInteger(process.env.RFC_TOPIC_BENCHMARK_ITERATIONS, 20);
-  const provisionalTargetMs = evaluationPolicy.maxTopicP95LatencyMilliseconds;
+  const provisionalTargetMs = 3_000;
   const question =
     process.env.RFC_TOPIC_BENCHMARK_QUESTION ?? "What does HTTP require of a client?";
   const searchTerms = parseSearchTerms(process.env.RFC_TOPIC_BENCHMARK_SEARCH_TERMS);
   const typeSafeApiKey = await resolveStoredCredential(makeDefaultCredentialStore());
   const client = await createRfcClient({
     cacheDirectory,
-    modelAlias: pinnedJevModel,
-    policyPreset: evaluationPolicy.policyVersion,
-    automaticAnswerActivation: undefined,
+    modelAlias: retrievalPolicy.pinnedModel,
     typeSafeApiKey,
     typeSafeApiUrl: process.env.TYPESAFE_API_URL,
   });
 
   try {
     const warmup = await client.research({
-      schemaVersion: 2,
-      question,
-      rfc: null,
+      schemaVersion: 3,
+      questions: [question],
       searchTerms,
     });
     const samples = [];
     for (let index = 0; index < iterations; index += 1) {
       const startedAt = performance.now();
       const result = await client.research({
-        schemaVersion: 2,
-        question,
-        rfc: null,
+        schemaVersion: 3,
+        questions: [question],
         searchTerms,
       });
       samples.push({
@@ -81,27 +77,19 @@ const main = async (): Promise<void> => {
     const stageP95Ms = {
       liveDiscovery: p95(samples.map(({ timings }) => timings.metadataMs)),
       sourceCache: p95(samples.map(({ timings }) => timings.sourceMs)),
-      documentSelection: p95(samples.map(({ timings }) => timings.documentMs ?? 0)),
-      lexical: p95(samples.map(({ timings }) => timings.lexicalMs)),
-      passageSelection: p95(samples.map(({ timings }) => timings.selectionMs)),
-      relation: p95(samples.map(({ timings }) => timings.relationMs)),
+      rank: p95(samples.map(({ timings }) => timings.rankMs)),
+      section: p95(samples.map(({ timings }) => timings.sectionMs)),
+      paragraph: p95(samples.map(({ timings }) => timings.paragraphMs)),
       semantic: p95(
-        samples.map(
-          ({ timings }) =>
-            (timings.documentMs ?? 0) +
-            timings.lexicalMs +
-            timings.selectionMs +
-            timings.relationMs,
-        ),
+        samples.map(({ timings }) => timings.rankMs + timings.sectionMs + timings.paragraphMs),
       ),
       reportedTotal: p95(samples.map(({ timings }) => timings.totalMs)),
       measuredTotal: p95(samples.map(({ measuredTotalMs }) => measuredTotalMs)),
     };
     const report = {
-      schemaVersion: 2,
+      schemaVersion: 3,
       kind: "topic_live_discovery_benchmark",
-      policyVersion: evaluationPolicy.policyVersion,
-      calibrationStatus: evaluationPolicy.calibrationStatus,
+      policyVersion: retrievalPolicy.policyVersion,
       iterations,
       searchTerms,
       provisionalTargetMs,

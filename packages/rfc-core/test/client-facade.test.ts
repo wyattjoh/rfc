@@ -2,11 +2,11 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
-import { createRfcCalibrationClient } from "../src/internal-calibration";
+import { createRfcClient } from "../src/index";
 
-test("private calibration exposes only request-local client operations", async () => {
-  const client = await createRfcCalibrationClient({
-    cacheDirectory: await mkdtemp(join(tmpdir(), "rfc-calibration-client-test-")),
+test("the client exposes only request-local operations", async () => {
+  const client = await createRfcClient({
+    cacheDirectory: await mkdtemp(join(tmpdir(), "rfc-client-facade-test-")),
     modelAlias: undefined,
     typeSafeApiKey: undefined,
     typeSafeApiUrl: undefined,

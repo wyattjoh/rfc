@@ -1,2811 +1,891 @@
-import { readFile, writeFile } from "node:fs/promises";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
-import { Duration, Effect, Schema } from "effect";
+import { Duration, Effect } from "effect";
 import * as AiError from "effect/unstable/ai/AiError";
+import type * as Decision from "effect/unstable/ai/Decision";
 import * as DecisionModel from "effect/unstable/ai/DecisionModel";
 import { TestClock } from "effect/testing";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 import {
-  EvidenceBundleSchema,
-  RfcDiscoveryError,
-  RfcSourceFetchError,
-  createRfcClient as createCoreRfcClient,
   DecisionModelError,
+  InvalidInputError,
+  RfcSourceFetchError,
+  buildCandidatePool,
+  createRfcClient,
   hashRfcSource,
-  parseSourceBlocks,
-  shortlistPassageCandidates,
-  type EvidenceBundle,
+  retrievalPolicy,
+  type PoolCandidate,
   type RfcClient,
-  type RfcClientOptions,
   type RfcSourceFetcher,
+  type Verdict,
 } from "../src/index";
-import type * as Decision from "effect/unstable/ai/Decision";
-import { createRfcCalibrationClient } from "../src/internal-calibration";
 import type { RfcMetadata } from "../src/metadata";
+import { researchQuestions } from "../src/research";
+import type { RfcSource } from "../src/source";
 
-type RfcMetadataSource = () => Promise<ReadonlyArray<RfcMetadata>>;
-
-type TestClientOptions = Omit<RfcClientOptions, "automaticAnswerActivation"> & {
-  readonly metadataSource: RfcMetadataSource;
-};
-
-const clients: Array<{ readonly close: () => Promise<void> }> = [];
-
-const makeDatatrackerClient = (documents: ReadonlyArray<RfcMetadata>) =>
-  HttpClient.make((request, url) => {
-    const exactName = url.pathname.match(/\/document\/(rfc\d+)\/$/)?.[1];
-    if (exactName !== undefined) {
-      const document = documents.find(
-        (candidate) => candidate.identifier.toLowerCase() === exactName,
-      );
-      return Effect.succeed(
-        HttpClientResponse.fromWeb(
-          request,
-          document === undefined
-            ? new Response("not found", { status: 404 })
-            : Response.json({
-                name: exactName,
-                rfc_number: document.rfcNumber,
-                title: document.title,
-                abstract: document.abstract,
-                resource_uri: `/api/v1/doc/document/${exactName}/`,
-                stream: `/api/v1/name/streamname/${document.stream}/`,
-                states: [],
-              }),
-        ),
-      );
-    }
-
-    if (url.pathname.endsWith("/relateddocument/")) {
-      const target = url.searchParams.get("target__name")?.toUpperCase();
-      const document = documents.find((candidate) => candidate.identifier === target);
-      const objects = [
-        ...(document?.updatedBy ?? []).map((identifier) => ({
-          source: `/api/v1/doc/document/${identifier.toLowerCase()}/`,
-          target: `/api/v1/doc/document/${target?.toLowerCase()}/`,
-          relationship: "/api/v1/name/docrelationshipname/updates/",
-        })),
-        ...(document?.obsoletedBy ?? []).map((identifier) => ({
-          source: `/api/v1/doc/document/${identifier.toLowerCase()}/`,
-          target: `/api/v1/doc/document/${target?.toLowerCase()}/`,
-          relationship: "/api/v1/name/docrelationshipname/obs/",
-        })),
-      ];
-      return Effect.succeed(
-        HttpClientResponse.fromWeb(
-          request,
-          Response.json({
-            meta: { limit: 64, offset: 0, total_count: objects.length, next: null },
-            objects,
-          }),
-        ),
-      );
-    }
-
-    const rows = [...documents]
-      .sort((left, right) => right.rfcNumber - left.rfcNumber)
-      .slice(0, 20);
-    return Effect.succeed(
-      HttpClientResponse.fromWeb(
-        request,
-        Response.json({
-          meta: {
-            limit: 20,
-            offset: 0,
-            total_count: documents.length,
-            next: documents.length > 20 ? "bounded" : null,
-          },
-          objects: rows.map((document) => ({
-            name: document.identifier.toLowerCase(),
-            rfc_number: document.rfcNumber,
-            title: document.title,
-            abstract: document.abstract,
-            resource_uri: `/api/v1/doc/document/${document.identifier.toLowerCase()}/`,
-            stream: `/api/v1/name/streamname/${document.stream}/`,
-            states: [],
-          })),
-        }),
-      ),
-    );
-  });
-
-const createRfcClient = async (options: TestClientOptions): Promise<RfcClient> => {
-  const { metadataSource, ...clientOptions } = options;
-  const documents = await metadataSource();
-  return createRfcCalibrationClient({
-    ...clientOptions,
-    datatrackerHttpClient: clientOptions.datatrackerHttpClient ?? makeDatatrackerClient(documents),
-  });
-};
-
-type ResearchResult = EvidenceBundle;
-type CurrencyReport = NonNullable<ResearchResult["currency"]>;
-type ContextDiagnostics = NonNullable<ResearchResult["diagnostics"]["contexts"]>;
-type ContextSource = Extract<
-  NonNullable<ResearchResult["diagnostics"]["sources"]>[number],
-  { readonly context: string }
->;
-
-const requireCurrency = (result: ResearchResult): CurrencyReport => {
-  if (result.currency === undefined) throw new Error("Expected currency report");
-  return result.currency;
-};
-
-const requireContextDiagnostics = (result: ResearchResult): ContextDiagnostics => {
-  if (result.diagnostics.contexts === undefined) {
-    throw new Error("Expected context diagnostics");
-  }
-  return result.diagnostics.contexts;
-};
-
-const requireContextSources = (result: ResearchResult): ReadonlyArray<ContextSource> => {
-  const sources = result.diagnostics.sources;
-  if (sources === undefined || !sources.every((source) => "context" in source)) {
-    throw new Error("Expected context source diagnostics");
-  }
-  return sources as ReadonlyArray<ContextSource>;
-};
-
-const makeCacheDirectory = async () => mkdtemp(join(tmpdir(), "rfc-core-research-test-"));
-
-const rfcDocument = {
-  identifier: "RFC9110",
-  rfcNumber: 9110,
-  title: "HTTP Semantics",
-  abstract: "HTTP semantics.",
-  status: "published",
-  stream: "ietf",
-  canonicalUrl: "https://datatracker.ietf.org/doc/rfc9110/",
-  updates: [],
-  updatedBy: [],
-  obsoletes: [],
-  obsoletedBy: [],
-};
-
-const sourceText = [
-  "Network Working Group",
-  "Request for Comments: 9110",
-  "",
-  "1. Requirements",
-  "",
-  "The client MUST send a request containing the target resource.",
-  "",
-  "2. Background",
-  "",
-  "This section gives background context.",
-  "",
-].join("\n");
-
-// One section per part of `compoundQuestion`, so the passage shortlist ranks
-// several distinct canonical passages rather than one.
-const compoundSourceText = [
-  "Network Working Group",
-  "Request for Comments: 9110",
-  "",
-  "1. Client Requests",
-  "",
-  "The client MUST send a Host header field in every request.",
-  "",
-  "2. Server Responses",
-  "",
-  "The server MUST send a Date header field in every response.",
-  "",
-  "3. Connection Close",
-  "",
-  "The connection closes when either peer sends a Connection header field.",
-  "",
-  "4. Error Codes",
-  "",
-  "The server MUST send error code 400 when a request header field is malformed.",
-  "",
-].join("\n");
-
-const compoundQuestion =
-  "What header field must the client send, what header field must the server return, when does the connection close, and what error code applies to a malformed header field?";
-
-type TopicDecisionCall = {
-  readonly definition: {
-    readonly decisions: Readonly<Record<string, Decision.Any>>;
-  };
-  readonly input: {
-    readonly question: string;
-    readonly documents?: Readonly<
-      Record<
-        string,
-        { readonly identifier: string; readonly title: string; readonly abstract: string }
-      >
-    >;
-    readonly passages?: Readonly<
-      Record<
-        string,
-        { readonly id: string; readonly section: string | null; readonly text: string }
-      >
-    >;
-  };
-};
-
-type InspectableDecision = {
-  readonly instructions: string;
-  readonly criteria: Readonly<Record<string, string>>;
-};
-
-const makeRfcMetadata = (
-  number: number,
-  relationships: Readonly<Record<string, ReadonlyArray<string> | undefined>> = {},
-) => ({
-  ...rfcDocument,
-  identifier: `RFC${number}`,
-  rfcNumber: number,
-  canonicalUrl: `https://datatracker.ietf.org/doc/rfc${number}/`,
-  updates: relationships.updates ?? [],
-  updatedBy: relationships.updatedBy ?? [],
-  obsoletes: relationships.obsoletes ?? [],
-  obsoletedBy: relationships.obsoletedBy ?? [],
-});
-
-const makeSourceMapFetcher =
-  (sources: Readonly<Record<string, string>>, fetched: Array<string>): RfcSourceFetcher =>
-  async (document) => {
-    fetched.push(document.identifier);
-    const text = sources[document.identifier];
-    if (text === undefined) throw new Error(`Missing source for ${document.identifier}`);
-    return {
-      sourceUrl: `https://www.rfc-editor.org/rfc/rfc${document.rfcNumber}.txt`,
-      text,
-    };
-  };
-
-const makeDecisionModel = (
-  calls: Array<unknown>,
-  atomicity: "atomic" | "compound" = "atomic",
-  relation:
-    | "direct_answer"
-    | "partial_answer"
-    | "background_only"
-    | "contradictory"
-    | "irrelevant" = "direct_answer",
-  relationProbability = 0.9,
-  relationConfidence = 0.95,
-  selectionProbability = 0.95,
-  relationForCall:
-    | ((
-        call: number,
-      ) => "direct_answer" | "partial_answer" | "background_only" | "contradictory" | "irrelevant")
-    | undefined = undefined,
-): DecisionModel.DecisionModel => {
-  const model = {
-    [DecisionModel.TypeId]: DecisionModel.TypeId,
-    decide: (definition: { readonly decisions: Readonly<Record<string, Decision.Any>> }) => {
-      calls.push(definition);
-      const currentRelation = relationForCall?.(calls.length) ?? relation;
-      const answers = Object.fromEntries(
-        Object.entries(definition.decisions).map(([key, decision]) =>
-          decision._tag === "Probability"
-            ? [key, { probability: selectionProbability }]
-            : "atomic" in decision.criteria
-              ? [
-                  key,
-                  {
-                    label: atomicity,
-                    probabilities:
-                      atomicity === "atomic"
-                        ? { atomic: 0.95, compound: 0.05 }
-                        : { atomic: 0.05, compound: 0.95 },
-                    confidence: 0.95,
-                  },
-                ]
-              : [
-                  key,
-                  {
-                    label: currentRelation,
-                    probabilities: {
-                      direct_answer:
-                        currentRelation === "direct_answer"
-                          ? relationProbability
-                          : (1 - relationProbability) / 4,
-                      partial_answer:
-                        currentRelation === "partial_answer"
-                          ? relationProbability
-                          : (1 - relationProbability) / 4,
-                      background_only:
-                        currentRelation === "background_only"
-                          ? relationProbability
-                          : (1 - relationProbability) / 4,
-                      contradictory:
-                        currentRelation === "contradictory"
-                          ? relationProbability
-                          : (1 - relationProbability) / 4,
-                      irrelevant:
-                        currentRelation === "irrelevant"
-                          ? relationProbability
-                          : (1 - relationProbability) / 4,
-                    },
-                    confidence: relationConfidence,
-                  },
-                ],
-        ),
-      );
-      return Effect.succeed({
-        answers,
-        usage: { inputTokens: 12, outputTokens: 8 },
-      });
-    },
-  } as unknown as DecisionModel.DecisionModel;
-  return model;
-};
-
-const makeMixedRelationDecisionModel = (): DecisionModel.DecisionModel => {
-  const model = {
-    [DecisionModel.TypeId]: DecisionModel.TypeId,
-    decide: (definition: { readonly decisions: Readonly<Record<string, Decision.Any>> }) => {
-      const answers = Object.fromEntries(
-        Object.entries(definition.decisions).map(([key, decision], index) => {
-          if (decision._tag === "Probability") return [key, { probability: 0.95 }];
-          if ("atomic" in decision.criteria) {
-            return [
-              key,
-              {
-                label: "atomic",
-                probabilities: { atomic: 0.95, compound: 0.05 },
-                confidence: 0.95,
-              },
-            ];
-          }
-          if (index === 0) {
-            return [
-              key,
-              {
-                label: "direct_answer",
-                probabilities: {
-                  direct_answer: 0.9,
-                  partial_answer: 0.05,
-                  background_only: 0.03,
-                  contradictory: 0.01,
-                  irrelevant: 0.01,
-                },
-                confidence: 0.95,
-              },
-            ];
-          }
-          return [
-            key,
-            {
-              label: "partial_answer",
-              probabilities: {
-                direct_answer: 0.2,
-                partial_answer: 0.4,
-                background_only: 0.2,
-                contradictory: 0.1,
-                irrelevant: 0.1,
-              },
-              confidence: 0.4,
-            },
-          ];
-        }),
-      );
-      return Effect.succeed({
-        answers,
-        usage: { inputTokens: 12, outputTokens: 8 },
-      });
-    },
-  } as unknown as DecisionModel.DecisionModel;
-  return model;
-};
-
-const makeUncertainRequestedDecisionModel = (): DecisionModel.DecisionModel => {
-  let relationRequests = 0;
-  const model = {
-    [DecisionModel.TypeId]: DecisionModel.TypeId,
-    decide: (definition: { readonly decisions: Readonly<Record<string, Decision.Any>> }) => {
-      const hasAtomicity = Object.values(definition.decisions).some(
-        (decision) => decision._tag !== "Probability" && "atomic" in decision.criteria,
-      );
-      if (!hasAtomicity) relationRequests += 1;
-      const uncertain = relationRequests === 1;
-      const answers = Object.fromEntries(
-        Object.entries(definition.decisions).map(([key, decision]) => {
-          if (decision._tag === "Probability") return [key, { probability: 0.95 }];
-          if ("atomic" in decision.criteria) {
-            return [
-              key,
-              {
-                label: "atomic",
-                probabilities: { atomic: 0.95, compound: 0.05 },
-                confidence: 0.95,
-              },
-            ];
-          }
-          return [
-            key,
-            {
-              label: "direct_answer",
-              probabilities: uncertain
-                ? {
-                    direct_answer: 0.6,
-                    partial_answer: 0.2,
-                    background_only: 0.1,
-                    contradictory: 0.05,
-                    irrelevant: 0.05,
-                  }
-                : {
-                    direct_answer: 0.9,
-                    partial_answer: 0.05,
-                    background_only: 0.03,
-                    contradictory: 0.01,
-                    irrelevant: 0.01,
-                  },
-              confidence: uncertain ? 0.6 : 0.95,
-            },
-          ];
-        }),
-      );
-      return Effect.succeed({
-        answers,
-        usage: { inputTokens: 12, outputTokens: 8 },
-      });
-    },
-  } as unknown as DecisionModel.DecisionModel;
-  return model;
-};
-
-const makeSourceFetcher =
-  (text: string): RfcSourceFetcher =>
-  async () => ({
-    sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
-    text,
-  });
-
-const makeCurrentRfcDatatrackerClient = (): HttpClient.HttpClient =>
-  HttpClient.make((request, url) =>
-    Effect.succeed(
-      HttpClientResponse.fromWeb(
-        request,
-        url.pathname.endsWith("/relateddocument/")
-          ? Response.json({
-              meta: { limit: 64, offset: 0, total_count: 0, next: null },
-              objects: [],
-            })
-          : Response.json({
-              name: "rfc9110",
-              rfc_number: 9110,
-              title: "HTTP Semantics",
-              abstract: "HTTP semantics.",
-              resource_uri: "/api/v1/doc/document/rfc9110/",
-              stream: "/api/v1/name/streamname/ietf/",
-              states: [],
-            }),
-      ),
-    ),
-  );
-
-const makeTypeSafeHttpClient = (models: ReadonlyArray<string> = ["jev-1.13.0"]) => {
-  let calls = 0;
-  const client = HttpClient.make((request) => {
-    calls += 1;
-    const answers = Object.fromEntries([
-      [
-        "question_atomicity",
-        {
-          type: "choice",
-          choice: "atomic",
-          probabilities: { atomic: 0.99, compound: 0.01 },
-          confidence: 0.99,
-        },
-      ],
-      ...Array.from({ length: 8 }, (_, index) => [
-        `passage_${index}`,
-        (calls - 1) % 2 === 0
-          ? { type: "noul", noul: 0.99 }
-          : {
-              type: "choice",
-              choice: "direct_answer",
-              probabilities: {
-                direct_answer: 0.99,
-                partial_answer: 0.005,
-                background_only: 0.001,
-                contradictory: 0.001,
-                irrelevant: 0.003,
-              },
-              confidence: 0.99,
-            },
-      ]),
-    ]);
-    return Effect.succeed(
-      HttpClientResponse.fromWeb(
-        request,
-        new Response(
-          JSON.stringify({
-            model: models[Math.min(Math.floor((calls - 1) / 2), models.length - 1)] ?? "jev-1.13.0",
-            answers,
-            usage: { input_tokens: 10, output_tokens: 6 },
-          }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        ),
-      ),
-    );
-  });
-  return { client, calls: () => calls };
-};
+const clients: Array<RfcClient> = [];
 
 afterEach(async () => {
   await Promise.all(clients.splice(0).map((client) => client.close()));
 });
 
-describe("known RFC research", () => {
-  test("requires explicit activation before returning answered", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    // This deliberately uses the ordinary public constructor, not the private
-    // calibration-only constructor used by the fixture helper below.
-    const client = await createCoreRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      policyPreset: "precision-v2",
-      automaticAnswerActivation: undefined,
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      datatrackerHttpClient: makeCurrentRfcDatatrackerClient(),
-      rfcSourceFetcher: makeSourceFetcher(sourceText),
-      decisionModel: makeDecisionModel([]),
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
+const makeRfc = (
+  number: number,
+  overrides: Partial<Pick<RfcMetadata, "title" | "abstract" | "updatedBy" | "obsoletedBy">> = {},
+): RfcMetadata => ({
+  identifier: `RFC${number}`,
+  rfcNumber: number,
+  title: overrides.title ?? `Protocol ${number}`,
+  abstract: overrides.abstract ?? `Abstract of RFC ${number}.`,
+  status: "published",
+  stream: "ietf",
+  canonicalUrl: `https://datatracker.ietf.org/doc/rfc${number}/`,
+  updates: [],
+  updatedBy: overrides.updatedBy ?? [],
+  obsoletes: [],
+  obsoletedBy: overrides.obsoletedBy ?? [],
+});
 
-    const result = await client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-      searchTerms: undefined,
-    });
+type SectionSpec = { readonly heading: string; readonly paragraphs: ReadonlyArray<string> };
 
-    expect(result.status).toBe("needs_review");
-  });
+const rfcText = (number: number, sections: ReadonlyArray<SectionSpec>): string =>
+  [
+    "Internet Engineering Task Force (IETF)                         E. Author",
+    `Request for Comments: ${number}                                    March 2024`,
+    "",
+    ...sections.flatMap(({ heading, paragraphs }) => [
+      heading,
+      "",
+      ...paragraphs.flatMap((paragraph) => [`   ${paragraph}`, ""]),
+    ]),
+  ].join("\n");
 
-  test("rejects a forged activation object even when its shape resembles the capability", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const client = await createCoreRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      policyPreset: "precision-v2",
-      automaticAnswerActivation: {} as RfcClientOptions["automaticAnswerActivation"],
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      datatrackerHttpClient: makeCurrentRfcDatatrackerClient(),
-      rfcSourceFetcher: makeSourceFetcher(sourceText),
-      decisionModel: makeDecisionModel([]),
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
+const defaultText = (number: number): string =>
+  rfcText(number, [
+    { heading: "1.  Introduction", paragraphs: [`RFC ${number} introduces a protocol.`] },
+    {
+      heading: "2.  Requirements",
+      paragraphs: ["The client MUST send a request.", "The server MUST send a response."],
+    },
+  ]);
 
-    const result = await client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-      searchTerms: undefined,
-    });
+const makeSource = (document: RfcMetadata, text: string): RfcSource => ({
+  identifier: document.identifier,
+  rfcNumber: document.rfcNumber,
+  sourceUrl: `https://www.rfc-editor.org/rfc/rfc${document.rfcNumber}.txt`,
+  text,
+  contentHash: hashRfcSource(text),
+  fetchedAt: "2026-01-01T00:00:00.000Z",
+});
 
-    expect(result.status).toBe("needs_review");
-  });
+type Route = {
+  readonly relevance?: (question: string, identifier: string) => number;
+  readonly section?: (question: string, heading: string) => number;
+  readonly paragraph?: (question: string, text: string) => number;
+  readonly exists?: (question: string) => number;
+  readonly verdict?: (question: string, text: string) => Verdict;
+};
 
-  test("accepts passages when the atomicity probability is decisive but self-reported confidence is not", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    // Atomicity is a binary judgment, so the label probability already states
-    // how sure the provider is. ANDing a second self-reported confidence with
-    // the same threshold discarded well-classified questions: a 0.8 atomic
-    // judgment carrying 0.5 confidence selected no passage at all.
-    const base = makeDecisionModel([]);
-    const model = {
-      [DecisionModel.TypeId]: DecisionModel.TypeId,
-      decide: (...args: Parameters<typeof base.decide>) =>
-        Effect.map(base.decide(...args), (response) => {
-          const answers = (response as { readonly answers: Record<string, unknown> }).answers;
-          if (!("question_atomicity" in answers)) return response;
-          return {
-            ...response,
-            answers: {
-              ...answers,
-              question_atomicity: {
-                label: "atomic",
-                probabilities: { atomic: 0.8, compound: 0.2 },
-                confidence: 0.5,
+type RecordedCall = {
+  readonly decisions: Readonly<Record<string, Decision.Any>>;
+  readonly input: {
+    readonly questions: Readonly<Record<string, string>>;
+    readonly candidates?: Readonly<Record<string, { readonly identifier: string }>>;
+    readonly toc?: Readonly<Record<string, { readonly heading: string; readonly preview: string }>>;
+    readonly paragraphs?: Readonly<Record<string, string>>;
+  };
+};
+
+const distribution = (
+  labels: ReadonlyArray<string>,
+  weight: (label: string) => number,
+): { readonly label: string; readonly probabilities: Record<string, number> } => {
+  const weights = labels.map((label) => (label === "none" ? 0 : Math.max(0, weight(label))));
+  const total = weights.reduce((sum, value) => sum + value, 0);
+  const probabilities = Object.fromEntries(
+    labels.map((label, index) => [
+      label,
+      total === 0 ? (label === "none" ? 1 : 0) : (weights[index] ?? 0) / total,
+    ]),
+  );
+  const label = labels.reduce((best, candidate) =>
+    (probabilities[candidate] ?? 0) > (probabilities[best] ?? 0) ? candidate : best,
+  );
+  return { label, probabilities };
+};
+
+const decisionKeyPattern =
+  /^(rank|relevant|section|paragraph|exists|verdict)_(q\d+)(?:_([cp]\d+))?$/;
+
+/**
+ * A DecisionModel stub that answers each decision from its key and the shared
+ * state, so tests describe behavior by question text, RFC, heading, or paragraph.
+ */
+const makeRoutingModel = (route: Route = {}, calls: Array<RecordedCall> = []) =>
+  ({
+    [DecisionModel.TypeId]: DecisionModel.TypeId,
+    decide: (
+      definition: { readonly decisions: Readonly<Record<string, Decision.Any>> },
+      options: { readonly input: RecordedCall["input"] },
+    ) => {
+      const input = options.input;
+      calls.push({ decisions: definition.decisions, input });
+      const answers = Object.fromEntries(
+        Object.entries(definition.decisions).map(([key, decision]) => {
+          const [, kind, questionId = "", target] = decisionKeyPattern.exec(key) ?? [];
+          const question = input.questions[questionId] ?? "";
+          const relevance = (label: string) =>
+            (route.relevance ?? (() => 0.9))(question, input.candidates?.[label]?.identifier ?? "");
+          if (decision._tag === "Probability") {
+            return [
+              key,
+              {
+                probability:
+                  kind === "exists"
+                    ? (route.exists ?? (() => 0.9))(question)
+                    : relevance(target ?? ""),
               },
-            },
-          };
+            ];
+          }
+          const labels = Object.keys(decision.criteria);
+          if (kind === "verdict") {
+            const verdict = (route.verdict ?? (() => "supports" as const))(
+              question,
+              input.paragraphs?.[target ?? ""] ?? "",
+            );
+            return [
+              key,
+              {
+                label: verdict,
+                probabilities: Object.fromEntries(
+                  labels.map((label) => [label, label === verdict ? 1 : 0]),
+                ),
+                confidence: 1,
+              },
+            ];
+          }
+          const weight =
+            kind === "rank"
+              ? relevance
+              : kind === "section"
+                ? (label: string) =>
+                    (route.section ?? (() => 1))(question, input.toc?.[label]?.heading ?? "")
+                : (label: string) =>
+                    (route.paragraph ?? (() => 1))(question, input.paragraphs?.[label] ?? "");
+          return [key, { ...distribution(labels, weight), confidence: 0.9 }];
         }),
-    } as unknown as DecisionModel.DecisionModel;
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [rfcDocument],
-      rfcSourceFetcher: makeSourceFetcher(sourceText),
-      decisionModel: model,
-      policyPreset: "precision-v2",
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
+      );
+      return Effect.succeed({ answers, usage: { inputTokens: 10, outputTokens: 2 } });
+    },
+  }) as unknown as DecisionModel.DecisionModel;
 
-    const result = await client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-    });
+const candidate = (
+  document: RfcMetadata,
+  role: PoolCandidate["role"] = "discovered",
+  family: string | undefined = undefined,
+): PoolCandidate => ({ document, role, family });
 
-    expect(result.diagnostics.candidates?.selectedPassages ?? 0).toBeGreaterThan(0);
-    expect(result.evidence.length).toBeGreaterThan(0);
-  });
+const runPipeline = (
+  questions: ReadonlyArray<string>,
+  pool: ReadonlyArray<PoolCandidate>,
+  model: DecisionModel.DecisionModel,
+  texts: Readonly<Record<string, string>> = {},
+  failing: ReadonlySet<string> = new Set(),
+) =>
+  Effect.runPromise(
+    researchQuestions({
+      questions,
+      pool,
+      sourceLoader: (document) =>
+        failing.has(document.identifier)
+          ? Effect.fail(
+              new RfcSourceFetchError({
+                stage: "request",
+                url: "https://www.rfc-editor.org/",
+                reason: "unavailable",
+                status: 503,
+              }),
+            )
+          : Effect.succeed(
+              makeSource(document, texts[document.identifier] ?? defaultText(document.rfcNumber)),
+            ),
+    }).pipe(Effect.provideService(DecisionModel.DecisionModel, model)) as Effect.Effect<
+      Effect.Success<ReturnType<typeof researchQuestions>>,
+      Effect.Error<ReturnType<typeof researchQuestions>>
+    >,
+  );
 
-  test("retrieves request-local metadata, caches source text, and runs two semantic stages", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const calls: Array<unknown> = [];
-    let sourceFetches = 0;
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [rfcDocument],
-      rfcSourceFetcher: async (document) => {
-        sourceFetches += 1;
-        expect(document.identifier).toBe("RFC9110");
-        return makeSourceFetcher(sourceText)(document);
-      },
-      decisionModel: makeDecisionModel(calls),
-      policyPreset: "precision-v2",
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    const result = await client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-    });
-
-    expect(result.status).toBe("answered");
-    expect(result.rfc?.identifier).toBe("RFC9110");
-    expect(requireCurrency(result)).toEqual({
-      requested: "RFC9110",
-      current: ["RFC9110"],
-      paths: [{ identifier: "RFC9110", path: [] }],
-      complete: true,
-      issues: [],
-      unresolved: [],
-      compatibility: [],
-    });
-    expect(result.contexts).toMatchObject([
-      {
-        role: "requested",
-        document: { identifier: "RFC9110" },
-        relationshipPath: [],
-        isCurrent: true,
-        state: "researched",
-      },
-    ]);
-    expect(result.evidence).toHaveLength(1);
-    const evidence = result.evidence[0];
-    expect(evidence).toBeDefined();
-    if (evidence === undefined) throw new Error("Expected evidence");
-    expect(sourceText.slice(evidence.provenance.startOffset, evidence.provenance.endOffset)).toBe(
-      evidence.quote,
-    );
-    expect(evidence.provenance.sourceHash).toBe(hashRfcSource(sourceText));
-    expect(evidence.context).toBe("requested");
-    expect(evidence.provenance.context).toBe("requested");
-    expect(evidence.provenance.relationshipPath).toEqual([]);
-    expect(evidence.provenance.section).toBe("1. Requirements");
-    expect(result.diagnostics).toMatchObject({
-      schemaVersion: 2,
-      policyVersion: "precision-v2",
-      requestedModel: "jev-test",
-      resolvedModel: "jev-test",
-      usage: { inputTokens: 24, outputTokens: 16 },
-      atomicity: { label: "atomic", confidence: 0.95 },
-      candidates: { selectedPassages: 1 },
-    });
-    expect(calls).toHaveLength(2);
-    expect(sourceFetches).toBe(1);
-    expect(Schema.decodeUnknownSync(EvidenceBundleSchema)(result)).toEqual(result);
-
-    await client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "9110",
-    });
-    expect(sourceFetches).toBe(1);
-    expect(calls).toHaveLength(4);
-  });
-
-  test("does not let an uncertain distractor suppress an activated direct answer", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const source = [
-      "1. Direct answer",
-      "",
-      "The client MUST send a request containing the target resource.",
-      "",
-      "2. Additional context",
-      "",
-      "The client sends the request to the server after selecting a target resource.",
-    ].join("\n");
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [rfcDocument],
-      rfcSourceFetcher: makeSourceFetcher(source),
-      decisionModel: makeMixedRelationDecisionModel(),
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    const result = await client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-    });
-
-    expect(result.status).toBe("answered");
-    expect(result.evidence).toHaveLength(1);
-    expect(result.evidence[0]?.relation).toBe("direct_answer");
-  });
-
-  test("composes uncertain requested evidence with accepted current evidence as partial", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const requested = makeRfcMetadata(9110, { updatedBy: ["RFC9111"] });
-    const current = makeRfcMetadata(9111, { updates: ["RFC9110"] });
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [requested, current],
-      rfcSourceFetcher: makeSourceMapFetcher({ RFC9110: sourceText, RFC9111: sourceText }, []),
-      decisionModel: makeUncertainRequestedDecisionModel(),
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    const result = await client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-    });
-
-    expect(result.status).toBe("partial");
-    expect(result.currency?.current).toEqual(["RFC9111"]);
-  });
-
-  test("researches the requested RFC and terminal current context across an update chain", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const fetched: Array<string> = [];
-    const requested = makeRfcMetadata(9110, { updatedBy: ["RFC9111"] });
-    const intermediate = makeRfcMetadata(9111, {
-      updates: ["RFC9110"],
-      updatedBy: ["RFC9112"],
-    });
-    const current = makeRfcMetadata(9112, { updates: ["RFC9111"] });
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [requested, intermediate, current],
-      rfcSourceFetcher: makeSourceMapFetcher(
-        {
-          RFC9110: sourceText,
-          RFC9112: sourceText.replaceAll("9110", "9112"),
-        },
-        fetched,
-      ),
-      decisionModel: makeDecisionModel([]),
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    const result = await client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-    });
-
-    expect(result.status).toBe("answered");
-    expect(fetched).toEqual(["RFC9110", "RFC9112"]);
-    expect(requireCurrency(result)).toEqual({
-      requested: "RFC9110",
-      current: ["RFC9112"],
-      paths: [
-        { identifier: "RFC9110", path: [] },
-        {
-          identifier: "RFC9112",
-          path: [
-            { from: "RFC9110", to: "RFC9111", relationship: "updates" },
-            { from: "RFC9111", to: "RFC9112", relationship: "updates" },
-          ],
-        },
+describe("buildCandidatePool", () => {
+  test("orders named RFCs, then current successors, then topic hits without duplicates", () => {
+    const rfc7231 = makeRfc(7231, { obsoletedBy: ["RFC9110"] });
+    const rfc9110 = makeRfc(9110);
+    const rfc6585 = makeRfc(6585);
+    const { pool, currency } = buildCandidatePool(
+      [
+        { document: rfc7231, documents: [rfc7231, rfc9110] },
+        { document: rfc6585, documents: [rfc6585] },
       ],
-      complete: true,
-      issues: [],
-      unresolved: [],
-      compatibility: [{ requested: "RFC9110", current: "RFC9112", outcome: "compatible" }],
-    });
-    expect(result.evidence.map((passage) => passage.context)).toEqual(["requested", "current"]);
-    expect(requireContextSources(result).map(({ context }) => context)).toEqual([
-      "requested",
-      "current",
+      [rfc9110, makeRfc(8297), rfc6585],
+    );
+    expect(pool.map(({ document, role, family }) => [document.identifier, role, family])).toEqual([
+      ["RFC7231", "requested", "RFC7231"],
+      ["RFC6585", "requested", "RFC6585"],
+      ["RFC9110", "current", "RFC7231"],
+      ["RFC8297", "discovered", undefined],
     ]);
+    expect(currency).toEqual([
+      {
+        requested: "RFC7231",
+        current: ["RFC9110"],
+        paths: [
+          { identifier: "RFC7231", path: [] },
+          {
+            identifier: "RFC9110",
+            path: [{ from: "RFC7231", to: "RFC9110", relationship: "obsoletes" }],
+          },
+        ],
+      },
+      { requested: "RFC6585", current: ["RFC6585"], paths: [{ identifier: "RFC6585", path: [] }] },
+    ]);
+  });
+
+  test("follows update chains to their terminal RFCs", () => {
+    const first = makeRfc(1000, { updatedBy: ["RFC2000"] });
+    const second = makeRfc(2000, { updatedBy: ["RFC3000", "RFC4000"] });
+    const { pool, currency } = buildCandidatePool(
+      [{ document: first, documents: [first, second, makeRfc(3000), makeRfc(4000)] }],
+      [],
+    );
+    expect(pool.map(({ document, role }) => `${document.identifier}:${role}`)).toEqual([
+      "RFC1000:requested",
+      "RFC3000:current",
+      "RFC4000:current",
+    ]);
+    expect(currency[0]?.current).toEqual(["RFC3000", "RFC4000"]);
+  });
+
+  test("caps the pool without dropping named RFCs", () => {
+    const named = makeRfc(1);
+    const discovered = Array.from({ length: 40 }, (_, index) => makeRfc(100 + index));
+    const { pool } = buildCandidatePool([{ document: named, documents: [named] }], discovered);
+    expect(pool).toHaveLength(retrievalPolicy.maxPoolCandidates);
+    expect(pool[0]?.document.identifier).toBe("RFC1");
+  });
+});
+
+describe("researchQuestions ranking", () => {
+  test("skips the rank request for a single-RFC pool", async () => {
+    const calls: Array<RecordedCall> = [];
+    const result = await runPipeline(
+      ["What must the client send?"],
+      [candidate(makeRfc(9110), "requested", "RFC9110")],
+      makeRoutingModel({ paragraph: (_, text) => (text.includes("client") ? 1 : 0) }, calls),
+    );
+    expect(calls.some(({ decisions }) => "rank_q0" in decisions)).toBe(false);
+    expect(calls).toHaveLength(2);
+    expect(result.answers[0]?.hits[0]?.relevance).toBeNull();
+    expect(result.answers[0]?.hits[0]?.passages.map(({ quote }) => quote)).toEqual([
+      "The client MUST send a request.",
+    ]);
+  });
+
+  test("keeps at most two RFCs above the relevance floor", async () => {
+    const relevance: Record<string, number> = {
+      RFC1: 0.2,
+      RFC2: 0.95,
+      RFC3: 0.5,
+      RFC4: 0.7,
+    };
+    const result = await runPipeline(
+      ["Which RFC?"],
+      [1, 2, 3, 4].map((number) => candidate(makeRfc(number))),
+      makeRoutingModel({ relevance: (_, identifier) => relevance[identifier] ?? 0 }),
+    );
     expect(
-      requireContextDiagnostics(result).map(({ identifier, state }) => ({ identifier, state })),
+      result.answers[0]?.hits.map(({ rfc, relevance: score }) => [rfc.identifier, score]),
     ).toEqual([
-      { identifier: "RFC9110", state: "researched" },
-      { identifier: "RFC9112", state: "researched" },
+      ["RFC2", 0.95],
+      ["RFC4", 0.7],
     ]);
+    expect(result.rankedCount).toBe(2);
   });
 
-  test("follows branching update relationships deterministically", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const fetched: Array<string> = [];
-    const requested = makeRfcMetadata(9110, { updatedBy: ["RFC9112", "RFC9111"] });
-    const firstCurrent = makeRfcMetadata(9111, { updates: ["RFC9110"] });
-    const secondCurrent = makeRfcMetadata(9112, { updates: ["RFC9110"] });
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [secondCurrent, requested, firstCurrent],
-      rfcSourceFetcher: makeSourceMapFetcher(
-        {
-          RFC9110: sourceText,
-          RFC9111: sourceText.replaceAll("9110", "9111"),
-          RFC9112: sourceText.replaceAll("9110", "9112"),
-        },
-        fetched,
-      ),
-      decisionModel: makeDecisionModel([]),
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    const result = await client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-    });
-
-    expect(result.status).toBe("answered");
-    expect(fetched).toEqual(["RFC9110", "RFC9111", "RFC9112"]);
-    const currency = requireCurrency(result);
-    expect(currency.current).toEqual(["RFC9111", "RFC9112"]);
-    expect(currency.paths.slice(1)).toEqual([
-      {
-        identifier: "RFC9111",
-        path: [{ from: "RFC9110", to: "RFC9111", relationship: "updates" }],
-      },
-      {
-        identifier: "RFC9112",
-        path: [{ from: "RFC9110", to: "RFC9112", relationship: "updates" }],
-      },
-    ]);
-  });
-
-  test("follows obsoletion branches without replacing the requested evidence", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const fetched: Array<string> = [];
-    const requested = makeRfcMetadata(9110, { obsoletedBy: ["RFC9111", "RFC9112"] });
-    const firstCurrent = makeRfcMetadata(9111, { obsoletes: ["RFC9110"] });
-    const secondCurrent = makeRfcMetadata(9112, { obsoletes: ["RFC9110"] });
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [secondCurrent, requested, firstCurrent],
-      rfcSourceFetcher: makeSourceMapFetcher(
-        {
-          RFC9110: sourceText,
-          RFC9111: sourceText.replaceAll("9110", "9111"),
-          RFC9112: sourceText.replaceAll("9110", "9112"),
-        },
-        fetched,
-      ),
-      decisionModel: makeDecisionModel([]),
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    const result = await client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-    });
-
-    expect(result.status).toBe("answered");
-    expect(fetched).toEqual(["RFC9110", "RFC9111", "RFC9112"]);
-    const currency = requireCurrency(result);
-    expect(currency.current).toEqual(["RFC9111", "RFC9112"]);
-    expect(currency.paths).toEqual([
-      { identifier: "RFC9110", path: [] },
-      {
-        identifier: "RFC9111",
-        path: [{ from: "RFC9110", to: "RFC9111", relationship: "obsoletes" }],
-      },
-      {
-        identifier: "RFC9112",
-        path: [{ from: "RFC9110", to: "RFC9112", relationship: "obsoletes" }],
-      },
-    ]);
-    expect(currency.compatibility).toEqual([
-      { requested: "RFC9110", current: "RFC9111", outcome: "compatible" },
-      { requested: "RFC9110", current: "RFC9112", outcome: "compatible" },
-    ]);
-    expect(result.evidence.map((passage) => passage.provenance.identifier)).toEqual([
-      "RFC9110",
-      "RFC9111",
-      "RFC9112",
-    ]);
-  });
-
-  test("returns partial when a known current successor cannot be fetched", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const fetched: Array<string> = [];
-    const requested = makeRfcMetadata(9110, { updatedBy: ["RFC9111"] });
-    const current = makeRfcMetadata(9111, { updates: ["RFC9110"] });
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [requested, current],
-      rfcSourceFetcher: async (document) => {
-        fetched.push(document.identifier);
-        if (document.identifier === "RFC9111") throw new Error("successor unavailable");
-        return {
-          sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
-          text: sourceText,
-        };
-      },
-      decisionModel: makeDecisionModel([]),
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    const result = await client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-    });
-
-    expect(result.status).toBe("partial");
-    expect(fetched).toEqual(["RFC9110", "RFC9111"]);
-    expect(requireCurrency(result)).toMatchObject({
-      requested: "RFC9110",
-      current: ["RFC9111"],
-      complete: false,
-      issues: ["missing_current_source"],
-    });
-    expect(result.contexts).toMatchObject([
-      { role: "requested", state: "researched" },
-      { role: "current", document: { identifier: "RFC9111" }, state: "unavailable" },
-    ]);
-    expect(result.evidence.every((passage) => passage.context === "requested")).toBe(true);
-    expect(requireContextDiagnostics(result)[1]).toMatchObject({
-      identifier: "RFC9111",
-      state: "unavailable",
-      status: null,
-      source: null,
-    });
-  });
-
-  test("fails closed and terminates on cyclic currency relationships", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const fetched: Array<string> = [];
-    const requested = makeRfcMetadata(9110, { updatedBy: ["RFC9111"] });
-    const successor = makeRfcMetadata(9111, {
-      updates: ["RFC9110"],
-      updatedBy: ["RFC9110"],
-    });
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [requested, successor],
-      rfcSourceFetcher: makeSourceMapFetcher(
-        { RFC9110: sourceText, RFC9111: sourceText.replaceAll("9110", "9111") },
-        fetched,
-      ),
-      decisionModel: makeDecisionModel([]),
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    const result = await client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-    });
-
-    expect(result.status).toBe("needs_review");
-    expect(fetched).toEqual(["RFC9110"]);
-    const currency = requireCurrency(result);
-    expect(currency.current).toEqual([]);
-    expect(currency.complete).toBe(false);
-    expect(currency.issues).toEqual(["cycle_detected", "missing_current_context"]);
-  });
-
-  test("detects cycles that cross a previously explored branch", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const fetched: Array<string> = [];
-    const requested = makeRfcMetadata(9110, { updatedBy: ["RFC9111", "RFC9112"] });
-    const firstBranch = makeRfcMetadata(9111, {
-      updates: ["RFC9110"],
-      updatedBy: ["RFC9113"],
-    });
-    const secondBranch = makeRfcMetadata(9112, {
-      updates: ["RFC9110", "RFC9113"],
-      updatedBy: ["RFC9113"],
-    });
-    const crossBranch = makeRfcMetadata(9113, {
-      updates: ["RFC9112"],
-      updatedBy: ["RFC9112"],
-    });
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [crossBranch, secondBranch, requested, firstBranch],
-      rfcSourceFetcher: makeSourceMapFetcher({ RFC9110: sourceText }, fetched),
-      decisionModel: makeDecisionModel([]),
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    const result = await client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-    });
-
-    expect(result.status).toBe("needs_review");
-    expect(fetched).toEqual(["RFC9110"]);
-    const currency = requireCurrency(result);
-    expect(currency.current).toEqual([]);
-    expect(currency.issues).toContain("cycle_detected");
-    expect(currency.issues).toContain("missing_current_context");
-  });
-
-  test("fails closed when a current direct requirement changes the requested wording", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const requested = makeRfcMetadata(9110, { updatedBy: ["RFC9111"] });
-    const current = makeRfcMetadata(9111, { updates: ["RFC9110"] });
-    const changedText = sourceText.replace(
-      "The client MUST send a request containing the target resource.",
-      "The client MUST NOT send a request containing the target resource.",
-    );
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [requested, current],
-      rfcSourceFetcher: makeSourceMapFetcher({ RFC9110: sourceText, RFC9111: changedText }, []),
-      decisionModel: makeDecisionModel([]),
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    const result = await client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-    });
-
-    expect(result.status).toBe("needs_review");
-    expect(requireCurrency(result).compatibility).toEqual([
-      { requested: "RFC9110", current: "RFC9111", outcome: "conflicting" },
-    ]);
-  });
-
-  test("reports a bounded traversal when the successor chain exceeds policy limits", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const numbers = Array.from({ length: 10 }, (_, index) => 9000 + index);
-    const documents = numbers.map((number, index) =>
-      makeRfcMetadata(number, {
-        updatedBy: index === numbers.length - 1 ? [] : [`RFC${number + 1}`],
-        updates: index === 0 ? [] : [`RFC${number - 1}`],
-      }),
-    );
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => documents,
-      rfcSourceFetcher: makeSourceMapFetcher({ RFC9000: sourceText }, []),
-      decisionModel: makeDecisionModel([]),
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    const result = await client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "RFC9000",
-    });
-
-    expect(result.status).toBe("needs_review");
-    const currency = requireCurrency(result);
-    expect(currency.current).toEqual([]);
-    expect(currency.issues).toContain("traversal_limit");
-  });
-
-  test("fails closed when a current requirement weakens its normative modality", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const requested = makeRfcMetadata(9110, { updatedBy: ["RFC9111"] });
-    const current = makeRfcMetadata(9111, { updates: ["RFC9110"] });
-    const weakenedText = sourceText.replace("The client MUST send", "The client MAY send");
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [requested, current],
-      rfcSourceFetcher: makeSourceMapFetcher({ RFC9110: sourceText, RFC9111: weakenedText }, []),
-      decisionModel: makeDecisionModel([]),
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    const result = await client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-    });
-
-    expect(result.status).toBe("needs_review");
-    expect(requireCurrency(result).compatibility).toEqual([
-      { requested: "RFC9110", current: "RFC9111", outcome: "conflicting" },
-    ]);
-  });
-
-  test("fails closed when a current requirement changes a substantive parameter", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const requested = makeRfcMetadata(9110, { updatedBy: ["RFC9111"] });
-    const current = makeRfcMetadata(9111, { updates: ["RFC9110"] });
-    const requestedText = sourceText.replace("a request containing the target resource", "X-Foo");
-    const changedText = requestedText.replace("X-Foo", "X-Bar");
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [requested, current],
-      rfcSourceFetcher: makeSourceMapFetcher({ RFC9110: requestedText, RFC9111: changedText }, []),
-      decisionModel: makeDecisionModel([]),
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    const result = await client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-    });
-
-    expect(result.status).toBe("needs_review");
-    expect(requireCurrency(result).compatibility).toEqual([
-      { requested: "RFC9110", current: "RFC9111", outcome: "uncertain" },
-    ]);
-  });
-
-  test("fails closed when a current requirement swaps subject and object roles", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const requested = makeRfcMetadata(9110, { updatedBy: ["RFC9111"] });
-    const current = makeRfcMetadata(9111, { updates: ["RFC9110"] });
-    const requestedText = sourceText.replace(
-      "a request containing the target resource",
-      "X-Foo to the server",
-    );
-    const swappedText = requestedText
-      .replace("The client MUST send", "The server MUST send")
-      .replace("to the server", "to the client");
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [requested, current],
-      rfcSourceFetcher: makeSourceMapFetcher({ RFC9110: requestedText, RFC9111: swappedText }, []),
-      decisionModel: makeDecisionModel([]),
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    const result = await client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-    });
-
-    expect(result.status).toBe("needs_review");
-    expect(requireCurrency(result).compatibility).toEqual([
-      { requested: "RFC9110", current: "RFC9111", outcome: "uncertain" },
-    ]);
-  });
-
-  test("returns needs_review when requested and current contexts conflict", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const requested = makeRfcMetadata(9110, { updatedBy: ["RFC9111"] });
-    const current = makeRfcMetadata(9111, { updates: ["RFC9110"] });
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [requested, current],
-      rfcSourceFetcher: makeSourceMapFetcher(
-        { RFC9110: sourceText, RFC9111: sourceText.replaceAll("9110", "9111") },
-        [],
-      ),
-      decisionModel: makeDecisionModel([], "atomic", "direct_answer", 0.9, 0.95, 0.95, (call) =>
-        call === 4 ? "contradictory" : "direct_answer",
-      ),
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    const result = await client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-    });
-
-    expect(result.status).toBe("needs_review");
-    expect(requireCurrency(result).complete).toBe(true);
-    expect(result.evidence.map((passage) => [passage.context, passage.relation])).toEqual([
-      ["requested", "direct_answer"],
-      ["current", "contradictory"],
-    ]);
-  });
-
-  test("does not claim current coverage for missing or malformed successors", async () => {
-    const missingCacheDirectory = await makeCacheDirectory();
-    const missingClient = await createRfcClient({
-      cacheDirectory: missingCacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [makeRfcMetadata(9110, { updatedBy: ["RFC9999"] })],
-      rfcSourceFetcher: makeSourceMapFetcher({ RFC9110: sourceText }, []),
-      decisionModel: makeDecisionModel([]),
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(missingClient);
-
-    await expect(
-      missingClient.research({
-        schemaVersion: 2,
-        question: "What must the client send?",
-        rfc: "RFC9110",
-      }),
-    ).rejects.toBeInstanceOf(RfcDiscoveryError);
-
-    const malformedCacheDirectory = await makeCacheDirectory();
-    const malformedClient = await createRfcClient({
-      cacheDirectory: malformedCacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [makeRfcMetadata(9110, { updatedBy: ["not-an-rfc"] })],
-      rfcSourceFetcher: makeSourceMapFetcher({ RFC9110: sourceText }, []),
-      decisionModel: makeDecisionModel([]),
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(malformedClient);
-
-    await expect(
-      malformedClient.research({
-        schemaVersion: 2,
-        question: "What must the client send?",
-        rfc: "RFC9110",
-      }),
-    ).rejects.toBeInstanceOf(RfcDiscoveryError);
-  });
-
-  test("does not persist semantic inputs, judgments, or provider responses", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const question = "PRIVACY_SENTINEL_question_must_not_be_cached";
-    const model = makeDecisionModel([]);
-    const providerResponseModel = {
-      [DecisionModel.TypeId]: DecisionModel.TypeId,
-      decide: (...args: Parameters<typeof model.decide>) =>
-        model.decide(...args).pipe(
-          Effect.map((response) => ({
-            ...response,
-            providerSecret: "PRIVACY_SENTINEL_provider_response_must_not_be_cached",
-          })),
+  test("breaks relevance ties with the ranking Choice", async () => {
+    const calls: Array<RecordedCall> = [];
+    const model = makeRoutingModel({}, calls);
+    const tiedModel = {
+      ...model,
+      decide: (definition: RecordedCall, options: { readonly input: RecordedCall["input"] }) =>
+        (
+          model.decide as unknown as (...args: Array<unknown>) => Effect.Effect<{
+            readonly answers: Record<string, unknown>;
+          }>
+        )(definition, options).pipe(
+          Effect.map((response) =>
+            "rank_q0" in response.answers
+              ? {
+                  ...response,
+                  answers: {
+                    ...response.answers,
+                    rank_q0: {
+                      label: "c2",
+                      probabilities: { c0: 0.1, c1: 0.2, c2: 0.7, none: 0 },
+                      confidence: 0.9,
+                    },
+                  },
+                }
+              : response,
+          ),
         ),
     } as unknown as DecisionModel.DecisionModel;
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [rfcDocument],
-      rfcSourceFetcher: makeSourceFetcher(sourceText),
-      decisionModel: providerResponseModel,
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    await client.research({ schemaVersion: 2, question, rfc: "RFC9110" });
-
-    const cacheContents = await readFile(
-      join(cacheDirectory, "sources", "v2", "RFC9110.json"),
-      "utf8",
+    const result = await runPipeline(
+      ["Which RFC?"],
+      [1, 2, 3].map((number) => candidate(makeRfc(number))),
+      tiedModel,
     );
-    expect(cacheContents).not.toContain(question);
-    expect(cacheContents).not.toContain("PRIVACY_SENTINEL_provider_response_must_not_be_cached");
-    expect(cacheContents).not.toContain("direct_answer");
-    expect(cacheContents).not.toContain("evidence_bundle");
+    expect(result.answers[0]?.hits.map(({ rfc }) => rfc.identifier)).toEqual(["RFC3", "RFC2"]);
   });
 
-  test("records the provider-resolved model identifier", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const typeSafe = makeTypeSafeHttpClient();
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-latest",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      typeSafeHttpClient: typeSafe.client,
-      metadataSource: async () => [rfcDocument],
-      rfcSourceFetcher: makeSourceFetcher(sourceText),
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    const result = await client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "9110",
-    });
-
-    expect(result.diagnostics.requestedModel).toBe("jev-latest");
-    expect(result.diagnostics.resolvedModel).toBe("jev-1.13.0");
-    expect(result.diagnostics.resolvedModels).toEqual(["jev-1.13.0", "jev-1.13.0"]);
-    expect(typeSafe.calls()).toBe(2);
+  test("keeps a requested RFC and its current successor together", async () => {
+    const relevance: Record<string, number> = { RFC8000: 0.95, RFC7231: 0.6, RFC9110: 0.5 };
+    const result = await runPipeline(
+      ["What does it say?"],
+      [
+        candidate(makeRfc(7231), "requested", "RFC7231"),
+        candidate(makeRfc(9110), "current", "RFC7231"),
+        candidate(makeRfc(8000)),
+      ],
+      makeRoutingModel({ relevance: (_, identifier) => relevance[identifier] ?? 0 }),
+    );
+    expect(result.answers[0]?.hits.map(({ rfc, role }) => `${rfc.identifier}:${role}`)).toEqual([
+      "RFC8000:discovered",
+      "RFC7231:requested",
+      "RFC9110:current",
+    ]);
   });
 
-  test("keeps resolved model diagnostics local to each research operation", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const typeSafe = makeTypeSafeHttpClient(["jev-first", "jev-second"]);
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-latest",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      typeSafeHttpClient: typeSafe.client,
-      metadataSource: async () => [rfcDocument],
-      rfcSourceFetcher: makeSourceFetcher(sourceText),
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    const first = await client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "9110",
-    });
-    const second = await client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "9110",
-    });
-
-    expect(first.diagnostics.resolvedModels).toEqual(["jev-first", "jev-first"]);
-    expect(second.diagnostics.resolvedModels).toEqual(["jev-second", "jev-second"]);
-    expect(first.diagnostics.resolvedModel).toBe("jev-first");
-    expect(second.diagnostics.resolvedModel).toBe("jev-second");
-    expect(typeSafe.calls()).toBe(4);
-  });
-
-  test("returns needs_split for a confidently compound request", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const calls: Array<unknown> = [];
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [rfcDocument],
-      rfcSourceFetcher: makeSourceFetcher(sourceText),
-      decisionModel: makeDecisionModel(calls, "compound"),
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    const result = await client.research({
-      schemaVersion: 2,
-      question: "What must the client send and what should the server cache?",
-      rfc: "9110",
-    });
-
-    expect(result.status).toBe("needs_split");
-    expect(result.evidence).toEqual([]);
-    expect(result.diagnostics.atomicity).toMatchObject({ label: "compound" });
+  test("reports not found when no RFC clears the relevance floor", async () => {
+    const calls: Array<RecordedCall> = [];
+    const result = await runPipeline(
+      ["Unrelated?"],
+      [candidate(makeRfc(1)), candidate(makeRfc(2))],
+      makeRoutingModel({ relevance: () => 0.1 }, calls),
+    );
+    expect(result.answers).toEqual([
+      { question: "Unrelated?", found: false, searched: [], hits: [] },
+    ]);
     expect(calls).toHaveLength(1);
   });
+});
 
-  test("returns every canonical passage for a compound request", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [rfcDocument],
-      rfcSourceFetcher: makeSourceFetcher(compoundSourceText),
-      decisionModel: makeDecisionModel([], "compound"),
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
+describe("researchQuestions sections and paragraphs", () => {
+  const manySections = rfcText(9999, [
+    {
+      heading: "1.  Overview",
+      paragraphs: ["Overview paragraph."],
+    },
+    {
+      heading: "2.  Headers",
+      paragraphs: [
+        "Primary header answer.",
+        "Secondary header detail.",
+        "Tertiary header detail.",
+        "Unrelated header note.",
+        "Another unrelated note.",
+      ],
+    },
+  ]);
 
-    const result = await client.research({
-      schemaVersion: 2,
-      question: compoundQuestion,
-      rfc: "9110",
-    });
-
-    // needs_split stays a refusal to answer: ADR 0004 gates answered behind
-    // explicit activation and partial behind accepted relations.
-    expect(result.status).toBe("needs_split");
-    expect(result.evidence).toEqual([]);
-    // Every canonical passage the pipeline already ranked comes back, so the
-    // follow-up research calls do not re-retrieve the same source.
-    expect(result.reviewCandidates?.length ?? 0).toBeGreaterThan(1);
+  test("keeps paragraphs until they cover the probability mass", async () => {
+    const weights: Record<string, number> = {
+      "Primary header answer.": 0.5,
+      "Secondary header detail.": 0.2,
+      "Tertiary header detail.": 0.2,
+      "Unrelated header note.": 0.1,
+    };
+    const result = await runPipeline(
+      ["Which header?"],
+      [candidate(makeRfc(9999), "requested", "RFC9999")],
+      makeRoutingModel({
+        section: (_, heading) => (heading.includes("Headers") ? 1 : 0),
+        paragraph: (_, text) => weights[text] ?? 0,
+      }),
+      { RFC9999: manySections },
+    );
+    expect(result.answers[0]?.hits[0]?.passages.map(({ quote }) => quote)).toEqual([
+      "Primary header answer.",
+      "Secondary header detail.",
+      "Tertiary header detail.",
+    ]);
   });
 
-  test("returns unsupported when every passage candidate is confidently negative", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [rfcDocument],
-      rfcSourceFetcher: makeSourceFetcher(sourceText),
-      decisionModel: makeDecisionModel([], "atomic", "irrelevant", 0.9, 0.95, 0.1),
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
+  test("returns one passage when it carries the mass and caps passages at three", async () => {
+    const peaked = await runPipeline(
+      ["Which header?"],
+      [candidate(makeRfc(9999), "requested", "RFC9999")],
+      makeRoutingModel({
+        section: (_, heading) => (heading.includes("Headers") ? 1 : 0),
+        paragraph: (_, text) => (text === "Primary header answer." ? 0.9 : 0.02),
+      }),
+      { RFC9999: manySections },
+    );
+    expect(peaked.answers[0]?.hits[0]?.passages).toHaveLength(1);
 
-    const result = await client.research({
-      schemaVersion: 2,
-      question: "What does the server cache?",
-      rfc: "RFC9110",
-    });
-
-    expect(result.status).toBe("unsupported");
-    expect(result.evidence).toEqual([]);
-    expect(result.reviewCandidates).toHaveLength(1);
-    expect(result.reviewCandidates?.[0]).toMatchObject({
-      id: "block-1",
-      selectionProbability: 0.1,
-    });
-    expect(result.diagnostics.selection).toEqual([{ candidateId: "block-1", probability: 0.1 }]);
-    expect(result.diagnostics.classification).toEqual([]);
+    const flat = await runPipeline(
+      ["Which header?"],
+      [candidate(makeRfc(9999), "requested", "RFC9999")],
+      makeRoutingModel(),
+      { RFC9999: manySections },
+    );
+    expect(flat.answers[0]?.hits[0]?.passages).toHaveLength(retrievalPolicy.maxParagraphs);
   });
 
-  test("judges a borderline selected passage before classifying unsupported", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [rfcDocument],
-      rfcSourceFetcher: makeSourceFetcher(sourceText),
-      decisionModel: makeDecisionModel([], "atomic", "irrelevant", 0.9, 0.95, 0.45),
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    const result = await client.research({
-      schemaVersion: 2,
-      question: "What does the server cache?",
-      rfc: "RFC9110",
-    });
-
-    expect(result.status).toBe("unsupported");
-    expect(result.diagnostics.classification).toHaveLength(1);
+  test("offers only paragraphs of the chosen sections", async () => {
+    const calls: Array<RecordedCall> = [];
+    await runPipeline(
+      ["Which header?"],
+      [candidate(makeRfc(9999), "requested", "RFC9999")],
+      makeRoutingModel({ section: (_, heading) => (heading.includes("Headers") ? 1 : 0) }, calls),
+      { RFC9999: manySections },
+    );
+    const paragraphCall = calls.find(({ decisions }) => "paragraph_q0" in decisions);
+    expect(Object.values(paragraphCall?.input.paragraphs ?? {})).not.toContain(
+      "Overview paragraph.",
+    );
+    const sectionCall = calls.find(({ decisions }) => "section_q0" in decisions);
+    expect(Object.values(sectionCall?.input.toc ?? {})).toEqual([
+      { heading: "1. Overview", preview: "Overview paragraph." },
+      { heading: "2. Headers", preview: "Primary header answer." },
+    ]);
   });
 
-  test("returns needs_review when a negative relation is low confidence", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [rfcDocument],
-      rfcSourceFetcher: makeSourceFetcher(sourceText),
-      decisionModel: makeDecisionModel([], "atomic", "irrelevant", 0.9, 0.5),
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+  test("uses a two-level section choice above the option limit", async () => {
+    const large = rfcText(
+      8888,
+      Array.from({ length: 30 }, (_, chapter) => [
+        {
+          heading: `${chapter + 1}.  Chapter ${chapter + 1}`,
+          paragraphs: [`Chapter ${chapter + 1} introduction.`],
+        },
+        ...Array.from({ length: 9 }, (_, section) => ({
+          heading: `${chapter + 1}.${section + 1}.  Topic ${chapter + 1}.${section + 1}`,
+          paragraphs: [`Text of topic ${chapter + 1}.${section + 1}.`],
+        })),
+      ]).flat(),
+    );
+    const calls: Array<RecordedCall> = [];
+    const result = await runPipeline(
+      ["Where is topic 12.7?"],
+      [candidate(makeRfc(8888), "requested", "RFC8888")],
+      makeRoutingModel(
+        {
+          section: (_, heading) =>
+            heading === "12. Chapter 12" ? 0.6 : heading === "12.7. Topic 12.7" ? 1 : 0.001,
+          paragraph: (_, text) => (text.includes("12.7") ? 1 : 0),
+        },
+        calls,
+      ),
+      { RFC8888: large },
+    );
+    const sectionCalls = calls.filter(({ decisions }) => "section_q0" in decisions);
+    expect(sectionCalls).toHaveLength(2);
+    const chapters = Object.values(sectionCalls[0]?.input.toc ?? {});
+    expect(chapters).toHaveLength(30);
+    expect(chapters[11]?.preview).toContain("12.7. Topic 12.7");
+    expect(
+      Object.keys(sectionCalls[1]?.decisions.section_q0?.criteria ?? {}).length,
+    ).toBeLessThanOrEqual(retrievalPolicy.maxChoiceOptions + 1);
+    expect(result.answers[0]?.hits[0]?.passages[0]).toMatchObject({
+      quote: "Text of topic 12.7.",
+      section: "12.7.  Topic 12.7",
     });
-    clients.push(client);
-
-    const result = await client.research({
-      schemaVersion: 2,
-      question: "What does the server cache?",
-      rfc: "RFC9110",
-    });
-
-    expect(result.status).toBe("needs_review");
-    expect(result.evidence).toEqual([]);
-    expect(result.reviewCandidates).toHaveLength(1);
-    expect(result.reviewCandidates?.[0]).toMatchObject({
-      id: "block-1",
-      selectionProbability: 0.95,
-      provenance: {
-        identifier: "RFC9110",
-        offsetUnit: "utf8-byte",
-      },
-    });
-    expect(result.reviewCandidates?.[0]?.quote).toContain("The client MUST send");
   });
 
-  test("rejects invalid provider probability distributions as typed failures", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const model = {
+  test("drops an RFC whose paragraphs do not answer the question", async () => {
+    const result = await runPipeline(
+      ["Is it here?"],
+      [candidate(makeRfc(9110), "requested", "RFC9110")],
+      makeRoutingModel({ exists: () => 0.2 }),
+    );
+    expect(result.answers[0]).toEqual({
+      question: "Is it here?",
+      found: false,
+      searched: ["RFC9110"],
+      hits: [],
+    });
+  });
+
+  test("derives the hit verdict from paragraph verdicts", async () => {
+    const result = await runPipeline(
+      ["What must the client send?"],
+      [candidate(makeRfc(9110), "requested", "RFC9110")],
+      makeRoutingModel({
+        section: (_, heading) => (heading.includes("Requirements") ? 1 : 0),
+        verdict: (_, text) => (text.includes("client") ? "partial" : "says_nothing"),
+      }),
+    );
+    const hit = result.answers[0]?.hits[0];
+    expect(hit?.verdict).toBe("partial");
+    expect(hit?.passages.map(({ verdict }) => verdict)).toEqual(["partial", "says_nothing"]);
+  });
+
+  test("shares one section and one paragraph request per RFC across questions", async () => {
+    const calls: Array<RecordedCall> = [];
+    const result = await runPipeline(
+      ["What must the client send?", "What must the server send?"],
+      [candidate(makeRfc(9110), "requested", "RFC9110")],
+      makeRoutingModel(
+        {
+          section: (_, heading) => (heading.includes("Requirements") ? 1 : 0),
+          paragraph: (question, text) =>
+            text.includes(question.includes("client") ? "client" : "server") ? 1 : 0,
+        },
+        calls,
+      ),
+    );
+    expect(calls).toHaveLength(2);
+    expect(Object.keys(calls[0]?.input.questions ?? {})).toEqual(["q0", "q1"]);
+    expect(result.answers.map((answer) => answer.hits[0]?.passages[0]?.quote)).toEqual([
+      "The client MUST send a request.",
+      "The server MUST send a response.",
+    ]);
+  });
+
+  test("drops an unavailable successor source but fails for a named RFC", async () => {
+    const pool = [
+      candidate(makeRfc(7231), "requested", "RFC7231"),
+      candidate(makeRfc(9110), "current", "RFC7231"),
+    ];
+    const result = await runPipeline(["What?"], pool, makeRoutingModel(), {}, new Set(["RFC9110"]));
+    expect(result.answers[0]?.hits.map(({ rfc }) => rfc.identifier)).toEqual(["RFC7231"]);
+    await expect(
+      runPipeline(["What?"], pool, makeRoutingModel(), {}, new Set(["RFC7231"])),
+    ).rejects.toBeInstanceOf(RfcSourceFetchError);
+  });
+
+  test("rejects an invalid provider distribution as a typed failure", async () => {
+    const broken = {
       [DecisionModel.TypeId]: DecisionModel.TypeId,
-      decide: (definition: { readonly decisions: Readonly<Record<string, Decision.Any>> }) => {
-        const answers = Object.fromEntries(
-          Object.entries(definition.decisions).map(([key, decision]) =>
-            decision._tag === "Probability"
-              ? [key, { probability: 0.1 }]
-              : "atomic" in decision.criteria
-                ? [
-                    key,
-                    {
-                      label: "atomic",
-                      probabilities: { atomic: 0.8, compound: 0.1 },
-                      confidence: 0.95,
-                    },
-                  ]
-                : [
-                    key,
-                    {
-                      label: "background_only",
-                      probabilities: {
-                        direct_answer: 0.05,
-                        partial_answer: 0.05,
-                        background_only: 0.8,
-                        contradictory: 0.05,
-                        irrelevant: 0.05,
-                      },
-                      confidence: 0.95,
-                    },
-                  ],
+      decide: (definition: { readonly decisions: Readonly<Record<string, Decision.Any>> }) =>
+        Effect.succeed({
+          answers: Object.fromEntries(
+            Object.entries(definition.decisions).map(([key, decision]) => [
+              key,
+              decision._tag === "Probability"
+                ? { probability: 0.9 }
+                : {
+                    label: Object.keys(decision.criteria)[0],
+                    probabilities: Object.fromEntries(
+                      Object.keys(decision.criteria).map((label) => [label, 0.9]),
+                    ),
+                  },
+            ]),
+          ),
+          usage: {},
+        }),
+    } as unknown as DecisionModel.DecisionModel;
+    await expect(
+      runPipeline(["What?"], [candidate(makeRfc(9110), "requested", "RFC9110")], broken),
+    ).rejects.toMatchObject({ _tag: "DecisionModelError", stage: "section" });
+  });
+});
+
+describe("createRfcClient research", () => {
+  const makeDatatrackerClient = (documents: ReadonlyArray<RfcMetadata>) =>
+    HttpClient.make((request, url) => {
+      const exactName = url.pathname.match(/\/document\/(rfc\d+)\/$/)?.[1];
+      if (exactName !== undefined) {
+        const document = documents.find(
+          (candidateDocument) => candidateDocument.identifier.toLowerCase() === exactName,
+        );
+        return Effect.succeed(
+          HttpClientResponse.fromWeb(
+            request,
+            document === undefined
+              ? new Response("not found", { status: 404 })
+              : Response.json({
+                  name: exactName,
+                  rfc_number: document.rfcNumber,
+                  title: document.title,
+                  abstract: document.abstract,
+                  resource_uri: `/api/v1/doc/document/${exactName}/`,
+                  stream: `/api/v1/name/streamname/${document.stream}/`,
+                  states: [],
+                }),
           ),
         );
-        return Effect.succeed({
-          answers,
-          usage: { inputTokens: 1, outputTokens: 1 },
-        });
-      },
-    } as unknown as DecisionModel.DecisionModel;
+      }
+      if (url.pathname.endsWith("/relateddocument/")) {
+        const target = url.searchParams.get("target__name")?.toUpperCase();
+        const document = documents.find(
+          (candidateDocument) => candidateDocument.identifier === target,
+        );
+        const objects = (document?.obsoletedBy ?? []).map((identifier) => ({
+          source: `/api/v1/doc/document/${identifier.toLowerCase()}/`,
+          target: `/api/v1/doc/document/${target?.toLowerCase()}/`,
+          relationship: "/api/v1/name/docrelationshipname/obs/",
+        }));
+        return Effect.succeed(
+          HttpClientResponse.fromWeb(
+            request,
+            Response.json({
+              meta: { limit: 64, offset: 0, total_count: objects.length, next: null },
+              objects,
+            }),
+          ),
+        );
+      }
+      return Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          Response.json({
+            meta: { limit: 20, offset: 0, total_count: documents.length, next: null },
+            objects: documents.map((document) => ({
+              name: document.identifier.toLowerCase(),
+              rfc_number: document.rfcNumber,
+              title: document.title,
+              abstract: document.abstract,
+              resource_uri: `/api/v1/doc/document/${document.identifier.toLowerCase()}/`,
+              stream: `/api/v1/name/streamname/${document.stream}/`,
+              states: [],
+            })),
+          }),
+        ),
+      );
+    });
+
+  const makeSourceFetcher =
+    (texts: Readonly<Record<string, string>>): RfcSourceFetcher =>
+    async (document) => ({
+      sourceUrl: `https://www.rfc-editor.org/rfc/rfc${document.rfcNumber}.txt`,
+      text: texts[document.identifier] ?? defaultText(document.rfcNumber),
+    });
+
+  const makeClient = async (
+    documents: ReadonlyArray<RfcMetadata>,
+    model: DecisionModel.DecisionModel,
+    texts: Readonly<Record<string, string>> = {},
+    extra: Partial<Parameters<typeof createRfcClient>[0]> = {},
+  ) => {
     const client = await createRfcClient({
-      cacheDirectory,
+      cacheDirectory: await mkdtemp(join(tmpdir(), "rfc-core-research-test-")),
       modelAlias: "jev-test",
       typeSafeApiKey: undefined,
       typeSafeApiUrl: undefined,
-      metadataSource: async () => [rfcDocument],
-      rfcSourceFetcher: makeSourceFetcher(sourceText),
+      datatrackerHttpClient: makeDatatrackerClient(documents),
+      rfcSourceFetcher: makeSourceFetcher(texts),
       decisionModel: model,
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+      ...extra,
     });
     clients.push(client);
+    return client;
+  };
 
-    await expect(
-      client.research({
-        schemaVersion: 2,
-        question: "What must the client send?",
-        rfc: "RFC9110",
+  test("researches named RFCs with successors and topic hits in one pool", async () => {
+    const utf8Text = rfcText(7231, [
+      { heading: "1.  Introduction", paragraphs: ["Written by Martin Dürst."] },
+      { heading: "2.  Requirements", paragraphs: ["The client MUST send a request."] },
+    ]);
+    const client = await makeClient(
+      [makeRfc(7231, { obsoletedBy: ["RFC9110"] }), makeRfc(9110), makeRfc(6585)],
+      makeRoutingModel({
+        section: (_, heading) => (heading.includes("Requirements") ? 1 : 0),
+        paragraph: (_, text) => (text.includes("client") ? 1 : 0),
       }),
-    ).rejects.toBeInstanceOf(DecisionModelError);
+      { RFC7231: utf8Text },
+    );
+    const result = await client.research({
+      schemaVersion: 3,
+      questions: ["What must the client send?"],
+      rfcs: ["RFC7231"],
+      searchTerms: ["HTTP"],
+    });
+    expect(result).toMatchObject({ schemaVersion: 3, kind: "research_result" });
+    expect(result.currency).toEqual([
+      {
+        requested: "RFC7231",
+        current: ["RFC9110"],
+        paths: [
+          { identifier: "RFC7231", path: [] },
+          {
+            identifier: "RFC9110",
+            path: [{ from: "RFC7231", to: "RFC9110", relationship: "obsoletes" }],
+          },
+        ],
+      },
+    ]);
+    expect(result.diagnostics.candidates).toEqual({ pool: 3, ranked: 2 });
+    const hit = result.answers[0]?.hits.find(({ rfc }) => rfc.identifier === "RFC7231");
+    const passage = hit?.passages[0];
+    expect(hit?.role).toBe("requested");
+    expect(passage?.quote).toBe("The client MUST send a request.");
+    const bytes = Buffer.from(utf8Text, "utf8");
+    expect(
+      bytes
+        .subarray(passage?.provenance.startOffset ?? 0, passage?.provenance.endOffset ?? 0)
+        .toString("utf8"),
+    ).toBe(passage?.quote ?? "");
+    expect(passage?.provenance).toMatchObject({
+      offsetUnit: "utf8-byte",
+      sourceHash: hashRfcSource(utf8Text),
+    });
+    expect(result.diagnostics.usage).toEqual({ inputTokens: 50, outputTokens: 10 });
+    expect(result.diagnostics.retrieval).toMatchObject({
+      schemaVersion: 3,
+      traversalComplete: true,
+    });
   });
 
-  test("retries retryable provider errors and succeeds without retrying non-retryable errors", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const successful = makeDecisionModel([]);
+  test("omits currency for topic-only research", async () => {
+    const client = await makeClient([makeRfc(9110)], makeRoutingModel());
+    const result = await client.research({
+      schemaVersion: 3,
+      questions: ["What must the client send?"],
+      searchTerms: ["HTTP"],
+    });
+    expect(result.currency).toBeUndefined();
+    expect(result.answers[0]?.hits[0]?.role).toBe("discovered");
+  });
+
+  test("validates the version-three request contract", async () => {
+    const client = await makeClient([makeRfc(9110)], makeRoutingModel());
+    for (const request of [
+      { schemaVersion: 2, questions: ["What?"], rfcs: ["RFC9110"] },
+      { schemaVersion: 3, questions: ["What?"] },
+      { schemaVersion: 3, questions: [], rfcs: ["RFC9110"] },
+      { schemaVersion: 3, questions: ["1", "2", "3", "4", "5"], rfcs: ["RFC9110"] },
+      { schemaVersion: 3, questions: ["What?"], searchTerms: ["a", "b", "c", "d", "e"] },
+    ]) {
+      await expect(client.research(request as never)).rejects.toBeInstanceOf(InvalidInputError);
+    }
+  });
+
+  const failing = (reason: AiError.AiErrorReason, onAttempt: () => void) =>
+    ({
+      [DecisionModel.TypeId]: DecisionModel.TypeId,
+      decide: () => {
+        onAttempt();
+        return Effect.fail(AiError.make({ module: "test", method: "decide", reason }));
+      },
+    }) as unknown as DecisionModel.DecisionModel;
+
+  const request = {
+    schemaVersion: 3,
+    questions: ["What must the client send?"],
+    rfcs: ["RFC9110"],
+  } as const;
+
+  test("retries retryable provider errors and does not retry non-retryable ones", async () => {
     let attempts = 0;
-    const model = {
+    const successful = makeRoutingModel();
+    const flaky = {
       [DecisionModel.TypeId]: DecisionModel.TypeId,
       decide: (...args: Parameters<typeof successful.decide>) => {
         attempts += 1;
-        if (attempts === 1) {
-          return Effect.fail(
-            AiError.make({
-              module: "test",
-              method: "decide",
-              reason: new AiError.RateLimitError({ retryAfter: Duration.millis(0) }),
-            }),
-          );
-        }
-        return successful.decide(...args);
+        return attempts === 1
+          ? Effect.fail(
+              AiError.make({
+                module: "test",
+                method: "decide",
+                reason: new AiError.RateLimitError({ retryAfter: Duration.millis(0) }),
+              }),
+            )
+          : successful.decide(...args);
       },
     } as unknown as DecisionModel.DecisionModel;
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [rfcDocument],
-      rfcSourceFetcher: makeSourceFetcher(sourceText),
-      decisionModel: model,
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    await expect(
-      client.research({
-        schemaVersion: 2,
-        question: "What must the client send?",
-        rfc: "RFC9110",
-      }),
-    ).resolves.toMatchObject({ status: "answered" });
+    const client = await makeClient([makeRfc(9110)], flaky);
+    await expect(client.research(request)).resolves.toMatchObject({ kind: "research_result" });
     expect(attempts).toBe(3);
 
-    const nonRetryingCacheDirectory = await makeCacheDirectory();
-    let nonRetryingAttempts = 0;
-    const nonRetryingModel = {
-      [DecisionModel.TypeId]: DecisionModel.TypeId,
-      decide: (..._args: Parameters<typeof successful.decide>) => {
-        nonRetryingAttempts += 1;
-        return Effect.fail(
-          AiError.make({
-            module: "test",
-            method: "decide",
-            reason: new AiError.InvalidRequestError({ description: "bad request" }),
-          }),
-        );
-      },
-    } as unknown as DecisionModel.DecisionModel;
-    const nonRetryingClient = await createRfcClient({
-      cacheDirectory: nonRetryingCacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [rfcDocument],
-      rfcSourceFetcher: makeSourceFetcher(sourceText),
-      decisionModel: nonRetryingModel,
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(nonRetryingClient);
-
-    await expect(
-      nonRetryingClient.research({
-        schemaVersion: 2,
-        question: "What must the client send?",
-        rfc: "RFC9110",
+    let rejected = 0;
+    const strict = await makeClient(
+      [makeRfc(9110)],
+      failing(new AiError.InvalidRequestError({ description: "bad request" }), () => {
+        rejected += 1;
       }),
-    ).rejects.toBeInstanceOf(DecisionModelError);
-    expect(nonRetryingAttempts).toBe(1);
+    );
+    await expect(strict.research(request)).rejects.toBeInstanceOf(DecisionModelError);
+    expect(rejected).toBe(1);
   });
 
   test("stops before a retry that would exceed the elapsed-time budget", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const successful = makeDecisionModel([]);
     let attempts = 0;
-    const model = {
-      [DecisionModel.TypeId]: DecisionModel.TypeId,
-      decide: (..._args: Parameters<typeof successful.decide>) => {
+    const client = await makeClient(
+      [makeRfc(9110)],
+      failing(new AiError.RateLimitError({ retryAfter: Duration.seconds(60) }), () => {
         attempts += 1;
-        return Effect.fail(
-          AiError.make({
-            module: "test",
-            method: "decide",
-            reason: new AiError.RateLimitError({ retryAfter: Duration.seconds(60) }),
-          }),
-        );
-      },
-    } as unknown as DecisionModel.DecisionModel;
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [rfcDocument],
-      rfcSourceFetcher: makeSourceFetcher(sourceText),
-      decisionModel: model,
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    await expect(
-      client.research({
-        schemaVersion: 2,
-        question: "What must the client send?",
-        rfc: "RFC9110",
       }),
-    ).rejects.toMatchObject({
+    );
+    await expect(client.research(request)).rejects.toMatchObject({
       _tag: "DecisionModelError",
       reason: expect.stringContaining("retry"),
     });
-    expect(attempts).toBe(1);
-  });
-
-  test("times out a never-completing provider attempt at the elapsed-time budget", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const clock = await Effect.runPromise(
-      Effect.scoped(TestClock.make({ warningDelay: Duration.seconds(30) })),
-    );
-    let attempts = 0;
-    let startedResolve: (() => void) | undefined;
-    const started = new Promise<void>((resolve) => {
-      startedResolve = resolve;
-    });
-    const successful = makeDecisionModel([]);
-    const model = {
-      [DecisionModel.TypeId]: DecisionModel.TypeId,
-      decide: (..._args: Parameters<typeof successful.decide>) => {
-        attempts += 1;
-        startedResolve?.();
-        return Effect.never;
-      },
-    } as unknown as DecisionModel.DecisionModel;
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [rfcDocument],
-      rfcSourceFetcher: makeSourceFetcher(sourceText),
-      decisionModel: model,
-      clock,
-    });
-    clients.push(client);
-
-    const research = client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "RFC9110",
-    });
-    const researchOutcome = research.then(
-      () => ({ kind: "success" as const }),
-      (error) => ({ kind: "error" as const, error }),
-    );
-    const startedInTime = await Promise.race([
-      started.then(() => true),
-      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 250)),
-    ]);
-    expect(startedInTime).toBe(true);
-    if (!startedInTime) return;
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    await Effect.runPromise(clock.adjust(Duration.seconds(10)));
-    const outcome = await Promise.race([
-      researchOutcome,
-      new Promise<{ readonly kind: "guard" }>((resolve) =>
-        setTimeout(() => resolve({ kind: "guard" }), 250),
-      ),
-    ]);
-
-    expect(outcome.kind).toBe("error");
-    if (outcome.kind === "error") {
-      expect(outcome.error).toMatchObject({
-        _tag: "DecisionModelError",
-        stage: "selection",
-        reason: expect.stringContaining("elapsed-time budget"),
-        attempts: 1,
-      });
-    }
     expect(attempts).toBe(1);
   });
 
   test("fails with a typed provider error after retry exhaustion", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const successful = makeDecisionModel([]);
     let attempts = 0;
-    const model = {
-      [DecisionModel.TypeId]: DecisionModel.TypeId,
-      decide: (..._args: Parameters<typeof successful.decide>) => {
+    const client = await makeClient(
+      [makeRfc(9110)],
+      failing(new AiError.InternalProviderError({ description: "unavailable" }), () => {
         attempts += 1;
-        return Effect.fail(
-          AiError.make({
-            module: "test",
-            method: "decide",
-            reason: new AiError.InternalProviderError({ description: "temporarily unavailable" }),
-          }),
-        );
-      },
-    } as unknown as DecisionModel.DecisionModel;
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [rfcDocument],
-      rfcSourceFetcher: makeSourceFetcher(sourceText),
-      decisionModel: model,
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    await expect(
-      client.research({
-        schemaVersion: 2,
-        question: "What must the client send?",
-        rfc: "RFC9110",
       }),
-    ).rejects.toMatchObject({
+    );
+    await expect(client.research(request)).rejects.toMatchObject({
       _tag: "DecisionModelError",
+      stage: "section",
       reason: expect.stringContaining("retry"),
     });
-    expect(attempts).toBe(3);
+    expect(attempts).toBe(retrievalPolicy.providerMaxAttempts);
   });
 
-  test("fails closed for partial, unsupported, uncertain, and contradictory evidence", async () => {
-    const cases = [
-      {
-        relation: "partial_answer" as const,
-        probability: 0.9,
-        confidence: 0.95,
-        status: "partial",
-      },
-      {
-        relation: "background_only" as const,
-        probability: 0.9,
-        confidence: 0.95,
-        status: "unsupported",
-      },
-      {
-        relation: "direct_answer" as const,
-        probability: 0.5,
-        confidence: 0.5,
-        status: "needs_review",
-      },
-      {
-        relation: "contradictory" as const,
-        probability: 0.9,
-        confidence: 0.95,
-        status: "needs_review",
-      },
-    ] as const;
-
-    for (const testCase of cases) {
-      const cacheDirectory = await makeCacheDirectory();
-      const client = await createRfcClient({
-        cacheDirectory,
-        modelAlias: "jev-test",
-        typeSafeApiKey: undefined,
-        typeSafeApiUrl: undefined,
-        metadataSource: async () => [rfcDocument],
-        rfcSourceFetcher: makeSourceFetcher(sourceText),
-        decisionModel: makeDecisionModel(
-          [],
-          "atomic",
-          testCase.relation,
-          testCase.probability,
-          testCase.confidence,
-        ),
-        now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-      });
-      clients.push(client);
-
-      const result = await client.research({
-        schemaVersion: 2,
-        question: "What must the client send?",
-        rfc: "9110",
-      });
-
-      expect(result.status).toBe(testCase.status);
-    }
-  });
-
-  test("loads request-local metadata for known-RFC research", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    let refreshes = 0;
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => {
-        refreshes += 1;
-        return [rfcDocument];
-      },
-      rfcSourceFetcher: makeSourceFetcher(sourceText),
-      decisionModel: makeDecisionModel([]),
-      now: () => Date.parse("2026-01-09T00:00:01.000Z"),
-    });
-    clients.push(client);
-
-    const result = await client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "9110",
-    });
-
-    expect(result.status).toBe("answered");
-    expect(refreshes).toBe(1);
-    expect("catalog" in result.diagnostics).toBe(false);
-  });
-
-  test("fetches RFC Editor plain text through the dedicated source HTTP client", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const requests: Array<string> = [];
-    const sourceHttpClient = HttpClient.make((request, url) => {
-      requests.push(url.toString());
-      return Effect.succeed(
-        HttpClientResponse.fromWeb(
-          request,
-          new Response(sourceText, { headers: { "content-type": "text/plain; charset=utf-8" } }),
-        ),
-      );
-    });
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [rfcDocument],
-      decisionModel: makeDecisionModel([]),
-      rfcSourceHttpClient: sourceHttpClient,
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    const result = await client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "9110",
-    });
-
-    expect(result.status).toBe("answered");
-    expect(requests).toEqual(["https://www.rfc-editor.org/rfc/rfc9110.txt"]);
-  });
-
-  test("rejects non-200 RFC Editor source bodies", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const sourceHttpClient = HttpClient.make((request) =>
-      Effect.succeed(
-        HttpClientResponse.fromWeb(
-          request,
-          new Response(sourceText, {
-            status: 201,
-            headers: { "content-type": "text/plain; charset=utf-8" },
-          }),
-        ),
-      ),
-    );
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [rfcDocument],
-      decisionModel: makeDecisionModel([]),
-      rfcSourceHttpClient: sourceHttpClient,
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    await expect(
-      client.research({
-        schemaVersion: 2,
-        question: "What must the client send?",
-        rfc: "9110",
-      }),
-    ).rejects.toMatchObject({
-      _tag: "RfcSourceFetchError",
-      reason: "RFC Editor returned HTTP 201",
-    });
-  });
-
-  test("rejects an RFC Editor source without a plain-text Content-Type", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const sourceHttpClient = HttpClient.make((request) =>
-      Effect.succeed(
-        HttpClientResponse.fromWeb(request, new Response(new TextEncoder().encode(sourceText))),
-      ),
-    );
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [rfcDocument],
-      decisionModel: makeDecisionModel([]),
-      rfcSourceHttpClient: sourceHttpClient,
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    await expect(
-      client.research({
-        schemaVersion: 2,
-        question: "What must the client send?",
-        rfc: "9110",
-      }),
-    ).rejects.toMatchObject({
-      _tag: "RfcSourceFetchError",
-      reason: "RFC Editor returned a non-plain-text source",
-    });
-  });
-
-  test("rejects an RFC Editor source body above the byte cap", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const sourceHttpClient = HttpClient.make((request) =>
-      Effect.succeed(
-        HttpClientResponse.fromWeb(
-          request,
-          new Response("oversized", {
-            status: 200,
-            headers: {
-              "content-type": "text/plain; charset=utf-8",
-              "content-length": String(8 * 1024 * 1024 + 1),
-            },
-          }),
-        ),
-      ),
-    );
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [rfcDocument],
-      rfcSourceHttpClient: sourceHttpClient,
-      decisionModel: makeDecisionModel([]),
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    await expect(
-      client.research({
-        schemaVersion: 2,
-        question: "What must the client send?",
-        rfc: "9110",
-      }),
-    ).rejects.toMatchObject({
-      _tag: "RfcSourceFetchError",
-      reason: expect.stringContaining("8388608 bytes"),
-    });
-  });
-
-  test("stops a streamed RFC Editor source above the cap without Content-Length", async () => {
-    // The forged-Content-Length case above never reaches the streaming guard.
-    // A chunked response declares no length, so only the running byte count
-    // can stop it.
-    const cacheDirectory = await makeCacheDirectory();
-    const chunk = new TextEncoder().encode("x".repeat(1024 * 1024));
-    const sourceHttpClient = HttpClient.make((request) =>
-      Effect.succeed(
-        HttpClientResponse.fromWeb(
-          request,
-          new Response(
-            new ReadableStream<Uint8Array>({
-              start(controller) {
-                for (let index = 0; index < 9; index += 1) controller.enqueue(chunk);
-                controller.close();
-              },
-            }),
-            { status: 200, headers: { "content-type": "text/plain; charset=utf-8" } },
-          ),
-        ),
-      ),
-    );
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [rfcDocument],
-      rfcSourceHttpClient: sourceHttpClient,
-      decisionModel: makeDecisionModel([]),
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    await expect(
-      client.research({
-        schemaVersion: 2,
-        question: "What must the client send?",
-        rfc: "9110",
-      }),
-    ).rejects.toMatchObject({
-      _tag: "RfcSourceFetchError",
-      reason: expect.stringContaining("8388608 bytes"),
-    });
-  });
-
-  test("bounds the complete RFC Editor source operation by one deadline", async () => {
-    const cacheDirectory = await makeCacheDirectory();
+  test("times out a never-completing provider attempt at the elapsed-time budget", async () => {
     const clock = await Effect.runPromise(
       Effect.scoped(TestClock.make({ warningDelay: Duration.seconds(30) })),
     );
+    let attempts = 0;
     let startedResolve: (() => void) | undefined;
     const started = new Promise<void>((resolve) => {
       startedResolve = resolve;
     });
-    const sourceHttpClient = HttpClient.make((request) =>
-      Effect.succeed(
-        HttpClientResponse.fromWeb(
-          request,
-          new Response(
-            new ReadableStream({
-              start() {
-                startedResolve?.();
-              },
-            }),
-            { headers: { "content-type": "text/plain; charset=utf-8" } },
-          ),
-        ),
-      ),
-    );
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [rfcDocument],
-      rfcSourceHttpClient: sourceHttpClient,
-      decisionModel: makeDecisionModel([]),
-      clock,
-    });
-    clients.push(client);
-
-    const outcome = client
-      .research({
-        schemaVersion: 2,
-        question: "What must the client send?",
-        rfc: "9110",
-      })
-      .then(
-        () => ({ error: undefined }),
-        (error: unknown) => ({ error }),
-      );
-    await started;
-    await Effect.runPromise(clock.adjust(Duration.seconds(10)));
-    expect((await outcome).error).toMatchObject({
-      _tag: "RfcSourceFetchError",
-      reason: "RFC Editor request exceeded the ten-second deadline",
-    });
-  });
-
-  test("rejects a substituted final RFC Editor response URL", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const sourceHttpClient = HttpClient.make((request) => {
-      const response = new Response(sourceText, { headers: { "content-type": "text/plain" } });
-      Object.defineProperty(response, "url", {
-        value: "https://www.rfc-editor.org/rfc/rfc9999.txt",
-      });
-      return Effect.succeed(HttpClientResponse.fromWeb(request, response));
-    });
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [rfcDocument],
-      decisionModel: makeDecisionModel([]),
-      rfcSourceHttpClient: sourceHttpClient,
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    await expect(
-      client.research({
-        schemaVersion: 2,
-        question: "What must the client send?",
-        rfc: "9110",
-      }),
-    ).rejects.toBeInstanceOf(RfcSourceFetchError);
-  });
-
-  test("repairs a corrupted live source cache entry", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: undefined,
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [rfcDocument],
-      rfcSourceFetcher: makeSourceFetcher(sourceText),
-      decisionModel: makeDecisionModel([]),
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    await client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "9110",
-    });
-    const contentPath = join(cacheDirectory, "sources", "v2", "RFC9110.json");
-    const content = JSON.parse(await readFile(contentPath, "utf8")) as { readonly text: string };
-    await writeFile(contentPath, JSON.stringify({ ...content, text: "tampered" }));
-
-    const repaired = await client.research({
-      schemaVersion: 2,
-      question: "What must the client send?",
-      rfc: "9110",
-    });
-    expect(repaired.status).toBe("answered");
-  });
-
-  test("keeps oversized source-block overlap bounded and exact", () => {
-    const text = `1. Requirements\n\n${"x".repeat(4_200)}\nThe client MUST send a request.\n`;
-    const blocks = parseSourceBlocks(text);
-    expect(blocks.length).toBeGreaterThan(1);
-    expect(blocks[1]?.startOffset).toBe(blocks[0]?.endOffset - 200);
-    expect(blocks[1]?.startOffset).toBeGreaterThanOrEqual(0);
-    for (const block of blocks) {
-      expect(block.endOffset - block.startOffset).toBeLessThanOrEqual(4_000);
-      expect(text.slice(block.startOffset, block.endOffset)).toBe(block.text);
-    }
-  });
-
-  test("treats only column-zero lines as section headings", () => {
-    // RFC plain text repeats every heading in an indented table of contents,
-    // and indents body prose that can begin with a bare capital. Promoting
-    // either to a heading starts a spurious block and mislabels provenance.
-    const text = [
-      "Table of Contents",
-      "",
-      "   1.  Introduction",
-      "   2.  Conformance",
-      "",
-      "1.  Introduction",
-      "",
-      "   A proxy MUST send an appropriate Via header field, as described",
-      "   below, to every forwarded request.",
-      "",
-      "2.  Conformance",
-      "",
-      "   The client MUST send a Host header field.",
-      "",
-      "B.3.1.  Key Exchange Messages",
-      "",
-      "   An appendix subsection heading still counts.",
-      "",
-    ].join("\n");
-
-    const sections = parseSourceBlocks(text).map((block) => block.section);
-    expect(sections).toEqual([
-      null,
-      "1.  Introduction",
-      "2.  Conformance",
-      "B.3.1.  Key Exchange Messages",
-    ]);
-  });
-
-  test("ranks distinctive protocol anchors above repeated generic request terms", () => {
-    const genericText = "The server processes a request. ".repeat(40);
-    const statusText =
-      "The 421 (Misdirected Request) status code indicates that the request was misdirected.";
-    const blocks = [
+    const client = await makeClient(
+      [makeRfc(9110)],
       {
-        id: "generic-request",
-        section: "9.3.4. PUT",
-        startOffset: 0,
-        endOffset: genericText.length,
-        text: genericText,
-      },
-      {
-        id: "status-421",
-        section: "15.5.20. 421 Misdirected Request",
-        startOffset: genericText.length,
-        endOffset: genericText.length + statusText.length,
-        text: statusText,
-      },
-    ];
-
-    expect(
-      shortlistPassageCandidates(
-        blocks,
-        "In RFC 9110, when can a server reject a request with 421?",
-        2,
-      ).map(({ id }) => id),
-    ).toEqual(["status-421", "generic-request"]);
-  });
-
-  // Mirrors the RFC 9110 positive control: the 1.1 KB answering section (3.4)
-  // ranked 18th behind 3-4 KB blocks that accumulate incidental matches.
-  test("appends a short answering section without displacing primary candidates", () => {
-    const longBlocks = Array.from({ length: 4 }, (_, index) => {
-      const text =
-        "An intermediary forwards each request message and response message it receives. ".repeat(
-          24,
-        ) + "A client might retry a request after a connection failure. ".repeat(12);
-      return {
-        id: `long-${index}`,
-        section: `7.${index + 1}. Intermediary Handling`,
-        startOffset: index * 10_000,
-        endOffset: index * 10_000 + text.length,
-        text,
-      };
-    });
-    const answerText =
-      'A client sends requests to a server in the form of a "request" message with a method and request target.';
-    const answer = {
-      id: "messages",
-      section: "3.4. Messages",
-      startOffset: 50_000,
-      endOffset: 50_000 + answerText.length,
-      text: answerText,
-    };
-    const blocks = [...longBlocks, answer];
-    const question = "How does an HTTP client send a request message?";
-
-    const primary = shortlistPassageCandidates(blocks, question, 2, 0).map(({ id }) => id);
-    const union = shortlistPassageCandidates(blocks, question, 2, 2).map(({ id }) => id);
-
-    expect(primary).not.toContain("messages");
-    expect(union.slice(0, primary.length)).toEqual(primary);
-    expect(union).toContain("messages");
-    expect(union.length).toBeLessThanOrEqual(4);
-    expect(new Set(union).size).toBe(union.length);
-  });
-
-  test("keeps exact offsets valid when a source has no recoverable section headings", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const text = "An irregular RFC body states that clients send requests.\n";
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: undefined,
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [rfcDocument],
-      rfcSourceFetcher: makeSourceFetcher(text),
-      decisionModel: makeDecisionModel([]),
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    const result = await client.research({
-      schemaVersion: 2,
-      question: "What do clients send?",
-      rfc: "RFC9110",
-    });
-    const evidence = result.evidence[0];
-    expect(evidence?.provenance.section).toBeNull();
-    const sourceBytes = new TextEncoder().encode(text);
-    expect(
-      evidence === undefined
-        ? ""
-        : new TextDecoder().decode(
-            sourceBytes.slice(evidence.provenance.startOffset, evidence.provenance.endOffset),
-          ),
-    ).toBe(evidence?.quote);
-  });
-
-  test("discovers a topic from request-local metadata and uses three semantic stages", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const secondDocument = {
-      ...rfcDocument,
-      identifier: "RFC7230",
-      rfcNumber: 7230,
-      title: "HTTP/1.1 Message Syntax and Routing",
-      abstract: "HTTP message syntax and routing.",
-      canonicalUrl: "https://datatracker.ietf.org/doc/rfc7230/",
-    };
-    const calls: Array<unknown> = [];
-    const fetched: Array<string> = [];
-    const model = {
-      [DecisionModel.TypeId]: DecisionModel.TypeId,
-      decide: (
-        definition: { readonly decisions: Readonly<Record<string, Decision.Any>> },
-        options: { readonly input: TopicDecisionCall["input"] },
-      ) => {
-        calls.push({ definition, input: options.input });
-        const answers = Object.fromEntries(
-          Object.entries(definition.decisions).map(([key, decision]) => {
-            if (key === "question_atomicity") {
-              return [
-                key,
-                {
-                  label: "atomic",
-                  probabilities: { atomic: 0.99, compound: 0.01 },
-                  confidence: 0.99,
-                },
-              ];
-            }
-            if (decision._tag === "Probability") {
-              return [key, { probability: options.input.documents === undefined ? 0.95 : 0.35 }];
-            }
-            return [
-              key,
-              {
-                label: "direct_answer",
-                probabilities: {
-                  direct_answer: 0.99,
-                  partial_answer: 0.005,
-                  background_only: 0.001,
-                  contradictory: 0.001,
-                  irrelevant: 0.003,
-                },
-                confidence: 0.99,
-              },
-            ];
-          }),
-        );
-        return Effect.succeed({
-          answers,
-          usage: { inputTokens: 10, outputTokens: 6 },
-        });
-      },
-    } as unknown as DecisionModel.DecisionModel;
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-topic-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [rfcDocument, secondDocument],
-      rfcSourceFetcher: async (document) => {
-        fetched.push(document.identifier);
-        return {
-          sourceUrl: `https://www.rfc-editor.org/rfc/rfc${document.rfcNumber}.txt`,
-          text: `1. Requirements\n\nThe HTTP client MUST send a request.\n`,
-        };
-      },
-      decisionModel: model,
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    const result = await client.research({
-      schemaVersion: 2,
-      question: "What must an HTTP client send?",
-      rfc: null,
-      searchTerms: ["HTTP client request"],
-    });
-
-    expect(result.status).toBe("answered");
-    expect(result.rfc?.identifier).toBe(fetched[0]);
-    expect(result.evidence).toHaveLength(2);
-    expect(result.evidence.every((passage) => passage.quote.includes("MUST send"))).toBe(true);
-    expect(fetched).toHaveLength(2);
-    expect(new Set(fetched)).toEqual(new Set(["RFC9110", "RFC7230"]));
-    expect(calls).toHaveLength(3);
-
-    const topicCalls = calls as Array<TopicDecisionCall>;
-    const documentCall = topicCalls[0];
-    const documentInputs = documentCall?.input.documents ?? {};
-    expect(Object.keys(documentInputs)).toEqual(["document_0", "document_1"]);
-    for (const [key, inputDocument] of Object.entries(documentInputs)) {
-      const expectedDocument = [rfcDocument, secondDocument].find(
-        ({ identifier }) => identifier === inputDocument.identifier,
-      );
-      const decision = documentCall?.definition.decisions[key] as InspectableDecision | undefined;
-      expect(expectedDocument).toBeDefined();
-      expect(decision?.instructions).toContain(`candidate ${key}`);
-      expect(decision?.instructions).toContain(`input.documents["${key}"]`);
-      expect(decision?.instructions).toContain(inputDocument.identifier);
-      expect(decision?.instructions).toContain(inputDocument.title);
-      expect(decision?.instructions).toContain(inputDocument.abstract);
-      expect(decision?.criteria.true).toContain(inputDocument.identifier);
-    }
-
-    for (const call of [topicCalls[1], topicCalls[2]]) {
-      const passageInputs = call?.input.passages ?? {};
-      expect(Object.keys(passageInputs)).toEqual(["passage_0", "passage_1"]);
-      for (const [key, inputPassage] of Object.entries(passageInputs)) {
-        const decision = call?.definition.decisions[key] as InspectableDecision | undefined;
-        expect(decision?.instructions).toContain(`candidate ${key}`);
-        expect(decision?.instructions).toContain(`input.passages["${key}"].text`);
-        expect(decision?.instructions).toContain(inputPassage.id);
-        expect(inputPassage.text).toContain("MUST send a request");
-        expect(decision?.criteria).toBeDefined();
-        expect(Object.values(decision?.criteria ?? {}).join(" ")).toContain(inputPassage.id);
-      }
-    }
-
-    expect(result.diagnostics.candidates).toMatchObject({
-      documentCandidates: 2,
-      acceptedDocuments: 2,
-      selectedPassages: 2,
-    });
-    expect(result.diagnostics.documentSelection).toHaveLength(2);
-    expect(result.diagnostics.documentSelection?.map(({ probability }) => probability)).toEqual([
-      0.35, 0.35,
-    ]);
-    expect(result.diagnostics.timings.documentMs).toBeGreaterThanOrEqual(0);
-  });
-
-  test("bounds live discovery candidates and rejects irrelevant matches semantically", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const documents = [
-      rfcDocument,
-      ...Array.from({ length: 19 }, (_, index) => ({
-        ...rfcDocument,
-        identifier: `RFC${8000 + index}`,
-        rfcNumber: 8000 + index,
-        title: `HTTP topic ${index}`,
-        abstract: "HTTP topic background.",
-        canonicalUrl: `https://datatracker.ietf.org/doc/rfc${8000 + index}/`,
-      })),
-    ];
-    const documentBatchSizes: Array<number> = [];
-    const fetched: Array<string> = [];
-    const model = {
-      [DecisionModel.TypeId]: DecisionModel.TypeId,
-      decide: (
-        definition: { readonly decisions: Readonly<Record<string, Decision.Any>> },
-        options: {
-          readonly input: TopicDecisionCall["input"];
-        },
-      ) => {
-        if (options.input.documents !== undefined) {
-          documentBatchSizes.push(Object.keys(options.input.documents).length);
-        }
-        const answers = Object.fromEntries(
-          Object.entries(definition.decisions).map(([key, decision]) => {
-            if (key === "question_atomicity") {
-              return [
-                key,
-                {
-                  label: "atomic",
-                  probabilities: { atomic: 0.99, compound: 0.01 },
-                  confidence: 0.99,
-                },
-              ];
-            }
-            if (decision._tag === "Probability") {
-              const identifier = options.input.documents?.[key]?.identifier;
-              return [
-                key,
-                {
-                  probability:
-                    options.input.documents === undefined
-                      ? 0.95
-                      : identifier === "RFC9110"
-                        ? 0.95
-                        : 0.1,
-                },
-              ];
-            }
-            return [
-              key,
-              {
-                label: "direct_answer",
-                probabilities: {
-                  direct_answer: 0.99,
-                  partial_answer: 0.005,
-                  background_only: 0.001,
-                  contradictory: 0.001,
-                  irrelevant: 0.003,
-                },
-                confidence: 0.99,
-              },
-            ];
-          }),
-        );
-        return Effect.succeed({ answers, usage: { inputTokens: 4, outputTokens: 2 } });
-      },
-    } as unknown as DecisionModel.DecisionModel;
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-topic-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => documents,
-      rfcSourceFetcher: async (document) => {
-        fetched.push(document.identifier);
-        return makeSourceFetcher(sourceText)(document);
-      },
-      decisionModel: model,
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    const result = await client.research({
-      schemaVersion: 2,
-      question: "What does HTTP semantics require?",
-      rfc: null,
-      searchTerms: ["HTTP semantics"],
-    });
-
-    expect(result.status).toBe("answered");
-    expect(documentBatchSizes).toEqual([20]);
-    expect(result.diagnostics.candidates).toMatchObject({
-      discoveredDocuments: 20,
-      documentCandidates: 20,
-      acceptedDocuments: 1,
-    });
-    expect(fetched).toEqual(["RFC9110"]);
-    expect(result.evidence.every((passage) => passage.provenance.identifier === "RFC9110")).toBe(
-      true,
-    );
-  });
-
-  test("returns needs_review without fetching sources when no document is accepted", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const calls: Array<unknown> = [];
-    let sourceFetches = 0;
-    const model = {
-      [DecisionModel.TypeId]: DecisionModel.TypeId,
-      decide: (definition: { readonly decisions: Readonly<Record<string, Decision.Any>> }) => {
-        calls.push(definition);
-        const answers = Object.fromEntries(
-          Object.entries(definition.decisions).map(([key, decision]) =>
-            key === "question_atomicity"
-              ? [
-                  key,
-                  {
-                    label: "atomic",
-                    probabilities: { atomic: 0.99, compound: 0.01 },
-                    confidence: 0.99,
-                  },
-                ]
-              : decision._tag === "Probability"
-                ? [key, { probability: 0.1 }]
-                : [key, { probability: 0.1 }],
-          ),
-        );
-        return Effect.succeed({
-          answers,
-          usage: { inputTokens: 3, outputTokens: 2 },
-        });
-      },
-    } as unknown as DecisionModel.DecisionModel;
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-topic-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [rfcDocument],
-      rfcSourceFetcher: async () => {
-        sourceFetches += 1;
-        return sourceText;
-      },
-      decisionModel: model,
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    const result = await client.research({
-      schemaVersion: 2,
-      question: "What must an HTTP client send?",
-      rfc: null,
-      searchTerms: ["HTTP client request"],
-    });
-
-    expect(result.status).toBe("needs_review");
-    expect(result.rfc).toBeNull();
-    expect(result.evidence).toEqual([]);
-    expect(calls).toHaveLength(1);
-    expect(sourceFetches).toBe(0);
-    expect(result.diagnostics.source).toBeNull();
-    expect(result.diagnostics.candidates).toMatchObject({
-      documentCandidates: 1,
-      acceptedDocuments: 0,
-      sourceBlocks: 0,
-    });
-  });
-
-  test("returns needs_split when no document is accepted and the question is compound", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const calls: Array<unknown> = [];
-    // The document scores well above the acceptance threshold and the passage
-    // relation is a confident direct answer, so compoundness is the only reason
-    // nothing is accepted. Reporting needs_review here would hide a cause the
-    // engine already knows.
-    const model = makeDecisionModel([], "compound", "direct_answer", 0.9, 0.95, 0.95);
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-topic-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [rfcDocument],
-      rfcSourceFetcher: async () => sourceText,
-      decisionModel: {
-        ...model,
-        decide: (...args: Parameters<typeof model.decide>) => {
-          calls.push(args[0]);
-          return model.decide(...args);
+        [DecisionModel.TypeId]: DecisionModel.TypeId,
+        decide: () => {
+          attempts += 1;
+          startedResolve?.();
+          return Effect.never;
         },
       } as unknown as DecisionModel.DecisionModel,
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+      {},
+      { now: undefined, clock },
+    );
+    const outcome = client.research(request).then(
+      () => ({ kind: "success" as const }),
+      (error: unknown) => ({ kind: "error" as const, error }),
+    );
+    await started;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await Effect.runPromise(clock.adjust(Duration.seconds(10)));
+    const settled = await Promise.race([
+      outcome,
+      new Promise<{ readonly kind: "guard" }>((resolve) =>
+        setTimeout(() => resolve({ kind: "guard" }), 250),
+      ),
+    ]);
+    expect(settled).toMatchObject({
+      kind: "error",
+      error: {
+        _tag: "DecisionModelError",
+        stage: "section",
+        reason: expect.stringContaining("elapsed-time budget"),
+        attempts: 1,
+      },
     });
-    clients.push(client);
-
-    const result = await client.research({
-      schemaVersion: 2,
-      question: "What must an HTTP client send, and which RFC obsoleted that rule?",
-      rfc: null,
-      searchTerms: ["HTTP client request"],
-    });
-
-    // needs_split names a question the caller can act on; needs_review does not.
-    expect(result.status).toBe("needs_split");
-    expect(result.diagnostics.atomicity).toMatchObject({ label: "compound" });
-    expect(result.diagnostics.candidates).toMatchObject({ documentCandidates: 1 });
-    expect(result.diagnostics.documentSelection?.[0]?.probability).toBeGreaterThan(0.9);
-    // Compoundness, not passage quality, is what keeps the passage unaccepted.
-    expect(result.diagnostics.candidates).toMatchObject({ selectedPassages: 0 });
-  });
-
-  test("researches a well-scoring document even when the question is compound", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    // Whether a document is relevant does not depend on how many questions the
-    // request bundles. Refusing the document leaves the caller an empty bundle
-    // with no RFC and no passage, so it rephrases instead of splitting. The
-    // atomicity gates in passage selection and statusFromRelations still keep
-    // the result out of answered and partial.
-    const model = makeDecisionModel([], "compound", "direct_answer", 0.9, 0.95, 0.95);
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-topic-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [rfcDocument],
-      rfcSourceFetcher: async () => sourceText,
-      decisionModel: model,
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    const result = await client.research({
-      schemaVersion: 2,
-      question: "What must an HTTP client send, and which RFC obsoleted that rule?",
-      rfc: null,
-      searchTerms: ["HTTP client request"],
-    });
-
-    expect(result.status).toBe("needs_split");
-    // The caller now learns which RFC the engine settled on.
-    expect(result.rfc?.identifier).toBe(rfcDocument.identifier);
-    expect(result.diagnostics.candidates).toMatchObject({ acceptedDocuments: 1 });
-    // Compoundness still blocks accepted evidence.
-    expect(result.evidence).toHaveLength(0);
-    expect(result.reviewCandidates?.length ?? 0).toBeGreaterThan(0);
-  });
-
-  test("fails with a document-stage error when a document probability is malformed", async () => {
-    const cacheDirectory = await makeCacheDirectory();
-    const model = {
-      [DecisionModel.TypeId]: DecisionModel.TypeId,
-      decide: () =>
-        Effect.succeed({
-          answers: {
-            question_atomicity: {
-              label: "atomic",
-              probabilities: { atomic: 0.99, compound: 0.01 },
-              confidence: 0.99,
-            },
-            document_0: { probability: 2 },
-          },
-          usage: { inputTokens: 1, outputTokens: 1 },
-        }),
-    } as unknown as DecisionModel.DecisionModel;
-    const client = await createRfcClient({
-      cacheDirectory,
-      modelAlias: "jev-topic-test",
-      typeSafeApiKey: undefined,
-      typeSafeApiUrl: undefined,
-      metadataSource: async () => [rfcDocument],
-      decisionModel: model,
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
-    clients.push(client);
-
-    await expect(
-      client.research({
-        schemaVersion: 2,
-        question: "What must an HTTP client send?",
-        rfc: null,
-        searchTerms: ["HTTP client request"],
-      }),
-    ).rejects.toMatchObject({
-      _tag: "DecisionModelError",
-      stage: "document",
-    });
+    expect(attempts).toBe(1);
   });
 });

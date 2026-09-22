@@ -15,9 +15,10 @@ import {
   DecisionModelError,
   ResolvedModelName,
   ResolvedModelNames,
-  parseSourceBlocks,
   summarizeResolvedModels,
 } from "./research";
+import { schemaVersion } from "./protocol";
+import { sectionAtOffset } from "./sections";
 import { RfcSourceCacheError, RfcSourceFetchError, type RfcSource } from "./source";
 
 /**
@@ -59,7 +60,7 @@ export type CitationOffsetUnit = Schema.Schema.Type<typeof CitationOffsetUnitSch
  * while still accepting the omitted convenience form.
  */
 export const CitationVerificationRequestSchema = Schema.Struct({
-  schemaVersion: Schema.Literal(2),
+  schemaVersion: Schema.Literal(schemaVersion),
   rfc: Schema.NonEmptyString,
   claim: Schema.NonEmptyString,
   quote: Schema.NonEmptyString,
@@ -74,7 +75,7 @@ type DecodedCitationVerificationRequest = Schema.Schema.Type<
  * A decoded request to verify one factual claim against one exact RFC quote.
  */
 export interface CitationVerificationRequest {
-  readonly schemaVersion: 2;
+  readonly schemaVersion: typeof schemaVersion;
   readonly rfc: string;
   readonly claim: string;
   readonly quote: string;
@@ -142,7 +143,7 @@ const CitationTimingsSchema = Schema.Struct({
  * Bounded diagnostics for one citation verification operation.
  */
 export const CitationVerificationDiagnosticsSchema = Schema.Struct({
-  schemaVersion: Schema.Literal(2),
+  schemaVersion: Schema.Literal(schemaVersion),
   policyVersion: Schema.NonEmptyString,
   requestedModel: Schema.NonEmptyString,
   resolvedModel: Schema.NonEmptyString,
@@ -166,7 +167,7 @@ export type CitationVerificationDiagnostics = Schema.Schema.Type<
  * The versioned result of checking a factual claim against an RFC quotation.
  */
 export const CitationVerificationResultSchema = Schema.Struct({
-  schemaVersion: Schema.Literal(2),
+  schemaVersion: Schema.Literal(schemaVersion),
   kind: Schema.Literal("citation_verification"),
   verdict: CitationVerdictSchema,
   rfc: RfcDocumentSchema,
@@ -512,13 +513,6 @@ const findReflowedOccurrences = (
   return occurrences;
 };
 
-const sectionAtOffset = (text: string, codeUnitOffset: number): string | null => {
-  const block = parseSourceBlocks(text).find(
-    (candidate) => candidate.startOffset <= codeUnitOffset && codeUnitOffset < candidate.endOffset,
-  );
-  return block?.section ?? null;
-};
-
 const contextAround = (
   text: string,
   startCodeUnitOffset: number,
@@ -584,7 +578,7 @@ const resultFrom = ({
     fetchedAt: source.fetchedAt,
   } satisfies CitationProvenance;
   const diagnostics = {
-    schemaVersion: 2 as const,
+    schemaVersion,
     policyVersion: citationPolicy.policyVersion,
     requestedModel: modelAlias,
     resolvedModel,
@@ -598,7 +592,7 @@ const resultFrom = ({
   } satisfies CitationVerificationDiagnostics;
 
   return Schema.decodeUnknownSync(CitationVerificationResultSchema)({
-    schemaVersion: 2,
+    schemaVersion,
     kind: "citation_verification",
     verdict,
     rfc: document,
