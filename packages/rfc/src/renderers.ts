@@ -46,6 +46,20 @@ const noRfcReason = (result: EvidenceBundle): string => {
 };
 
 /**
+ * Say how to spend the follow-up when topic discovery matched nothing.
+ *
+ * Discovery matches literal title and abstract substrings, and RFC titles
+ * often differ from a feature's common name (RFC 8297 is "Indicating Hints",
+ * asked for as "Early Hints"). A bare "no RFC matched" left callers retrying
+ * the same common name and then refusing.
+ */
+const noMatchGuidance =
+  "Next step: no RFC title or abstract contains these terms. RFC titles often differ from common names, so spend your one follow-up on either rfc_research_known_rfc if you know the RFC number, or this tool with the terms you expect in the RFC's title.";
+
+const hasNoTopicMatch = (result: EvidenceBundle): boolean =>
+  !result.rfc && result.diagnostics.candidates?.documentCandidates === 0;
+
+/**
  * Say what to do with a `needs_split` bundle rather than only naming it.
  *
  * A bare `Status: needs_split` reads as a failure, so callers retried the same
@@ -126,6 +140,7 @@ const renderAgentEvidenceBundle = (result: EvidenceBundle): string => {
     `Status: ${result.status}`,
     `RFC: ${result.rfc?.identifier ?? noRfcReason(result)}`,
     ...(result.status === "needs_split" ? [splitGuidance] : []),
+    ...(hasNoTopicMatch(result) ? [noMatchGuidance] : []),
     ...contexts.map(({ role, document, state }) =>
       [
         `Context: ${role} ${document.identifier} (${state})`,

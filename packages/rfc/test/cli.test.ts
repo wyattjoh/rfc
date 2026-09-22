@@ -1497,6 +1497,8 @@ describe("agent evidence bundle rendering", () => {
       { audience: "agent" },
     );
     expect(rendered).toContain("RFC: no RFC matched the search terms");
+    expect(rendered).toContain("Next step: no RFC title or abstract contains these terms.");
+    expect(rendered).toContain("rfc_research_known_rfc if you know the RFC number");
   });
 
   test("warns a section-seeking question that the defining section is unconfirmed", () => {
