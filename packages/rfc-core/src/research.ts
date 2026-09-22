@@ -1,16 +1,4 @@
-import {
-  Cause,
-  Clock,
-  Context,
-  Duration,
-  Effect,
-  FileSystem,
-  Path,
-  Predicate,
-  Ref,
-  Result,
-  Schema,
-} from "effect";
+import { Clock, Context, Effect, FileSystem, Path, Predicate, Ref, Result, Schema } from "effect";
 import * as AiError from "effect/unstable/ai/AiError";
 import * as Decision from "effect/unstable/ai/Decision";
 import * as DecisionModel from "effect/unstable/ai/DecisionModel";
@@ -24,6 +12,7 @@ import {
 import { LiveRfcSource, RfcSourceRevalidationError } from "./live-source";
 import type { RfcMetadata } from "./metadata";
 import { makeUtf8OffsetMap, utf8OffsetUnit } from "./offsets";
+import { DecisionModelError, retryDecisionModel } from "./decision-retry";
 import { InputTokenCostSchema } from "./pricing";
 import { schemaVersion } from "./protocol";
 import { parseRfcStructure, type RfcParagraph, type RfcSection } from "./sections";
@@ -277,17 +266,7 @@ export class RfcNotFoundError extends Schema.TaggedError<RfcNotFoundError>()("Rf
   rfc: Schema.String,
 }) {}
 
-/**
- * A typed failure from an official DecisionModel request.
- */
-export class DecisionModelError extends Schema.TaggedError<DecisionModelError>()(
-  "DecisionModelError",
-  {
-    stage: Schema.Literals(["rank", "section", "paragraph", "citation"]),
-    reason: Schema.String,
-    attempts: Schema.optionalKey(Schema.Natural),
-  },
-) {}
+export { DecisionModelError };
 
 type DecisionStage = "rank" | "section" | "paragraph";
 
@@ -296,30 +275,22 @@ const ProbabilityMapSchema = Schema.Record(Schema.String, Schema.Finite);
 const providerErrorTag = (error: unknown): string =>
   AiError.isAiError(error) ? error.reason._tag : "UnknownProviderError";
 
-const retryDelayMilliseconds = (error: unknown): number => {
-  if (!AiError.isAiError(error) || error.retryAfter === undefined) {
-    return retrievalPolicy.providerDefaultRetryDelayMilliseconds;
-  }
-
-  const delay = Duration.toMillis(error.retryAfter);
-  return Number.isFinite(delay) && delay >= 0
-    ? delay
-    : retrievalPolicy.providerDefaultRetryDelayMilliseconds;
-};
-
-const providerFailure = (
-  stage: DecisionStage,
-  error: unknown,
-  attempts: number,
-  exhausted: boolean,
-): DecisionModelError =>
-  new DecisionModelError({
-    stage,
-    reason: exhausted
-      ? `DecisionModel retry budget exhausted after ${attempts} attempts (${providerErrorTag(error)})`
-      : `DecisionModel provider failure (${providerErrorTag(error)})`,
-    attempts,
-  });
+const researchRetryPolicy = (stage: DecisionStage) => ({
+  stage,
+  maxAttempts: retrievalPolicy.providerMaxAttempts,
+  maxElapsedMilliseconds: retrievalPolicy.providerMaxElapsedMilliseconds,
+  startedAt: undefined,
+  baseDelayMilliseconds: () => retrievalPolicy.providerDefaultRetryDelayMilliseconds,
+  reasons: {
+    budgetBeforeAttempt: (attempt: number) =>
+      `DecisionModel elapsed-time budget exhausted before attempt ${attempt}`,
+    budgetDuringAttempt: (attempt: number) =>
+      `DecisionModel elapsed-time budget exhausted during attempt ${attempt}`,
+    rejected: (error: unknown) => `DecisionModel provider failure (${providerErrorTag(error)})`,
+    exhausted: (error: AiError.AiError, attempts: number) =>
+      `DecisionModel retry budget exhausted after ${attempts} attempts (${providerErrorTag(error)})`,
+  },
+});
 
 const decodeProbabilityMap = (
   stage: DecisionStage,
@@ -416,75 +387,6 @@ const providerAnswers = (
       }),
   });
 
-const decideWithRetry = Effect.fnUntraced(function* <A>(
-  stage: DecisionStage,
-  operation: () => Effect.Effect<A, AiError.AiError>,
-): Effect.fn.Return<A, DecisionModelError> {
-  const policy = retrievalPolicy;
-  const startedAt = yield* Clock.currentTimeMillis;
-  let scheduledDelay = 0;
-
-  for (let attempt = 1; attempt <= policy.providerMaxAttempts; attempt += 1) {
-    const attemptStartedAt = yield* Clock.currentTimeMillis;
-    const elapsedBeforeAttempt = Math.max(0, attemptStartedAt - startedAt, scheduledDelay);
-    if (elapsedBeforeAttempt >= policy.providerMaxElapsedMilliseconds) {
-      return yield* new DecisionModelError({
-        stage,
-        reason: `DecisionModel elapsed-time budget exhausted before attempt ${attempt}`,
-        attempts: attempt - 1,
-      });
-    }
-
-    const remainingTime = policy.providerMaxElapsedMilliseconds - elapsedBeforeAttempt;
-    const result = yield* Effect.result(
-      operation().pipe(Effect.timeout(Duration.millis(remainingTime))),
-    );
-    if (Result.isSuccess(result)) {
-      const completedAt = yield* Clock.currentTimeMillis;
-      const elapsedAtCompletion = Math.max(0, completedAt - startedAt, scheduledDelay);
-      if (elapsedAtCompletion <= policy.providerMaxElapsedMilliseconds) {
-        return result.success;
-      }
-      return yield* new DecisionModelError({
-        stage,
-        reason: `DecisionModel elapsed-time budget exhausted during attempt ${attempt}`,
-        attempts: attempt,
-      });
-    }
-
-    const error = result.failure;
-    if (Cause.isTimeoutError(error)) {
-      return yield* new DecisionModelError({
-        stage,
-        reason: `DecisionModel elapsed-time budget exhausted during attempt ${attempt}`,
-        attempts: attempt,
-      });
-    }
-    if (!AiError.isAiError(error) || !error.isRetryable) {
-      return yield* providerFailure(stage, error, attempt, false);
-    }
-
-    const delay = retryDelayMilliseconds(error);
-    const now = yield* Clock.currentTimeMillis;
-    const elapsedMs = Math.max(0, now - startedAt, scheduledDelay);
-    if (
-      attempt >= policy.providerMaxAttempts ||
-      elapsedMs + delay > policy.providerMaxElapsedMilliseconds
-    ) {
-      return yield* providerFailure(stage, error, attempt, true);
-    }
-
-    yield* Effect.sleep(Duration.millis(delay));
-    scheduledDelay += delay;
-  }
-
-  return yield* new DecisionModelError({
-    stage,
-    reason: "DecisionModel retry policy ended without a provider result",
-    attempts: policy.providerMaxAttempts,
-  });
-});
-
 type Usage = {
   readonly inputTokens: number | undefined;
   readonly outputTokens: number | undefined;
@@ -526,7 +428,10 @@ const decide = Effect.fnUntraced(function* <S extends Schema.Codec<any, any, nev
     input,
     decisions: decisions as Record<string, Decision.Any>,
   });
-  const response = yield* decideWithRetry(stage, () => model.decide(definition, { input: state }));
+  const response = yield* retryDecisionModel(
+    researchRetryPolicy(stage),
+    Effect.suspend(() => model.decide(definition, { input: state })),
+  );
   const answers = yield* providerAnswers(stage, response);
   const usage = yield* decodeUsage(
     stage,

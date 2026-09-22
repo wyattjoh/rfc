@@ -1,5 +1,4 @@
-import { Cause, Clock, Duration, Effect, FileSystem, Path, Ref, Result, Schema } from "effect";
-import * as AiError from "effect/unstable/ai/AiError";
+import { Clock, Effect, FileSystem, Path, Ref, Schema } from "effect";
 import * as Decision from "effect/unstable/ai/Decision";
 import * as DecisionModel from "effect/unstable/ai/DecisionModel";
 import {
@@ -18,6 +17,7 @@ import {
   summarizeResolvedModels,
 } from "./research";
 import { schemaVersion } from "./protocol";
+import { retryDecisionModel, type DecisionRetryPolicy } from "./decision-retry";
 import { sectionAtOffset } from "./sections";
 import { RfcSourceCacheError, RfcSourceFetchError, type RfcSource } from "./source";
 
@@ -281,88 +281,24 @@ const citationDecision = Decision.make({
   },
 });
 
-type CitationDecisionResponse = DecisionModel.DecideResponse<typeof citationDecision.decisions>;
-
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : "The citation DecisionModel request failed";
 
-const retryDelay = (error: AiError.AiError, attempt: number): number => {
-  if (error.retryAfter !== undefined) return Math.max(0, Duration.toMillis(error.retryAfter));
-  return citationPolicy.initialRetryDelayMilliseconds * 2 ** attempt;
-};
-
-const retryDecision = Effect.fnUntraced(function* (
-  operation: Effect.Effect<CitationDecisionResponse, AiError.AiError, DecisionModel.DecisionModel>,
-  startedAt: number,
-): Effect.fn.Return<CitationDecisionResponse, DecisionModelError, DecisionModel.DecisionModel> {
-  let scheduledDelay = 0;
-
-  for (let attempt = 0; attempt < citationPolicy.maxAttempts; attempt += 1) {
-    const attemptStartedAt = yield* Clock.currentTimeMillis;
-    const elapsedBeforeAttempt = Math.max(0, attemptStartedAt - startedAt, scheduledDelay);
-    if (elapsedBeforeAttempt >= citationPolicy.maxElapsedMilliseconds) {
-      return yield* new DecisionModelError({
-        stage: "citation",
-        reason: `The citation DecisionModel elapsed-time budget was exhausted before attempt ${attempt + 1}`,
-        attempts: attempt,
-      });
-    }
-
-    const remainingTime = citationPolicy.maxElapsedMilliseconds - elapsedBeforeAttempt;
-    const result = yield* Effect.result(
-      operation.pipe(Effect.timeout(Duration.millis(remainingTime))),
-    );
-    if (Result.isSuccess(result)) {
-      const completedAt = yield* Clock.currentTimeMillis;
-      const elapsedAtCompletion = Math.max(0, completedAt - startedAt, scheduledDelay);
-      if (elapsedAtCompletion <= citationPolicy.maxElapsedMilliseconds) {
-        return result.success;
-      }
-      return yield* new DecisionModelError({
-        stage: "citation",
-        reason: `The citation DecisionModel elapsed-time budget was exhausted during attempt ${attempt + 1}`,
-        attempts: attempt + 1,
-      });
-    }
-
-    const error = result.failure;
-    if (Cause.isTimeoutError(error)) {
-      return yield* new DecisionModelError({
-        stage: "citation",
-        reason: `The citation DecisionModel elapsed-time budget was exhausted during attempt ${attempt + 1}`,
-        attempts: attempt + 1,
-      });
-    }
-    if (!AiError.isAiError(error) || !error.isRetryable) {
-      return yield* new DecisionModelError({
-        stage: "citation",
-        reason: errorMessage(error),
-        attempts: attempt + 1,
-      });
-    }
-
-    const delay = retryDelay(error, attempt);
-    const now = yield* Clock.currentTimeMillis;
-    const elapsed = Math.max(0, now - startedAt, scheduledDelay);
-    if (
-      attempt + 1 >= citationPolicy.maxAttempts ||
-      elapsed + delay > citationPolicy.maxElapsedMilliseconds
-    ) {
-      return yield* new DecisionModelError({
-        stage: "citation",
-        reason: errorMessage(error),
-        attempts: attempt + 1,
-      });
-    }
-    yield* Effect.sleep(Duration.millis(delay));
-    scheduledDelay += delay;
-  }
-
-  return yield* new DecisionModelError({
-    stage: "citation",
-    reason: "The citation DecisionModel retry budget was exhausted",
-    attempts: citationPolicy.maxAttempts,
-  });
+const citationRetryPolicy = (startedAt: number): DecisionRetryPolicy => ({
+  stage: "citation",
+  maxAttempts: citationPolicy.maxAttempts,
+  maxElapsedMilliseconds: citationPolicy.maxElapsedMilliseconds,
+  startedAt,
+  baseDelayMilliseconds: (_error, failedAttempts) =>
+    citationPolicy.initialRetryDelayMilliseconds * 2 ** (failedAttempts - 1),
+  reasons: {
+    budgetBeforeAttempt: (attempt) =>
+      `The citation DecisionModel elapsed-time budget was exhausted before attempt ${attempt}`,
+    budgetDuringAttempt: (attempt) =>
+      `The citation DecisionModel elapsed-time budget was exhausted during attempt ${attempt}`,
+    rejected: errorMessage,
+    exhausted: errorMessage,
+  },
 });
 
 const normalizeProbabilities = (
@@ -403,11 +339,11 @@ const citationStage = Effect.fnUntraced(function* (
   DecisionModelError,
   DecisionModel.DecisionModel
 > {
-  const response = yield* retryDecision(
+  const response = yield* retryDecisionModel(
+    citationRetryPolicy(startedAt),
     DecisionModel.decide(citationDecision, {
       input: { claim, quote, context, section },
     }),
-    startedAt,
   );
   const answer = yield* Effect.try({
     try: () => Schema.decodeUnknownSync(citationAnswerSchema)(response.answers.citation_verdict),
