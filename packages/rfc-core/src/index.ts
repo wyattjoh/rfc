@@ -36,6 +36,7 @@ import {
 import {
   RfcDiscovery,
   RfcDiscoveryError,
+  RfcIdentifierError,
   defaultDatatrackerApiUrl,
   datatrackerCurrencyContextLimit,
   datatrackerDocumentCandidateLimit,
@@ -96,7 +97,7 @@ export {
   type CitationVerificationResult,
   type CitationVerdict,
 } from "./citation";
-export { RfcDiscoveryError, RfcDocumentSchema } from "./discovery";
+export { RfcDiscoveryError, RfcDocumentSchema, RfcIdentifierError } from "./discovery";
 export {
   datatrackerTopicSearchTermLimit,
   datatrackerTopicSearchTermMaximumCharacters,
@@ -331,6 +332,7 @@ export class OperationTimeoutError extends Schema.TaggedError<OperationTimeoutEr
  */
 export type RfcCoreError =
   | RfcDiscoveryError
+  | RfcIdentifierError
   | RfcSourceCacheError
   | RfcSourceFetchError
   | RfcSourceRevalidationError
@@ -1115,6 +1117,17 @@ const boundedReason = (reason: string): string => {
  * @returns A safe, serializable error envelope.
  */
 export const toErrorEnvelope = (error: unknown): ErrorEnvelope => {
+  if (error instanceof RfcIdentifierError) {
+    return {
+      schemaVersion,
+      kind: "error",
+      error: {
+        code: "invalid_input",
+        message: boundedReason(error.reason),
+      },
+    };
+  }
+
   if (error instanceof RfcDiscoveryError) {
     return {
       schemaVersion,

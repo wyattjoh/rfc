@@ -1889,6 +1889,78 @@ describe("createRfcClient", () => {
     expect(datatracker.urls).toHaveLength(3);
   });
 
+  test("retries after an attempt that hangs past its share of the fetch deadline", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const clock = await Effect.runPromise(
+      Effect.scoped(TestClock.make({ warningDelay: Duration.seconds(30) })),
+    );
+    let documentAttempts = 0;
+    let firstAttemptStartedResolve: (() => void) | undefined;
+    const firstAttemptStarted = new Promise<void>((resolve) => {
+      firstAttemptStartedResolve = resolve;
+    });
+    const relationships = Response.json({
+      meta: { limit: 64, offset: 0, total_count: 0, next: null, previous: null },
+      objects: [],
+    });
+    const http = HttpClient.make((request, url) => {
+      if (url.pathname.endsWith("/document/rfc9110/")) {
+        documentAttempts += 1;
+        if (documentAttempts === 1) {
+          firstAttemptStartedResolve?.();
+          // A hung upstream connection, which is what consumed the budget in the
+          // observed failure. It never answers and never fails on its own.
+          return Effect.never as unknown as Effect.Effect<
+            HttpClientResponse.HttpClientResponse,
+            never
+          >;
+        }
+        return Effect.succeed(
+          HttpClientResponse.fromWeb(request, Response.json(datatrackerDocument)),
+        );
+      }
+      return Effect.succeed(HttpClientResponse.fromWeb(request, relationships));
+    });
+    const client = await createRfcClient({
+      cacheDirectory,
+      datatrackerHttpClient: http,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      decisionModel: makeDecisionModel(),
+      clock,
+      rfcSourceFetcher: async () => ({
+        sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+        text: sourceText,
+      }),
+    });
+    clients.push(client);
+
+    const research = client
+      .research({
+        schemaVersion: 2,
+        question: "What must the client send?",
+        rfc: "RFC9110",
+        searchTerms: undefined,
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+    await firstAttemptStarted;
+
+    // One attempt must not be able to spend the whole retry budget, so the
+    // remaining attempts are still reachable after it times out.
+    for (let elapsed = 0; elapsed < 30 && documentAttempts < 2; elapsed += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await Effect.runPromise(clock.adjust(Duration.seconds(1)));
+    }
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(documentAttempts).toBeGreaterThan(1);
+    await Promise.race([research, new Promise<void>((resolve) => setTimeout(resolve, 250))]);
+  });
+
   test("refuses a retry whose delay would cross the ten-second fetch deadline", async () => {
     const cacheDirectory = await makeCacheDirectory();
     let clockReads = 0;
@@ -3211,6 +3283,53 @@ describe("createRfcClient", () => {
           "Unable to fetch RFC source from https://www.rfc-editor.org/rfc/rfc9110.txt: RFC Editor returned HTTP 503",
       },
     });
+  });
+
+  test("toErrorEnvelope separates an unusable RFC identifier from a retrieval failure", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    const datatracker = makeDatatrackerHttpClient(
+      () => new Response("server failure", { status: 503 }),
+    );
+    const client = await createRfcClient({
+      cacheDirectory,
+      datatrackerHttpClient: datatracker.client,
+      modelAlias: "jev-test",
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      decisionModel: makeDecisionModel(),
+    });
+    clients.push(client);
+
+    const research = (rfc: string) =>
+      client
+        .research({
+          schemaVersion: 2,
+          question: "What must the client send?",
+          rfc,
+          searchTerms: undefined,
+        })
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+
+    const identifierEnvelope = toErrorEnvelope(await research("BCP14"));
+    expect(identifierEnvelope).toMatchObject({
+      kind: "error",
+      error: { code: "invalid_input" },
+    });
+    // Nothing was retrieved, so naming an endpoint would misattribute the
+    // failure to Datatracker.
+    const identifierMessage =
+      identifierEnvelope.kind === "error" ? identifierEnvelope.error.message : "";
+    expect(identifierMessage).not.toContain("http");
+    expect(datatracker.urls).toEqual([]);
+
+    expect(toErrorEnvelope(await research("RFC9110"))).toMatchObject({
+      kind: "error",
+      error: { code: "discovery_failed" },
+    });
+    expect(datatracker.urls.length).toBeGreaterThan(0);
   });
 
   test("bounds an upstream failure description carried into the envelope", () => {

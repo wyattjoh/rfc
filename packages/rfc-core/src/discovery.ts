@@ -223,6 +223,21 @@ export class RfcDiscoveryError extends Schema.TaggedError<RfcDiscoveryError>()(
 ) {}
 
 /**
+ * Typed rejection of an RFC identifier that names no published RFC.
+ *
+ * Kept distinct from {@link RfcDiscoveryError} because nothing is retrieved and
+ * no endpoint is contacted: a caller must be able to tell a bad argument from an
+ * upstream outage.
+ */
+export class RfcIdentifierError extends Schema.TaggedError<RfcIdentifierError>()(
+  "RfcIdentifierError",
+  {
+    identifier: Schema.String,
+    reason: Schema.String,
+  },
+) {}
+
+/**
  * Request-local exact RFC metadata without relationship traversal.
  */
 export interface LiveExactRfcLookup {
@@ -325,13 +340,21 @@ export interface RfcDiscoveryService {
    */
   readonly lookupExactRfc: (
     identifier: string,
-  ) => Effect.Effect<LiveExactRfcLookup, RfcDiscoveryError, FileSystem.FileSystem | Path.Path>;
+  ) => Effect.Effect<
+    LiveExactRfcLookup,
+    RfcDiscoveryError | RfcIdentifierError,
+    FileSystem.FileSystem | Path.Path
+  >;
   /**
    * Retrieve exact metadata and recursively traverse successor relationships.
    */
   readonly lookupKnownRfc: (
     identifier: string,
-  ) => Effect.Effect<LiveRfcLookup, RfcDiscoveryError, FileSystem.FileSystem | Path.Path>;
+  ) => Effect.Effect<
+    LiveRfcLookup,
+    RfcDiscoveryError | RfcIdentifierError,
+    FileSystem.FileSystem | Path.Path
+  >;
   /**
    * Discover bounded RFC candidates for ordered caller-supplied terms.
    */
@@ -627,6 +650,13 @@ const fetchJsonWithinDeadline = Effect.fnUntraced(function* (
     }
 
     const remaining = datatrackerRequestDeadlineMilliseconds - elapsedBeforeAttempt;
+    // Each attempt gets an equal share of what is left of the deadline, so a
+    // single hung connection cannot spend the whole budget and strand the
+    // remaining attempts. The last attempt is free to use the rest.
+    const attemptDeadline = Math.max(
+      1,
+      Math.floor(remaining / (datatrackerMaxAttempts - attempt + 1)),
+    );
     const requestResult = yield* Effect.result(
       Effect.gen(function* () {
         const response = yield* http.get(url);
@@ -655,7 +685,7 @@ const fetchJsonWithinDeadline = Effect.fnUntraced(function* (
 
         const value = yield* readBoundedJson(response, url, attempt);
         return { response, value } as const;
-      }).pipe(Effect.timeout(Duration.millis(remaining))),
+      }).pipe(Effect.timeout(Duration.millis(attemptDeadline))),
     );
     if (Result.isFailure(requestResult)) {
       statuses.push(null);
@@ -1010,15 +1040,17 @@ const lookupExactRfc = Effect.fnUntraced(function* (
   baseUrl: string,
   identifier: string,
   metadataDirectory: string | undefined,
-): Effect.fn.Return<LiveExactRfcLookup, RfcDiscoveryError, FileSystem.FileSystem | Path.Path> {
+): Effect.fn.Return<
+  LiveExactRfcLookup,
+  RfcDiscoveryError | RfcIdentifierError,
+  FileSystem.FileSystem | Path.Path
+> {
   const startedAt = yield* Clock.currentTimeMillis;
   const name = normalizeRfcName(identifier);
   if (name === undefined) {
-    return yield* new RfcDiscoveryError({
-      stage: "request",
-      url: baseUrl,
+    return yield* new RfcIdentifierError({
+      identifier,
       reason: "RFC identifier must contain a positive published RFC number",
-      attempts: 0,
     });
   }
   const exact = yield* fetchExactDocument(http, baseUrl, name, metadataDirectory);
@@ -1037,16 +1069,18 @@ const lookupKnownRfc = Effect.fnUntraced(function* (
   identifier: string,
   configuredDepthLimit: number | undefined,
   metadataDirectory: string | undefined,
-): Effect.fn.Return<LiveRfcLookup, RfcDiscoveryError, FileSystem.FileSystem | Path.Path> {
+): Effect.fn.Return<
+  LiveRfcLookup,
+  RfcDiscoveryError | RfcIdentifierError,
+  FileSystem.FileSystem | Path.Path
+> {
   const startedAt = yield* Clock.currentTimeMillis;
   const depthLimit = boundedCurrencyDepthLimit(configuredDepthLimit);
   const requestedName = normalizeRfcName(identifier);
   if (requestedName === undefined) {
-    return yield* new RfcDiscoveryError({
-      stage: "request",
-      url: baseUrl,
+    return yield* new RfcIdentifierError({
+      identifier,
       reason: "RFC identifier must contain a positive published RFC number",
-      attempts: 0,
     });
   }
 
