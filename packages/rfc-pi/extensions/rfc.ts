@@ -10,11 +10,8 @@ import type { AuthStatus } from "@wyattjoh/rfc";
 import {
   datatrackerTopicSearchTermLimit,
   datatrackerTopicSearchTermMaximumCharacters,
-  renderAuthStatus,
-  renderCitationVerification,
-  renderResearchResult,
-  renderSourceCacheRemove,
-  renderSourceCacheStatus,
+  citationVerificationAgentJson,
+  researchResultAgentJson,
   rfcAgentParameterDescriptions as descriptions,
   rfcAgentToolMetadata,
   rfcPiInstructions,
@@ -172,9 +169,6 @@ const rfcCliCommandVariable = "RFC_CLI_COMMAND";
  * its tools.
  */
 const rfcLocalToolsVariable = "RFC_PI_LOCAL_TOOLS";
-
-const renderAgentResearch = (value: ResearchResult): string =>
-  renderResearchResult(value, { audience: "agent" });
 
 /**
  * The executable and leading arguments used to run the RFC CLI.
@@ -403,7 +397,7 @@ export default function rfcExtension(pi: ExtensionAPI): void {
         },
         signal,
       );
-      return successResult(result.value, renderAgentResearch(result.value), result.warnings);
+      return successResult(result.value, researchResultAgentJson(result.value), result.warnings);
     },
   });
 
@@ -422,7 +416,7 @@ export default function rfcExtension(pi: ExtensionAPI): void {
       );
       return successResult(
         result.value,
-        renderCitationVerification(result.value, { audience: "agent" }),
+        citationVerificationAgentJson(result.value),
         result.warnings,
       );
     },
@@ -443,7 +437,7 @@ export default function rfcExtension(pi: ExtensionAPI): void {
         undefined,
         signal,
       );
-      return successResult(result.value, renderSourceCacheStatus(result.value), result.warnings);
+      return successResult(result.value, JSON.stringify(result.value), result.warnings);
     },
   });
 
@@ -460,7 +454,7 @@ export default function rfcExtension(pi: ExtensionAPI): void {
         undefined,
         signal,
       );
-      return successResult(result.value, renderSourceCacheRemove(result.value), result.warnings);
+      return successResult(result.value, JSON.stringify(result.value), result.warnings);
     },
   });
 
@@ -478,7 +472,7 @@ export default function rfcExtension(pi: ExtensionAPI): void {
         undefined,
         signal,
       );
-      return successResult(result.value, renderAuthStatus(result.value), result.warnings);
+      return successResult(result.value, JSON.stringify(result.value), result.warnings);
     },
   });
 }

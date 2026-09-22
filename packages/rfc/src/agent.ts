@@ -10,9 +10,11 @@ export {
   rfcPiInstructions,
 } from "./agent-surface";
 export {
+  citationVerificationAgentJson,
   renderAuthStatus,
   renderCitationVerification,
   renderResearchResult,
+  researchResultAgentJson,
   renderSourceCacheRemove,
   renderSourceCacheStatus,
 } from "./renderers";

@@ -11,7 +11,7 @@ import {
 } from "@wyattjoh/rfc-core";
 import type { CredentialStore } from "../src/credentials";
 import { makeDefaultCliDependencies, run, type RfcCliDependencies } from "../src/main";
-import { renderResearchResult } from "../src/renderers";
+import { renderResearchResult, researchResultAgentJson } from "../src/renderers";
 
 const servers: Array<ReturnType<typeof Bun.serve>> = [];
 
@@ -1219,5 +1219,42 @@ describe("research result rendering", () => {
     );
     // A complete report whose current RFC is the one named adds nothing.
     expect(rendered).not.toContain("Currency: RFC9110");
+  });
+
+  test("projects the agent JSON without diagnostics or trivial currency", () => {
+    const json = JSON.parse(
+      researchResultAgentJson(
+        result({
+          currency: [
+            { requested: "RFC7231", current: ["RFC9110"], complete: true, paths: [] },
+            { requested: "RFC9110", current: ["RFC9110"], complete: true, paths: [] },
+          ],
+        }),
+      ),
+    );
+    expect(json.currency).toEqual([{ requested: "RFC7231", current: ["RFC9110"], complete: true }]);
+    expect(
+      json.answers[0].hits.map((hit: { rfc: string; relevance: number | null }) => [
+        hit.rfc,
+        hit.relevance,
+      ]),
+    ).toEqual([
+      ["RFC9110", 0.93],
+      ["RFC9999", null],
+    ]);
+    expect(json.answers[0].hits[0].passages[0]).toEqual({
+      section: "§3.1 Requests",
+      verdict: "supports",
+      quote: requestedQuote,
+      bytes: [120, 193],
+    });
+    expect(json.answers[0].searched).toBeUndefined();
+    expect(json.answers[1]).toEqual({
+      question: "Does HTTP define a teapot?",
+      found: false,
+      searched: ["RFC9110", "RFC9999"],
+      hits: [],
+    });
+    expect(json.diagnostics).toBeUndefined();
   });
 });

@@ -2,6 +2,8 @@
 
 Native [Pi](https://pi.dev) integration for the RFC Evidence Engine. The package registers the `rfc_research` and `rfc_verify_citation` tools, adds the RFC lookup workflow to the system prompt, and includes the `/rfc-lookup` skill.
 
+Tool results reach the model as compact JSON: per question, `found`, and ranked hits with RFC, title, role, relevance, verdict, and passages (`section`, `verdict`, exact `quote`, and UTF-8 `bytes` range). The complete version-three result, including diagnostics and provenance, stays in the tool result details.
+
 ## Install
 
 Requires Bun 1.4.2 or newer:

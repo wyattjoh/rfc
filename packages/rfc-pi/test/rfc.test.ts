@@ -200,7 +200,7 @@ describe("Pi RFC extension", () => {
 });
 
 describe("research rendering", () => {
-  test("sends the model the agent format and keeps the full result in details", async () => {
+  test("sends the model compact JSON and keeps the full result in details", async () => {
     const researchResult = {
       schemaVersion: 3,
       kind: "research_result",
@@ -211,7 +211,7 @@ describe("research rendering", () => {
           searched: ["RFC9110"],
           hits: [
             {
-              rfc: { identifier: "RFC9110" },
+              rfc: { identifier: "RFC9110", title: "HTTP Semantics" },
               role: "requested",
               relevance: 0.93,
               verdict: "supports",
@@ -280,15 +280,33 @@ describe("research rendering", () => {
       rfcs: ["RFC9110"],
     });
     const text = result.content[0]?.text ?? "";
-    expect(text).toBe(
-      [
-        "Q1: What must the client send?",
-        "RFC9110 §3 Requests · supports · rel 0.93",
-        "Quote [10-41]: The client MUST send a request.",
-      ].join("\n"),
-    );
-    expect(text).not.toContain("Source:");
-    expect(text).not.toContain("Input tokens");
+    expect(JSON.parse(text)).toEqual({
+      answers: [
+        {
+          question: "What must the client send?",
+          found: true,
+          hits: [
+            {
+              rfc: "RFC9110",
+              title: "HTTP Semantics",
+              role: "requested",
+              relevance: 0.93,
+              verdict: "supports",
+              passages: [
+                {
+                  section: "§3 Requests",
+                  verdict: "supports",
+                  quote: "The client MUST send a request.",
+                  bytes: [10, 41],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    expect(text).not.toContain("sourceHash");
+    expect(text).not.toContain("diagnostics");
     expect(result.details.structuredContent).toEqual(researchResult);
   });
 });

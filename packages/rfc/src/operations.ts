@@ -27,12 +27,14 @@ import {
 import type { UsageRecorder } from "./usage-store";
 
 export {
+  citationVerificationAgentJson,
   renderAuthStatus,
   renderCitationVerification,
   renderEstimatedUsd,
   renderResearchResult,
   renderSourceCacheRemove,
   renderSourceCacheStatus,
+  researchResultAgentJson,
 } from "./renderers";
 
 /**

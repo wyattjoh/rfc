@@ -117,6 +117,72 @@ export const renderResearchResult = (
   ].join("\n");
 
 /**
+ * Project a research result onto the compact JSON an agent reads.
+ *
+ * Keeps per-question hits, verdicts, sections, exact quotes, and UTF-8 byte
+ * ranges, plus any non-trivial currency report. Diagnostics, source hashes,
+ * and retrieval traces stay in the full structured result.
+ *
+ * @param result Version-three research result.
+ * @returns Single-line JSON text.
+ */
+export const researchResultAgentJson = (result: ResearchResult): string =>
+  JSON.stringify({
+    answers: result.answers.map((answer) => ({
+      question: answer.question,
+      found: answer.found,
+      ...(answer.found
+        ? {}
+        : {
+            searched: answer.searched,
+            ...(answer.searched.length === 0
+              ? { candidateRfcs: result.diagnostics.candidates.pool }
+              : {}),
+          }),
+      hits: answer.hits.map((hit) => ({
+        rfc: hit.rfc.identifier,
+        title: hit.rfc.title,
+        role: hit.role,
+        relevance: hit.relevance === null ? null : Number(hit.relevance.toFixed(2)),
+        verdict: hit.verdict,
+        passages: hit.passages.map((passage) => ({
+          section: renderSection(passage.section),
+          verdict: passage.verdict,
+          quote: passage.quote,
+          bytes: [passage.provenance.startOffset, passage.provenance.endOffset],
+        })),
+      })),
+    })),
+    ...(result.currency === undefined
+      ? {}
+      : {
+          currency: result.currency
+            .filter(
+              (report) =>
+                !report.complete ||
+                report.current.length !== 1 ||
+                report.current[0] !== report.requested,
+            )
+            .map(({ requested, current, complete }) => ({ requested, current, complete })),
+        }),
+  });
+
+/**
+ * Project a citation verdict onto the compact JSON an agent reads.
+ *
+ * @param result Version-three citation verdict.
+ * @returns Single-line JSON text without diagnostics.
+ */
+export const citationVerificationAgentJson = (result: CitationVerificationResult): string =>
+  JSON.stringify({
+    verdict: result.verdict,
+    rfc: result.rfc.identifier,
+    section: renderSection(result.provenance.section),
+    quote: result.quote,
+    bytes: [result.provenance.startOffset, result.provenance.endOffset],
+  });
+
+/**
  * Render one citation-verification result for concise agent or human consumption.
  *
  * @param result Version-three citation verdict.
