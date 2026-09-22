@@ -90,7 +90,7 @@ export interface CitationVerificationRequest {
  * Decode unknown citation input at the public JSON boundary.
  *
  * @param input The unknown value received from JSON or convenience flags.
- * @returns A normalized version-two citation verification request.
+ * @returns A normalized version-three citation verification request.
  * @throws Error when the value does not satisfy the request schema.
  */
 export const decodeCitationVerificationRequest = (input: unknown): CitationVerificationRequest => {

@@ -15,7 +15,6 @@ import {
   type CredentialStore,
 } from "../src/credentials";
 import { run } from "../src/main";
-import { runLiveEvaluation } from "../src/live-evaluation";
 
 const makeNativeSecrets = (initial: string | null = null): BunSecretsApi => {
   let value = initial;
@@ -133,9 +132,6 @@ describe("Bun.secrets credential boundary", () => {
   test("rejects missing credentials without constructing a provider", async () => {
     const store = makeCredentialStore(makeNativeSecrets());
     await expect(resolveStoredCredential(store)).rejects.toBeInstanceOf(CredentialMissingError);
-    await expect(
-      runLiveEvaluation({ credentialStore: store, enable: true }),
-    ).rejects.toBeInstanceOf(CredentialMissingError);
   });
 
   test("normalizes explicit stdin input and rejects multiline or empty values", () => {
@@ -318,7 +314,7 @@ describe("authentication process protocol", () => {
       expect(result.stdout).toBe("");
       expect(result.stderr).not.toContain(secret);
       expect(JSON.parse(result.stderr)).toEqual({
-        schemaVersion: 2,
+        schemaVersion: 3,
         kind: "error",
         error: {
           code: "invalid_input",

@@ -4,11 +4,12 @@ import {
   CitationOffsetMismatchError,
   CitationQuoteAmbiguousError,
   CitationVerificationResultSchema,
-  EvidenceBundleSchema,
   InvalidInputError,
+  ResearchResultSchema,
   citationOffsetUnit,
   datatrackerTopicSearchTermLimit,
   datatrackerTopicSearchTermMaximumCharacters,
+  retrievalPolicy,
   type CitationVerificationRequest,
   type ResearchRequest,
   type RfcClient,
@@ -47,49 +48,74 @@ const makeCredentialStore = (initial: string | null = "fixture-key"): Credential
   };
 };
 
-const stubEvidenceBundle = Schema.decodeUnknownSync(EvidenceBundleSchema)({
-  schemaVersion: 2,
-  kind: "evidence_bundle",
-  status: "needs_review",
-  question: "What does HTTP require?",
-  rfc: null,
-  evidence: [],
-  reviewCandidates: [],
+const stubResearchResult = Schema.decodeUnknownSync(ResearchResultSchema)({
+  schemaVersion: 3,
+  kind: "research_result",
+  answers: [
+    {
+      question: "What does HTTP require?",
+      found: true,
+      searched: ["RFC9110"],
+      hits: [
+        {
+          rfc: {
+            identifier: "RFC9110",
+            rfcNumber: 9110,
+            title: "HTTP Semantics",
+            abstract: "HTTP semantics.",
+            status: "published",
+            stream: "ietf",
+            canonicalUrl: "https://datatracker.ietf.org/doc/rfc9110/",
+          },
+          role: "requested",
+          relevance: 0.93,
+          verdict: "supports",
+          passages: [
+            {
+              quote: "The client MUST send a request containing the target resource.",
+              section: "1. Requirements",
+              probability: 0.9,
+              verdict: "supports",
+              provenance: {
+                sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+                sourceHash: "fixture-source-hash",
+                offsetUnit: citationOffsetUnit,
+                startOffset: 17,
+                endOffset: 79,
+                fetchedAt: "2026-01-01T00:00:00.000Z",
+              },
+            },
+          ],
+        },
+      ],
+    },
+  ],
   diagnostics: {
-    schemaVersion: 2,
-    policyVersion: "precision-v2",
+    policyVersion: retrievalPolicy.policyVersion,
     requestedModel: "jev-1.13.0",
-    resolvedModel: "jev-1.13.0",
     resolvedModels: ["jev-1.13.0"],
     usage: { inputTokens: 20, outputTokens: 4 },
     inputCost: { estimatedUsd: 0.00000084, rateUsdPerMillionTokens: 0.042 },
     timings: {
       metadataMs: 1,
       sourceMs: 0,
-      lexicalMs: 0,
-      selectionMs: 0,
-      relationMs: 0,
+      rankMs: 0,
+      sectionMs: 0,
+      paragraphMs: 0,
       totalMs: 1,
     },
-    source: null,
     retrieval: {
-      schemaVersion: 2,
+      schemaVersion: 3,
       requestCount: 1,
       datatrackerRequestCount: 1,
       sourceRequestCount: 0,
       metadataMs: 1,
       sourceMs: 0,
       sourceCacheOutcome: "not_requested",
-      upstreamRows: 0,
-      uniqueCandidates: 0,
-      mergeLimit: 32,
-      semanticCandidates: 0,
-      selectedSources: 0,
-      topicTruncated: false,
       requests: [
         {
           kind: "metadata",
-          url: "https://datatracker.example/api/v1/doc/document/?name__startswith=rfc",
+          url: "https://datatracker.example/api/v1/doc/document/rfc9110/",
           attempts: 1,
           status: 200,
           statuses: [200],
@@ -97,20 +123,12 @@ const stubEvidenceBundle = Schema.decodeUnknownSync(EvidenceBundleSchema)({
         },
       ],
     },
-    candidates: {
-      sourceBlocks: 0,
-      passageCandidates: 0,
-      selectedPassages: 0,
-      discoveredDocuments: 0,
-    },
-    atomicity: null,
-    selection: [],
-    classification: [],
+    candidates: { pool: 1, ranked: 1 },
   },
 });
 
 const stubCitationVerification = Schema.decodeUnknownSync(CitationVerificationResultSchema)({
-  schemaVersion: 2,
+  schemaVersion: 3,
   kind: "citation_verification",
   verdict: "verified",
   rfc: {
@@ -139,7 +157,7 @@ const stubCitationVerification = Schema.decodeUnknownSync(CitationVerificationRe
   probabilities: { verified: 0.95, unsupported: 0.025, contradicted: 0.025 },
   confidence: 0.95,
   diagnostics: {
-    schemaVersion: 2,
+    schemaVersion: 3,
     policyVersion: "citation-v2",
     requestedModel: "jev-1.13.0",
     resolvedModel: "jev-1.13.0",
@@ -223,9 +241,7 @@ describe("RFC MCP agent surface", () => {
     });
     try {
       await client.connect(transport);
-      expect((await client.listTools()).tools.map(({ name }) => name)).toContain(
-        "rfc_research_known_rfc",
-      );
+      expect((await client.listTools()).tools.map(({ name }) => name)).toContain("rfc_research");
       expect((await client.listResources()).resources).toContainEqual(
         expect.objectContaining({ uri: rfcMcpAgentReferenceUri }),
       );
@@ -245,18 +261,16 @@ describe("RFC MCP agent surface", () => {
       rfcMcpInstructionsCharacterBudget,
     );
     for (const rule of [
-      "call rfc_research_known_rfc exactly once",
-      "Never call rfc_verify_citation to re-check research results",
-      "Do not run preflight tools",
-      "may you make at most one targeted follow-up",
-      "Preserve the research status exactly",
-      "only as qualified review material",
-      "never silently substitute a successor",
-      "needs_split is an instruction, not a failure",
-      "never refuse the whole request when the result already carries usable material",
+      "Make one rfc_research call per user request",
+      "with each fact you need as its own entry in questions",
+      "cite only the RFC and section shown",
+      "A passage marked current successor comes from the RFC that replaced the one named",
+      "you may make one follow-up rfc_research call",
+      "Never re-research or re-verify returned passages",
+      "Use rfc_verify_citation only for a user-supplied quotation or an explicitly requested check",
       "keep the typed error code and stop",
       "never request or accept the secret through MCP",
-      "Never retry a successful paid operation over a usage-accounting warning",
+      "Never retry a successful paid call over a usage-accounting warning",
     ]) {
       const end = rfcMcpInstructions.indexOf(rule) + rule.length;
       expect(end).toBeGreaterThan(rule.length - 1);
@@ -269,35 +283,44 @@ describe("RFC MCP agent surface", () => {
     try {
       expect(connection.client.getInstructions()).toBe(rfcMcpInstructions);
       expect(rfcMcpInstructions).toStartWith(
-        "For an ordinary known-RFC answer, call rfc_research_known_rfc exactly once, then answer and stop.",
+        "Answer published IETF RFC questions only from this server, never from memory or another provider.",
       );
-      expect(rfcMcpInstructions).toContain("at most one targeted follow-up");
       expect(rfcMcpInstructions).toContain("never request or accept the secret through MCP");
-      expect(rfcMcpInstructions).toContain("Do not run preflight tools");
-      expect(rfcMcpInstructions).toContain(
-        "Never call rfc_verify_citation to re-check research results, even under needs_review",
-      );
       expect(rfcMcpInstructions).toContain(`Skip ${rfcMcpAgentReferenceUri} for ordinary research`);
+      // The call-count rule leads, so even a heavily truncated prefix keeps it.
       expect(
-        rfcMcpInstructions.indexOf("Never call rfc_verify_citation to re-check research results"),
+        rfcMcpInstructions.indexOf("Make one rfc_research call per user request"),
       ).toBeLessThan(300);
+      // The retired tools and status vocabulary are gone from the instructions.
+      for (const retired of [
+        "rfc_research_known_rfc",
+        "rfc_research_topic",
+        "needs_review",
+        "needs_split",
+      ]) {
+        expect(rfcMcpInstructions).not.toContain(retired);
+      }
 
       const { tools } = await connection.client.listTools();
       expect(tools.map(({ name }) => name)).toEqual([
-        "rfc_research_known_rfc",
-        "rfc_research_topic",
+        "rfc_research",
         "rfc_verify_citation",
         "rfc_source_cache_status",
         "rfc_source_cache_remove",
         "rfc_auth_status",
       ]);
       expect(tools.every(({ outputSchema }) => outputSchema !== undefined)).toBe(true);
-      expect(tools.find(({ name }) => name === "rfc_research_known_rfc")?.description).toStartWith(
-        "Inputs: question, rfc.",
+      const research = tools.find(({ name }) => name === "rfc_research");
+      expect(research?.description).toStartWith(
+        "Inputs: questions (1-4) plus rfcs and/or searchTerms (1-4 each).",
       );
-      expect(tools.find(({ name }) => name === "rfc_research_topic")?.description).toStartWith(
-        "Inputs: question, searchTerms (1-4).",
-      );
+      expect(research?.annotations).toMatchObject({ readOnlyHint: false, openWorldHint: true });
+      expect(Object.keys(research?.inputSchema.properties ?? {})).toEqual([
+        "questions",
+        "rfcs",
+        "searchTerms",
+      ]);
+      expect(research?.inputSchema.required).toEqual(["questions"]);
       expect(tools.find(({ name }) => name === "rfc_verify_citation")?.description).toStartWith(
         "Inputs: rfc, claim, quote; optional offset.",
       );
@@ -307,9 +330,6 @@ describe("RFC MCP agent surface", () => {
         destructiveHint: true,
         idempotentHint: true,
       });
-      expect(
-        tools.find(({ name }) => name === "rfc_research_topic")?.inputSchema.properties,
-      ).toHaveProperty("searchTerms");
       expect(JSON.stringify(tools)).not.toContain("typesafeApiUrl");
       expect(JSON.stringify(tools)).not.toContain("datatrackerApiUrl");
       expect(JSON.stringify(tools)).not.toContain("cacheDirectory");
@@ -339,7 +359,7 @@ describe("RFC MCP agent surface", () => {
         sourceCacheStatus: async (rfc: string) => {
           operations.push(`status:${rfc}`);
           return {
-            schemaVersion: 2 as const,
+            schemaVersion: 3 as const,
             kind: "source_cache_status" as const,
             rfc,
             state: "hit" as const,
@@ -348,13 +368,13 @@ describe("RFC MCP agent surface", () => {
         sourceCacheRemove: async (rfc: string) => {
           operations.push(`remove:${rfc}`);
           return {
-            schemaVersion: 2 as const,
+            schemaVersion: 3 as const,
             kind: "source_cache_remove" as const,
             rfc,
             removed: true,
           };
         },
-        research: async () => stubEvidenceBundle,
+        research: async () => stubResearchResult,
         verifyCitation: async () => {
           throw new Error("Unexpected citation call");
         },
@@ -375,7 +395,7 @@ describe("RFC MCP agent surface", () => {
       });
       expect(status.isError).not.toBe(true);
       expect(status.structuredContent).toEqual({
-        schemaVersion: 2,
+        schemaVersion: 3,
         kind: "source_cache_status",
         rfc: "RFC9110",
         state: "hit",
@@ -401,7 +421,7 @@ describe("RFC MCP agent surface", () => {
     }
   });
 
-  test("constructs version-two research requests per call and surfaces usage warnings", async () => {
+  test("constructs version-three research requests per call and surfaces usage warnings", async () => {
     const requests: Array<ResearchRequest> = [];
     const clientOptions: Array<unknown> = [];
     let closes = 0;
@@ -416,7 +436,7 @@ describe("RFC MCP agent surface", () => {
         },
         research: async (request: ResearchRequest) => {
           requests.push(request);
-          return { ...stubEvidenceBundle, question: request.question };
+          return stubResearchResult;
         },
         verifyCitation: async () => {
           throw new Error("Unexpected citation call");
@@ -436,59 +456,77 @@ describe("RFC MCP agent surface", () => {
       }),
     );
     try {
-      const known = await connection.client.callTool({
-        name: "rfc_research_known_rfc",
-        arguments: { question: "What does HTTP require?", rfc: "RFC9110" },
+      const named = await connection.client.callTool({
+        name: "rfc_research",
+        arguments: { questions: ["What does HTTP require?"], rfcs: ["RFC9110"] },
       });
-      expect(known.isError).not.toBe(true);
-      expect(known.structuredContent).toMatchObject({
-        schemaVersion: 2,
-        kind: "evidence_bundle",
-        status: "needs_review",
+      expect(named.isError).not.toBe(true);
+      expect(named.structuredContent).toEqual(stubResearchResult);
+      const [rendered, warning] = named.content.map((content) =>
+        content.type === "text" ? content.text : "",
+      );
+      // Models get the agent format: no source URL, usage, or cost footer.
+      expect(rendered).toBe(
+        [
+          "Q1: What does HTTP require?",
+          "RFC9110 §1 Requirements · supports · rel 0.93",
+          "Quote [17-79]: The client MUST send a request containing the target resource.",
+        ].join("\n"),
+      );
+      expect(JSON.parse(warning ?? "")).toMatchObject({
+        schemaVersion: 3,
+        kind: "warning",
+        warning: { code: "usage_accounting_failed" },
       });
-      expect(textContent(known)).toContain("Status: needs_review");
-      // Models get the agent format: no usage or cost footer.
-      expect(textContent(known)).not.toContain("Input tokens");
-      expect(textContent(known)).not.toContain("Estimated input cost");
-      expect(textContent(known)).toContain("usage_accounting_failed");
+
+      const combined = await connection.client.callTool({
+        name: "rfc_research",
+        arguments: {
+          questions: ["Which RFC defines HTTP caching?", "How long is a response fresh?"],
+          rfcs: ["RFC9111"],
+          searchTerms: ["HTTP caching", "cache control"],
+        },
+      });
+      expect(combined.isError).not.toBe(true);
 
       const topic = await connection.client.callTool({
-        name: "rfc_research_topic",
+        name: "rfc_research",
         arguments: {
-          question: "Which RFC defines HTTP caching?",
-          searchTerms: ["HTTP caching", "cache control"],
+          questions: ["Which RFC defines HTTP caching?"],
+          searchTerms: ["HTTP caching"],
         },
       });
       expect(topic.isError).not.toBe(true);
+
+      // Omitted optional inputs stay absent rather than reaching the client as
+      // undefined or empty arrays.
       expect(requests).toEqual([
+        { schemaVersion: 3, questions: ["What does HTTP require?"], rfcs: ["RFC9110"] },
         {
-          schemaVersion: 2,
-          question: "What does HTTP require?",
-          rfc: "RFC9110",
-          searchTerms: undefined,
-        },
-        {
-          schemaVersion: 2,
-          question: "Which RFC defines HTTP caching?",
-          rfc: null,
+          schemaVersion: 3,
+          questions: ["Which RFC defines HTTP caching?", "How long is a response fresh?"],
+          rfcs: ["RFC9111"],
           searchTerms: ["HTTP caching", "cache control"],
         },
+        {
+          schemaVersion: 3,
+          questions: ["Which RFC defines HTTP caching?"],
+          searchTerms: ["HTTP caching"],
+        },
       ]);
-      expect(clientOptions).toEqual([
-        expect.objectContaining({
-          cacheDirectory: operationOptions.cacheDirectory,
-          datatrackerApiUrl: operationOptions.datatrackerApiUrl,
-          typeSafeApiUrl: operationOptions.typeSafeApiUrl,
-          typeSafeApiKey: "fixture-key",
-        }),
-        expect.objectContaining({
-          cacheDirectory: operationOptions.cacheDirectory,
-          datatrackerApiUrl: operationOptions.datatrackerApiUrl,
-          typeSafeApiUrl: operationOptions.typeSafeApiUrl,
-          typeSafeApiKey: "fixture-key",
-        }),
+      expect(requests.map((request) => Object.keys(request))).toEqual([
+        ["schemaVersion", "questions", "rfcs"],
+        ["schemaVersion", "questions", "rfcs", "searchTerms"],
+        ["schemaVersion", "questions", "searchTerms"],
       ]);
-      expect(closes).toBe(2);
+      const expectedOptions = expect.objectContaining({
+        cacheDirectory: operationOptions.cacheDirectory,
+        datatrackerApiUrl: operationOptions.datatrackerApiUrl,
+        typeSafeApiUrl: operationOptions.typeSafeApiUrl,
+        typeSafeApiKey: "fixture-key",
+      });
+      expect(clientOptions).toEqual([expectedOptions, expectedOptions, expectedOptions]);
+      expect(closes).toBe(3);
     } finally {
       await connection.close();
     }
@@ -532,7 +570,7 @@ describe("RFC MCP agent surface", () => {
 
       expect(withOffset.isError).not.toBe(true);
       expect(withOffset.structuredContent).toMatchObject({
-        schemaVersion: 2,
+        schemaVersion: 3,
         kind: "citation_verification",
         verdict: "verified",
         rfc: { identifier: "RFC9110" },
@@ -558,14 +596,14 @@ describe("RFC MCP agent surface", () => {
       // missing key, so the unique-occurrence path is chosen deliberately.
       expect(requests).toEqual([
         {
-          schemaVersion: 2,
+          schemaVersion: 3,
           rfc: "RFC9110",
           claim: "The client sends a request.",
           quote: "The client MUST send a request containing the target resource.",
           offset: 17,
         },
         {
-          schemaVersion: 2,
+          schemaVersion: 3,
           rfc: "RFC9110",
           claim: "The client sends a request.",
           quote: "The client MUST send a request containing the target resource.",
@@ -626,7 +664,7 @@ describe("RFC MCP agent surface", () => {
         expect(result.isError).toBe(true);
         expect(result.structuredContent).toBeUndefined();
         expect(JSON.parse(textContent(result))).toEqual({
-          schemaVersion: 2,
+          schemaVersion: 3,
           kind: "error",
           error: { code, message },
         });
@@ -636,34 +674,75 @@ describe("RFC MCP agent surface", () => {
     }
   });
 
-  test("enforces the topic search-term bounds before dispatching a call", async () => {
+  test("enforces the research input bounds before dispatching a call", async () => {
     const createClient = (async () => {
-      throw new Error("A rejected topic request must not construct a client");
+      throw new Error("A rejected research request must not construct a client");
     }) as RfcOperationDependencies["createClient"];
     const connection = await connect(makeDependencies({ createClient }));
+    const question = "Which RFC defines HTTP caching?";
 
     try {
-      const rejected: ReadonlyArray<ReadonlyArray<string>> = [
-        [],
-        Array.from({ length: datatrackerTopicSearchTermLimit + 1 }, (_, index) => `term-${index}`),
-        ["x".repeat(datatrackerTopicSearchTermMaximumCharacters + 1)],
-        [""],
+      const rejected: ReadonlyArray<Record<string, unknown>> = [
+        { questions: [], rfcs: ["RFC9111"] },
+        {
+          questions: Array.from({ length: retrievalPolicy.maxQuestions + 1 }, () => question),
+          rfcs: ["RFC9111"],
+        },
+        { questions: [""], rfcs: ["RFC9111"] },
+        { questions: [question], rfcs: [] },
+        {
+          questions: [question],
+          rfcs: Array.from(
+            { length: retrievalPolicy.maxRequestedRfcs + 1 },
+            (_, index) => `RFC${9110 + index}`,
+          ),
+        },
+        { questions: [question], searchTerms: [] },
+        {
+          questions: [question],
+          searchTerms: Array.from(
+            { length: datatrackerTopicSearchTermLimit + 1 },
+            (_, index) => `term-${index}`,
+          ),
+        },
+        {
+          questions: [question],
+          searchTerms: ["x".repeat(datatrackerTopicSearchTermMaximumCharacters + 1)],
+        },
+        { questions: [question], searchTerms: [""] },
       ];
-      for (const searchTerms of rejected) {
-        const result = await connection.client.callTool({
-          name: "rfc_research_topic",
-          arguments: { question: "Which RFC defines HTTP caching?", searchTerms },
-        });
+      for (const args of rejected) {
+        const result = await connection.client.callTool({ name: "rfc_research", arguments: args });
         expect(result.isError).toBe(true);
         expect(result.structuredContent).toBeUndefined();
       }
 
+      // Neither rfcs nor searchTerms passes the schema but fails the request
+      // contract, with the typed envelope and before any client exists.
+      const unscoped = await connection.client.callTool({
+        name: "rfc_research",
+        arguments: { questions: [question] },
+      });
+      expect(unscoped.isError).toBe(true);
+      expect(JSON.parse(textContent(unscoped))).toEqual({
+        schemaVersion: 3,
+        kind: "error",
+        error: {
+          code: "invalid_input",
+          message: "Research input must include rfcs, searchTerms, or both",
+        },
+      });
+
       // The upper bounds themselves are accepted, so the guard rejects only
       // what is past them.
       const accepted = await connection.client.callTool({
-        name: "rfc_research_topic",
+        name: "rfc_research",
         arguments: {
-          question: "Which RFC defines HTTP caching?",
+          questions: Array.from({ length: retrievalPolicy.maxQuestions }, () => question),
+          rfcs: Array.from(
+            { length: retrievalPolicy.maxRequestedRfcs },
+            (_, index) => `RFC${9110 + index}`,
+          ),
           searchTerms: Array.from({ length: datatrackerTopicSearchTermLimit }, () =>
             "x".repeat(datatrackerTopicSearchTermMaximumCharacters),
           ),
@@ -713,7 +792,7 @@ describe("RFC MCP agent surface", () => {
     expect(
       toRfcOperationErrorEnvelope(new CredentialInputError({ reason: "multiline secret" })),
     ).toEqual({
-      schemaVersion: 2,
+      schemaVersion: 3,
       kind: "error",
       error: { code: "invalid_input", message: "The TypeSafe API key input is invalid" },
     });
@@ -731,7 +810,7 @@ describe("RFC MCP agent surface", () => {
     for (const [kind, code, message] of storeFailures) {
       expect(
         toRfcOperationErrorEnvelope(new CredentialStoreError({ kind, operation: "get" })),
-      ).toEqual({ schemaVersion: 2, kind: "error", error: { code, message } });
+      ).toEqual({ schemaVersion: 3, kind: "error", error: { code, message } });
     }
   });
 
@@ -746,12 +825,12 @@ describe("RFC MCP agent surface", () => {
     );
     try {
       const result = await connection.client.callTool({
-        name: "rfc_research_known_rfc",
-        arguments: { question: "What does HTTP require?", rfc: "RFC9110" },
+        name: "rfc_research",
+        arguments: { questions: ["What does HTTP require?"], rfcs: ["RFC9110"] },
       });
       expect(result.isError).toBe(true);
       expect(JSON.parse(textContent(result))).toEqual({
-        schemaVersion: 2,
+        schemaVersion: 3,
         kind: "error",
         error: {
           code: "credential_missing",

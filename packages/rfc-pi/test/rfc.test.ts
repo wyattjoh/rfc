@@ -32,8 +32,7 @@ type RegisteredExtension = {
  * Tools registered without `RFC_PI_LOCAL_TOOLS`: research only.
  */
 const researchToolNames = [
-  rfcAgentToolMetadata.researchKnownRfc.name,
-  rfcAgentToolMetadata.researchTopic.name,
+  rfcAgentToolMetadata.research.name,
   rfcAgentToolMetadata.verifyCitation.name,
 ];
 
@@ -201,35 +200,50 @@ describe("Pi RFC extension", () => {
 });
 
 describe("research rendering", () => {
-  test("sends the model the agent format and keeps the full bundle in details", async () => {
-    const bundle = {
-      schemaVersion: 2,
-      kind: "evidence_bundle",
-      status: "answered",
-      question: "What must the client send?",
-      rfc: { identifier: "RFC9110" },
-      contexts: [],
-      evidence: [
+  test("sends the model the agent format and keeps the full result in details", async () => {
+    const researchResult = {
+      schemaVersion: 3,
+      kind: "research_result",
+      answers: [
         {
-          quote: "The client MUST send a request.",
-          context: "requested",
-          provenance: {
-            identifier: "RFC9110",
-            sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
-            section: "3.  Requests",
-            startOffset: 10,
-            endOffset: 41,
-            offsetUnit: "utf8-byte",
-          },
+          question: "What must the client send?",
+          found: true,
+          searched: ["RFC9110"],
+          hits: [
+            {
+              rfc: { identifier: "RFC9110" },
+              role: "requested",
+              relevance: 0.93,
+              verdict: "supports",
+              passages: [
+                {
+                  quote: "The client MUST send a request.",
+                  section: "3.  Requests",
+                  probability: 0.9,
+                  verdict: "supports",
+                  provenance: {
+                    sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+                    sourceHash: "fixture-source-hash",
+                    offsetUnit: "utf8-byte",
+                    startOffset: 10,
+                    endOffset: 41,
+                    fetchedAt: "2026-01-01T00:00:00.000Z",
+                  },
+                },
+              ],
+            },
+          ],
         },
       ],
       diagnostics: {
         usage: { inputTokens: 20 },
         inputCost: { estimatedUsd: 0.00000084 },
+        candidates: { pool: 1, ranked: 1 },
       },
     };
     const { tools } = registerExtension();
-    const tool = findTool(tools, rfcAgentToolMetadata.researchKnownRfc.name);
+    const tool = findTool(tools, rfcAgentToolMetadata.research.name);
+    const stdinFile = join(await mkdtemp(join(tmpdir(), "rfc-pi-render-")), "stdin.json");
 
     const execute = tool.execute as unknown as (
       toolCallId: string,
@@ -243,24 +257,39 @@ describe("research rendering", () => {
     }>;
 
     const result = await withStubBunx(
-      ["#!/bin/sh", "cat > /dev/null", `printf '%s\\n' '${JSON.stringify(bundle)}'`].join("\n"),
+      [
+        "#!/bin/sh",
+        `cat > ${JSON.stringify(stdinFile)}`,
+        `printf '%s\\n' '${JSON.stringify(researchResult)}'`,
+      ].join("\n"),
       () =>
         execute(
           "render-1",
-          { question: bundle.question, rfc: "RFC9110" },
+          { questions: ["What must the client send?"], rfcs: ["RFC9110"] },
           undefined,
           undefined,
           executionContext,
         ),
     );
 
+    // The tool forwards the version-three request on standard input without
+    // inventing an empty searchTerms array.
+    expect(JSON.parse(await Bun.file(stdinFile).text())).toEqual({
+      schemaVersion: 3,
+      questions: ["What must the client send?"],
+      rfcs: ["RFC9110"],
+    });
     const text = result.content[0]?.text ?? "";
-    expect(text).toContain(
-      "Evidence | RFC9110 | §3.  Requests | requested context | offsets 10-41 (utf8-byte)\nQuote: The client MUST send a request.",
+    expect(text).toBe(
+      [
+        "Q1: What must the client send?",
+        "RFC9110 §3 Requests · supports · rel 0.93",
+        "Quote [10-41]: The client MUST send a request.",
+      ].join("\n"),
     );
-    expect(text).toContain("Source: RFC9110 https://www.rfc-editor.org/rfc/rfc9110.txt");
+    expect(text).not.toContain("Source:");
     expect(text).not.toContain("Input tokens");
-    expect(result.details.structuredContent).toEqual(bundle);
+    expect(result.details.structuredContent).toEqual(researchResult);
   });
 });
 
@@ -380,12 +409,8 @@ describe("CLI argv contract", () => {
   // table performs a network request.
   const toolParameters: ReadonlyArray<{ readonly name: string; readonly params: object }> = [
     {
-      name: rfcAgentToolMetadata.researchKnownRfc.name,
-      params: { question: "What must a client send?", rfc: "RFC9110" },
-    },
-    {
-      name: rfcAgentToolMetadata.researchTopic.name,
-      params: { question: "How is padding negotiated?", searchTerms: ["Padding"] },
+      name: rfcAgentToolMetadata.research.name,
+      params: { questions: ["How is padding negotiated?"], searchTerms: ["Padding"] },
     },
     {
       name: rfcAgentToolMetadata.verifyCitation.name,

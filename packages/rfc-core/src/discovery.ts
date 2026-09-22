@@ -231,7 +231,7 @@ export const RetrievalRequestTraceSchema = Schema.Struct({
 export type RetrievalRequestTrace = Schema.Schema.Type<typeof RetrievalRequestTraceSchema>;
 
 /**
- * Live retrieval diagnostics for a schema-version-two research request.
+ * Live retrieval diagnostics for a schema-version-three research request.
  *
  * Request counts describe logical trace entries. Each entry records its own
  * bounded upstream attempt count and status sequence independently.
@@ -271,7 +271,7 @@ export const LiveRetrievalTraceSchema = Schema.Struct({
 });
 
 /**
- * Live retrieval diagnostics for a schema-version-two research request.
+ * Live retrieval diagnostics for a schema-version-three research request.
  */
 export type LiveRetrievalTrace = Schema.Schema.Type<typeof LiveRetrievalTraceSchema>;
 
@@ -288,7 +288,7 @@ export const RfcDocumentSchema = Schema.Struct({
   canonicalUrl: Schema.NonEmptyString.check(Schema.isMaxLength(2_048)),
 }).check(
   // The identifier and number describe the same RFC, so a document that pairs
-  // them inconsistently cannot satisfy the version-two contract.
+  // them inconsistently cannot satisfy the version-three contract.
   Schema.makeFilter((document) =>
     document.identifier === `RFC${document.rfcNumber}`
       ? undefined
@@ -300,7 +300,7 @@ export const RfcDocumentSchema = Schema.Struct({
 );
 
 /**
- * Request-local RFC metadata exposed through the version-two public facade.
+ * Request-local RFC metadata exposed through the version-three public facade.
  */
 export type RfcDocument = Schema.Schema.Type<typeof RfcDocumentSchema>;
 

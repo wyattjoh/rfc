@@ -67,12 +67,12 @@ const renderNotFound = (answer: ResearchAnswer, result: ResearchResult): string 
 
 const renderCurrency = (result: ResearchResult): ReadonlyArray<string> =>
   (result.currency ?? []).flatMap((report) =>
-    report.current.length === 1 && report.current[0] === report.requested
+    report.complete && report.current.length === 1 && report.current[0] === report.requested
       ? []
       : [
           `Currency: ${report.requested} → ${
             report.current.length === 0 ? "current RFC unresolved" : report.current.join(", ")
-          }`,
+          }${report.complete ? "" : " (incomplete: some successors were not fetched)"}`,
         ],
   );
 
