@@ -244,6 +244,7 @@ const precisionV2CandidateLimits = {
   maxMergedDocumentCandidates: datatrackerDocumentCandidateLimit,
   maxSourceRetrievalCandidates: 8,
   maxPassageCandidates: 8,
+  maxLengthNormalizedPassageCandidates: 4,
   sourceBlockMaxCharacters: 4_000,
   sourceBlockOverlapCharacters: 200,
 } as const;
@@ -295,6 +296,8 @@ export const precisionV2Policy = {
   maxAcceptedDocumentCandidates: precisionV2CandidateLimits.maxSourceRetrievalCandidates,
   documentProbabilityThreshold: precisionV2AcceptanceLimits.documentProbabilityThreshold,
   maxPassageCandidates: precisionV2CandidateLimits.maxPassageCandidates,
+  maxLengthNormalizedPassageCandidates:
+    precisionV2CandidateLimits.maxLengthNormalizedPassageCandidates,
   sourceBlockMaxCharacters: precisionV2CandidateLimits.sourceBlockMaxCharacters,
   sourceBlockOverlapCharacters: precisionV2CandidateLimits.sourceBlockOverlapCharacters,
   maxCurrencyTraversalDepth: precisionV2TraversalLimits.maxDepth,
@@ -1210,18 +1213,73 @@ const passageLexicalScore = (
   }, 0);
 };
 
+const lengthNormalizedSaturation = 1.2;
+const lengthNormalizationStrength = 0.5;
+
+// BM25-style score: term frequency saturates against the block's length
+// relative to the average, so short focused sections are not buried under
+// long blocks that accumulate incidental matches.
+const passageLengthNormalizedScore = (
+  block: SourceBlock,
+  terms: ReadonlyArray<string>,
+  documentFrequencies: ReadonlyMap<string, number>,
+  documentCount: number,
+  averageLength: number,
+): number => {
+  const text = block.text.toLowerCase();
+  const section = block.section?.toLowerCase() ?? "";
+  const lengthFactor =
+    1 - lengthNormalizationStrength + lengthNormalizationStrength * (text.length / averageLength);
+  return terms.reduce((score, term) => {
+    const textFrequency = termMatches(text, term);
+    const sectionFrequency = termMatches(section, term);
+    if (textFrequency === 0 && sectionFrequency === 0) return score;
+    const inverseDocumentFrequency = Math.log(
+      1 + documentCount / (1 + (documentFrequencies.get(term) ?? 0)),
+    );
+    const saturatedTextFrequency =
+      (textFrequency * (lengthNormalizedSaturation + 1)) /
+      (textFrequency + lengthNormalizedSaturation * lengthFactor);
+    const anchorWeight = /^\d+$/.test(term) || term.includes("/") ? 4 : 1;
+    return (
+      score +
+      inverseDocumentFrequency *
+        anchorWeight *
+        (saturatedTextFrequency + Math.min(sectionFrequency, 1) * 2)
+    );
+  }, 0);
+};
+
+type ScoredBlock = { readonly block: SourceBlock; readonly score: number };
+
+const rankScoredBlocks = (scored: ReadonlyArray<ScoredBlock>): ReadonlyArray<SourceBlock> =>
+  [...scored]
+    .filter(({ score }) => score > 0)
+    .sort(
+      (left, right) => right.score - left.score || left.block.startOffset - right.block.startOffset,
+    )
+    .map(({ block }) => block);
+
 /**
  * Deterministically shortlist request-local source blocks before semantic judgment.
  *
+ * The primary ranking fills `limit` slots. Up to `lengthNormalizedLimit` further
+ * blocks are then appended from a length-normalized ranking, skipping blocks
+ * already shortlisted. The union never displaces a primary candidate, so a
+ * short answering section can enter without evicting evidence the primary
+ * ranking already surfaces.
+ *
  * @param blocks Parsed source blocks.
  * @param question Atomic research question.
- * @param limit Maximum number of returned candidates.
+ * @param limit Maximum number of primary candidates.
+ * @param lengthNormalizedLimit Maximum number of appended length-normalized candidates.
  * @returns Ranked, bounded passage candidates with stable offset tie-breaking.
  */
 export const shortlistPassageCandidates = (
   blocks: ReadonlyArray<SourceBlock>,
   question: string,
   limit: number = precisionV2Policy.maxPassageCandidates,
+  lengthNormalizedLimit: number = precisionV2Policy.maxLengthNormalizedPassageCandidates,
 ): ReadonlyArray<SourceBlock> => {
   if (blocks.length === 0 || question.trim().length === 0 || limit <= 0) return [];
   const terms = lexicalTerms(question);
@@ -1241,17 +1299,32 @@ export const shortlistPassageCandidates = (
     ]),
   );
 
-  return blocks
-    .map((block) => ({
+  const primary = rankScoredBlocks(
+    blocks.map((block) => ({
       block,
       score: passageLexicalScore(block, terms, documentFrequencies, blocks.length),
-    }))
-    .filter(({ score }) => score > 0)
-    .sort(
-      (left, right) => right.score - left.score || left.block.startOffset - right.block.startOffset,
-    )
-    .slice(0, limit)
-    .map(({ block }) => block);
+    })),
+  ).slice(0, limit);
+  if (lengthNormalizedLimit <= 0) return primary;
+
+  const averageLength =
+    blocks.reduce((total, block) => total + block.text.length, 0) / blocks.length;
+  const shortlisted = new Set(primary.map((block) => block.id));
+  const appended = rankScoredBlocks(
+    blocks.map((block) => ({
+      block,
+      score: passageLengthNormalizedScore(
+        block,
+        terms,
+        documentFrequencies,
+        blocks.length,
+        averageLength,
+      ),
+    })),
+  )
+    .filter((block) => !shortlisted.has(block.id))
+    .slice(0, lengthNormalizedLimit);
+  return [...primary, ...appended];
 };
 
 /**
@@ -2218,7 +2291,12 @@ const researchContext = Effect.fnUntraced(function* (
     policy.sourceBlockMaxCharacters,
     policy.sourceBlockOverlapCharacters,
   );
-  const candidates = shortlistPassageCandidates(blocks, question, policy.maxPassageCandidates);
+  const candidates = shortlistPassageCandidates(
+    blocks,
+    question,
+    policy.maxPassageCandidates,
+    policy.maxLengthNormalizedPassageCandidates,
+  );
   const lexicalFinished = yield* Clock.currentTimeMillis;
   const selectionStarted = lexicalFinished;
   const selection = yield* selectionStage(question, candidates, policy, true);
@@ -2955,7 +3033,12 @@ export const researchTopic = Effect.fnUntraced(function* (
       blockSources.set(decodedBlock.id, context);
     }
   }
-  const candidates = shortlistPassageCandidates(allBlocks, question, policy.maxPassageCandidates);
+  const candidates = shortlistPassageCandidates(
+    allBlocks,
+    question,
+    policy.maxPassageCandidates,
+    policy.maxLengthNormalizedPassageCandidates,
+  );
   const lexicalFinished = yield* Clock.currentTimeMillis;
   const selectionStarted = lexicalFinished;
   const selection = yield* selectionStage(

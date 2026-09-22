@@ -2316,6 +2316,44 @@ describe("known RFC research", () => {
     ).toEqual(["status-421", "generic-request"]);
   });
 
+  // Mirrors the RFC 9110 positive control: the 1.1 KB answering section (3.4)
+  // ranked 18th behind 3-4 KB blocks that accumulate incidental matches.
+  test("appends a short answering section without displacing primary candidates", () => {
+    const longBlocks = Array.from({ length: 4 }, (_, index) => {
+      const text =
+        "An intermediary forwards each request message and response message it receives. ".repeat(
+          24,
+        ) + "A client might retry a request after a connection failure. ".repeat(12);
+      return {
+        id: `long-${index}`,
+        section: `7.${index + 1}. Intermediary Handling`,
+        startOffset: index * 10_000,
+        endOffset: index * 10_000 + text.length,
+        text,
+      };
+    });
+    const answerText =
+      'A client sends requests to a server in the form of a "request" message with a method and request target.';
+    const answer = {
+      id: "messages",
+      section: "3.4. Messages",
+      startOffset: 50_000,
+      endOffset: 50_000 + answerText.length,
+      text: answerText,
+    };
+    const blocks = [...longBlocks, answer];
+    const question = "How does an HTTP client send a request message?";
+
+    const primary = shortlistPassageCandidates(blocks, question, 2, 0).map(({ id }) => id);
+    const union = shortlistPassageCandidates(blocks, question, 2, 2).map(({ id }) => id);
+
+    expect(primary).not.toContain("messages");
+    expect(union.slice(0, primary.length)).toEqual(primary);
+    expect(union).toContain("messages");
+    expect(union.length).toBeLessThanOrEqual(4);
+    expect(new Set(union).size).toBe(union.length);
+  });
+
   test("keeps exact offsets valid when a source has no recoverable section headings", async () => {
     const cacheDirectory = await makeCacheDirectory();
     const text = "An irregular RFC body states that clients send requests.\n";
