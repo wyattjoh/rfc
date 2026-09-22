@@ -15,8 +15,9 @@ import {
   renderEvidenceBundle,
   renderSourceCacheRemove,
   renderSourceCacheStatus,
+  rfcAgentParameterDescriptions as descriptions,
   rfcAgentToolMetadata,
-  rfcMcpInstructions,
+  rfcPiInstructions,
   schemaVersion,
 } from "@wyattjoh/rfc/agent";
 import { Type } from "typebox";
@@ -77,23 +78,26 @@ const nonEmptyString = (description: string) => Type.String({ description, minLe
 
 const knownRfcResearchParameters = Type.Object(
   {
-    question: nonEmptyString("One independently answerable RFC question"),
-    rfc: nonEmptyString("Exact published RFC identifier, for example RFC9110"),
+    question: nonEmptyString(descriptions.knownQuestion),
+    rfc: nonEmptyString(descriptions.rfc),
   },
   { additionalProperties: false },
 );
 
 const topicResearchParameters = Type.Object(
   {
-    question: nonEmptyString("One independently answerable topic question"),
+    question: nonEmptyString(descriptions.topicQuestion),
     searchTerms: Type.Array(
       Type.String({
-        description:
-          'Deliberate topic-discovery term sent verbatim in Datatracker query URLs and upstream logs. Matched as a literal case-insensitive substring of an RFC title or abstract, so use a short noun phrase such as "DNS over TLS"; a sentence fragment such as "DNS over TLS default port" matches nothing.',
+        description: descriptions.searchTerm,
         minLength: 1,
         maxLength: datatrackerTopicSearchTermMaximumCharacters,
       }),
-      { minItems: 1, maxItems: datatrackerTopicSearchTermLimit },
+      {
+        description: descriptions.searchTerms,
+        minItems: 1,
+        maxItems: datatrackerTopicSearchTermLimit,
+      },
     ),
   },
   { additionalProperties: false },
@@ -101,33 +105,25 @@ const topicResearchParameters = Type.Object(
 
 const citationParameters = Type.Object(
   {
-    rfc: nonEmptyString("Exact published RFC identifier containing the quotation"),
-    claim: nonEmptyString("One factual claim to check"),
-    quote: nonEmptyString("Exact unchanged RFC quotation"),
-    offset: Type.Optional(
-      Type.Integer({
-        description:
-          "Absolute UTF-8 byte offset copied from research provenance; omit for a unique quotation",
-        minimum: 0,
-      }),
-    ),
+    rfc: nonEmptyString(descriptions.citationRfc),
+    claim: nonEmptyString(descriptions.claim),
+    quote: nonEmptyString(descriptions.quote),
+    offset: Type.Optional(Type.Integer({ description: descriptions.offset, minimum: 0 })),
   },
   { additionalProperties: false },
 );
 
 const rfcParameters = Type.Object(
   {
-    rfc: nonEmptyString("Exact named RFC source-cache entry, for example RFC9110"),
+    rfc: nonEmptyString(descriptions.cacheRfc),
   },
   { additionalProperties: false },
 );
 
 const sourceCacheRemoveParameters = Type.Object(
   {
-    rfc: nonEmptyString("Exact named RFC source-cache entry, for example RFC9110"),
-    confirm: Type.Literal(true, {
-      description: "Must be true to confirm removal of the named cache entry",
-    }),
+    rfc: nonEmptyString(descriptions.cacheRfc),
+    confirm: Type.Literal(true, { description: descriptions.confirm }),
   },
   { additionalProperties: false },
 );
@@ -160,6 +156,19 @@ const successResult = (
  * Environment variable that replaces the published CLI for a session.
  */
 const rfcCliCommandVariable = "RFC_CLI_COMMAND";
+
+/**
+ * Environment variable that opts in to the local cache and credential tools.
+ *
+ * Research never needs them, and every registered tool's description and schema
+ * is resent to the model on each request, so they stay unregistered unless the
+ * session sets this to `1`. Read once when the extension loads and registers
+ * its tools.
+ */
+const rfcLocalToolsVariable = "RFC_PI_LOCAL_TOOLS";
+
+const renderAgentEvidence = (value: EvidenceBundle): string =>
+  renderEvidenceBundle(value, { audience: "agent" });
 
 /**
  * The executable and leading arguments used to run the RFC CLI.
@@ -354,11 +363,13 @@ const runToolCommand = <A extends object>(
 /**
  * Register the RFC evidence engine as native Pi tools with the MCP surface's names and metadata.
  *
+ * The cache and credential tools register only when `RFC_PI_LOCAL_TOOLS=1`.
+ *
  * @param pi Pi extension API used to register tools and prompt guidance.
  */
 export default function rfcExtension(pi: ExtensionAPI): void {
   pi.on("before_agent_start", (event) => {
-    event.systemPromptOptions.sections.rfc_evidence_engine = rfcMcpInstructions;
+    event.systemPromptOptions.sections.rfc_evidence_engine = rfcPiInstructions;
   });
 
   pi.on("tool_result", (event) => {
@@ -381,7 +392,7 @@ export default function rfcExtension(pi: ExtensionAPI): void {
         { schemaVersion, question, rfc },
         signal,
       );
-      return successResult(result.value, renderEvidenceBundle(result.value), result.warnings);
+      return successResult(result.value, renderAgentEvidence(result.value), result.warnings);
     },
   });
 
@@ -398,7 +409,7 @@ export default function rfcExtension(pi: ExtensionAPI): void {
         { schemaVersion, question, rfc: null, searchTerms },
         signal,
       );
-      return successResult(result.value, renderEvidenceBundle(result.value), result.warnings);
+      return successResult(result.value, renderAgentEvidence(result.value), result.warnings);
     },
   });
 
@@ -415,9 +426,15 @@ export default function rfcExtension(pi: ExtensionAPI): void {
         { schemaVersion, rfc, claim, quote, offset: offset ?? null },
         signal,
       );
-      return successResult(result.value, renderCitationVerification(result.value), result.warnings);
+      return successResult(
+        result.value,
+        renderCitationVerification(result.value, { audience: "agent" }),
+        result.warnings,
+      );
     },
   });
+
+  if (process.env[rfcLocalToolsVariable] !== "1") return;
 
   pi.registerTool({
     name: rfcAgentToolMetadata.sourceCacheStatus.name,

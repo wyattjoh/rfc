@@ -19,6 +19,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { Schema } from "effect";
 import type { CredentialStore } from "../src/credentials";
 import { CredentialInputError, CredentialStoreError } from "../src/credentials";
+import { rfcMcpInstructionsCharacterBudget } from "../src/agent-surface";
 import { createRfcMcpServer, rfcMcpAgentReferenceUri, rfcMcpInstructions } from "../src/mcp";
 import { toRfcOperationErrorEnvelope } from "../src/operations";
 import type { RfcOperationDependencies, RfcOperationOptions } from "../src/operations";
@@ -233,6 +234,36 @@ describe("RFC MCP agent surface", () => {
     }
   });
 
+  test("keeps every call-bounding rule inside the client truncation budget", () => {
+    // Claude Code keeps roughly the first 2 KB of server instructions. Only the
+    // resource pointer may fall past the cut, and it opens with "Skip" so a
+    // truncated prefix still reads as the intended default.
+    const paragraphs = rfcMcpInstructions.split("\n");
+    const resourceRule = paragraphs.at(-1) ?? "";
+    expect(resourceRule).toStartWith(`Skip ${rfcMcpAgentReferenceUri}`);
+    expect(rfcMcpInstructions.length - resourceRule.length).toBeLessThan(
+      rfcMcpInstructionsCharacterBudget,
+    );
+    for (const rule of [
+      "call rfc_research_known_rfc exactly once",
+      "Never call rfc_verify_citation to re-check research results",
+      "Do not run preflight tools",
+      "may you make at most one targeted follow-up",
+      "Preserve the research status exactly",
+      "only as qualified review material",
+      "never silently substitute a successor",
+      "needs_split is an instruction, not a failure",
+      "never refuse the whole request when the result already carries usable material",
+      "keep the typed error code and stop",
+      "never request or accept the secret through MCP",
+      "Never retry a successful paid operation over a usage-accounting warning",
+    ]) {
+      const end = rfcMcpInstructions.indexOf(rule) + rule.length;
+      expect(end).toBeGreaterThan(rule.length - 1);
+      expect(end).toBeLessThanOrEqual(rfcMcpInstructionsCharacterBudget);
+    }
+  });
+
   test("advertises the safe typed tool surface and complete agent reference", async () => {
     const connection = await connect(makeDependencies());
     try {
@@ -240,17 +271,15 @@ describe("RFC MCP agent surface", () => {
       expect(rfcMcpInstructions).toStartWith(
         "For an ordinary known-RFC answer, call rfc_research_known_rfc exactly once, then answer and stop.",
       );
-      expect(rfcMcpInstructions).toContain("at most one targeted follow-up research call");
+      expect(rfcMcpInstructions).toContain("at most one targeted follow-up");
       expect(rfcMcpInstructions).toContain("never request or accept the secret through MCP");
       expect(rfcMcpInstructions).toContain("Do not run preflight tools");
       expect(rfcMcpInstructions).toContain(
-        "Do not call rfc_verify_citation after research to re-check returned evidence",
+        "Never call rfc_verify_citation to re-check research results, even under needs_review",
       );
-      expect(rfcMcpInstructions).toContain("Do not read the agent-workflow resource");
+      expect(rfcMcpInstructions).toContain(`Skip ${rfcMcpAgentReferenceUri} for ordinary research`);
       expect(
-        rfcMcpInstructions.indexOf(
-          "Do not call rfc_verify_citation after research to re-check returned evidence",
-        ),
+        rfcMcpInstructions.indexOf("Never call rfc_verify_citation to re-check research results"),
       ).toBeLessThan(300);
 
       const { tools } = await connection.client.listTools();
@@ -418,6 +447,9 @@ describe("RFC MCP agent surface", () => {
         status: "needs_review",
       });
       expect(textContent(known)).toContain("Status: needs_review");
+      // Models get the agent format: no usage or cost footer.
+      expect(textContent(known)).not.toContain("Input tokens");
+      expect(textContent(known)).not.toContain("Estimated input cost");
       expect(textContent(known)).toContain("usage_accounting_failed");
 
       const topic = await connection.client.callTool({
@@ -510,6 +542,7 @@ describe("RFC MCP agent surface", () => {
       expect(rendered).toContain("Verdict: verified");
       expect(rendered).toContain("Offsets: 17-79");
       expect(rendered).toContain("Section: 1. Requirements");
+      expect(rendered).not.toContain("Input tokens");
 
       const withoutOffset = await connection.client.callTool({
         name: "rfc_verify_citation",

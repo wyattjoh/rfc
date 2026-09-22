@@ -6,7 +6,7 @@ import type {
   ToolResultEvent,
   ToolResultEventResult,
 } from "@earendil-works/pi-coding-agent";
-import { rfcAgentToolMetadata, rfcMcpInstructions } from "@wyattjoh/rfc/agent";
+import { rfcAgentToolMetadata, rfcPiInstructions } from "@wyattjoh/rfc/agent";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -28,7 +28,22 @@ type RegisteredExtension = {
   readonly toolResult: ((event: ToolResultEvent) => ToolResultEventResult | undefined) | undefined;
 };
 
-const registerExtension = (): RegisteredExtension => {
+/**
+ * Tools registered without `RFC_PI_LOCAL_TOOLS`: research only.
+ */
+const researchToolNames = [
+  rfcAgentToolMetadata.researchKnownRfc.name,
+  rfcAgentToolMetadata.researchTopic.name,
+  rfcAgentToolMetadata.verifyCitation.name,
+];
+
+/**
+ * Register the extension, opting in to the local cache and credential tools
+ * when asked and otherwise with the opt-in variable unset.
+ */
+const registerExtension = (
+  options: { readonly localTools: boolean } = { localTools: false },
+): RegisteredExtension => {
   const tools: Array<ToolDefinition> = [];
   let beforeAgentStart: ((event: unknown) => void) | undefined;
   let toolResult: ((event: ToolResultEvent) => ToolResultEventResult | undefined) | undefined;
@@ -45,7 +60,15 @@ const registerExtension = (): RegisteredExtension => {
     },
   } as unknown as ExtensionAPI;
 
-  rfcExtension(pi);
+  const original = process.env.RFC_PI_LOCAL_TOOLS;
+  if (options.localTools) process.env.RFC_PI_LOCAL_TOOLS = "1";
+  else delete process.env.RFC_PI_LOCAL_TOOLS;
+  try {
+    rfcExtension(pi);
+  } finally {
+    if (original === undefined) delete process.env.RFC_PI_LOCAL_TOOLS;
+    else process.env.RFC_PI_LOCAL_TOOLS = original;
+  }
   return { tools, beforeAgentStart, toolResult };
 };
 
@@ -133,8 +156,10 @@ describe("Pi RFC extension", () => {
       }));
       if (result.errors.length > 0) process.exitCode = 1;
     `;
+    const { RFC_PI_LOCAL_TOOLS: _localTools, ...env } = process.env;
     const result = Bun.spawnSync(["node", "--input-type=module", "--eval", nodeScript], {
       cwd: repositoryRoot,
+      env,
       stderr: "pipe",
       stdout: "pipe",
     });
@@ -146,11 +171,17 @@ describe("Pi RFC extension", () => {
     };
     expect(output.errors).toEqual([]);
     expect(result.exitCode).toBe(0);
-    expect(output.tools).toEqual(Object.values(rfcAgentToolMetadata).map((tool) => tool.name));
+    expect(output.tools).toEqual(researchToolNames);
+  });
+
+  test("registers only the research tools by default", () => {
+    const { tools } = registerExtension();
+
+    expect(tools.map((tool) => tool.name)).toEqual(researchToolNames);
   });
 
   test("registers the MCP tool surface with shared names and descriptions", () => {
-    const { tools, beforeAgentStart } = registerExtension();
+    const { tools, beforeAgentStart } = registerExtension({ localTools: true });
 
     const metadata = Object.values(rfcAgentToolMetadata);
     expect(tools.map((tool) => tool.name)).toEqual(metadata.map((tool) => tool.name));
@@ -161,7 +192,75 @@ describe("Pi RFC extension", () => {
 
     const sections: Record<string, string> = {};
     beforeAgentStart?.({ systemPromptOptions: { sections } });
-    expect(sections.rfc_evidence_engine).toBe(rfcMcpInstructions);
+    expect(sections.rfc_evidence_engine).toBe(rfcPiInstructions);
+    // Pi registers no agent-workflow resource and has no MCP secret path.
+    expect(rfcPiInstructions).not.toContain("MCP");
+    expect(rfcPiInstructions).not.toContain("rfc://");
+    expect(rfcPiInstructions).not.toContain("preflight");
+  });
+});
+
+describe("research rendering", () => {
+  test("sends the model the agent format and keeps the full bundle in details", async () => {
+    const bundle = {
+      schemaVersion: 2,
+      kind: "evidence_bundle",
+      status: "answered",
+      question: "What must the client send?",
+      rfc: { identifier: "RFC9110" },
+      contexts: [],
+      evidence: [
+        {
+          quote: "The client MUST send a request.",
+          context: "requested",
+          provenance: {
+            identifier: "RFC9110",
+            sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+            section: "3.  Requests",
+            startOffset: 10,
+            endOffset: 41,
+            offsetUnit: "utf8-byte",
+          },
+        },
+      ],
+      diagnostics: {
+        usage: { inputTokens: 20 },
+        inputCost: { estimatedUsd: 0.00000084 },
+      },
+    };
+    const { tools } = registerExtension();
+    const tool = findTool(tools, rfcAgentToolMetadata.researchKnownRfc.name);
+
+    const execute = tool.execute as unknown as (
+      toolCallId: string,
+      params: object,
+      signal: AbortSignal | undefined,
+      onUpdate: undefined,
+      ctx: ExtensionContext,
+    ) => Promise<{
+      readonly content: ReadonlyArray<{ readonly text: string }>;
+      readonly details: { readonly structuredContent: object };
+    }>;
+
+    const result = await withStubBunx(
+      ["#!/bin/sh", "cat > /dev/null", `printf '%s\\n' '${JSON.stringify(bundle)}'`].join("\n"),
+      () =>
+        execute(
+          "render-1",
+          { question: bundle.question, rfc: "RFC9110" },
+          undefined,
+          undefined,
+          executionContext,
+        ),
+    );
+
+    const text = result.content[0]?.text ?? "";
+    expect(text).toContain(
+      "Evidence | RFC9110 | §3.  Requests | requested context | offsets 10-41 (utf8-byte)\nQuote: The client MUST send a request.",
+    );
+    expect(text).toContain("Source: RFC9110 https://www.rfc-editor.org/rfc/rfc9110.txt");
+    expect(text).not.toContain("Input tokens");
+    expect(result.details.structuredContent).toEqual(bundle);
   });
 });
 
@@ -174,7 +273,7 @@ describe("CLI failure diagnostics", () => {
   ].join("\n");
 
   test("names the exit code and stderr when the CLI emits no error envelope", async () => {
-    const { tools } = registerExtension();
+    const { tools } = registerExtension({ localTools: true });
     const tool = findTool(tools, rfcAgentToolMetadata.authStatus.name);
 
     const error = await withStubBunx(failingCliScript, () => runTool(tool, "call-1", {}));
@@ -185,7 +284,7 @@ describe("CLI failure diagnostics", () => {
   });
 
   test("carries the exit code and stderr into the tool result details", async () => {
-    const { tools, toolResult } = registerExtension();
+    const { tools, toolResult } = registerExtension({ localTools: true });
     const tool = findTool(tools, rfcAgentToolMetadata.authStatus.name);
 
     await withStubBunx(failingCliScript, () => runTool(tool, "call-2", {}));
@@ -210,7 +309,7 @@ describe("CLI failure diagnostics", () => {
 
 describe("CLI package spec", () => {
   test("pins the CLI to the exact version this package depends on", async () => {
-    const { tools } = registerExtension();
+    const { tools } = registerExtension({ localTools: true });
     const argvFile = join(await mkdtemp(join(tmpdir(), "rfc-pi-spec-")), "argv.txt");
     const originalArgvFile = process.env.RFC_STUB_ARGV_FILE;
     process.env.RFC_STUB_ARGV_FILE = argvFile;
@@ -242,7 +341,7 @@ describe("CLI package spec", () => {
 
 describe("RFC_CLI_COMMAND override", () => {
   test("runs the local CLI end to end instead of the published package", async () => {
-    const { tools } = registerExtension();
+    const { tools } = registerExtension({ localTools: true });
     const tool = findTool(tools, rfcAgentToolMetadata.authStatus.name);
 
     // A bunx that always fails sits on PATH, so this only succeeds if the
@@ -257,7 +356,7 @@ describe("RFC_CLI_COMMAND override", () => {
   });
 
   test("accepts a bare executable and reports an unusable value", async () => {
-    const { tools } = registerExtension();
+    const { tools } = registerExtension({ localTools: true });
     const tool = findTool(tools, rfcAgentToolMetadata.authStatus.name);
     const directory = await mkdtemp(join(tmpdir(), "rfc-pi-override-"));
     const stub = join(directory, "rfc-stub");
@@ -319,7 +418,7 @@ describe("CLI argv contract", () => {
       Object.values(rfcAgentToolMetadata).map((tool) => tool.name),
     );
 
-    const { tools } = registerExtension();
+    const { tools } = registerExtension({ localTools: true });
     const argvFile = join(await mkdtemp(join(tmpdir(), "rfc-pi-argv-")), "argv.txt");
     // A throwaway home keeps the replayed commands off the developer's real
     // source cache, which `cache remove` would otherwise mutate.

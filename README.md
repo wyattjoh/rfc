@@ -77,7 +77,7 @@ claude --plugin-dir .
 
 ## Install the Pi package
 
-The published `@wyattjoh/rfc-pi` Pi package registers the same six `rfc_*` tool names, labels, descriptions, input constraints, and bounded workflow instructions as the MCP server. It invokes the latest published CLI directly for each tool call rather than running an MCP transport, so Bun 1.4.2 or newer must be available. It also includes the RFC lookup skill:
+The published `@wyattjoh/rfc-pi` Pi package registers the MCP server's research and citation tools with the same names, labels, descriptions, and input constraints, plus bounded workflow instructions without the MCP-only rules; set `RFC_PI_LOCAL_TOOLS=1` to also register the cache and credential tools. It invokes the latest published CLI directly for each tool call rather than running an MCP transport, so Bun 1.4.2 or newer must be available. It also includes the RFC lookup skill:
 
 ```sh
 pi install npm:@wyattjoh/rfc-pi

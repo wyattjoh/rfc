@@ -1,5 +1,12 @@
 export { command, makeDefaultCliDependencies, run, toCliErrorEnvelope } from "./main";
-export { rfcAgentToolMetadata, rfcMcpAgentReferenceUri, rfcMcpInstructions } from "./agent-surface";
+export {
+  rfcAgentParameterDescriptions,
+  rfcAgentToolMetadata,
+  rfcMcpAgentReferenceUri,
+  rfcMcpInstructions,
+  rfcMcpInstructionsCharacterBudget,
+  rfcPiInstructions,
+} from "./agent-surface";
 export { createRfcMcpServer, rfcMcpAgentReference, runRfcMcpServer } from "./mcp";
 export {
   executeAuthStatus,

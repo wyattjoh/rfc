@@ -7,11 +7,18 @@ import {
   datatrackerTopicSearchTermLimit,
   datatrackerTopicSearchTermMaximumCharacters,
   schemaVersion,
+  type CitationVerificationResult,
+  type EvidenceBundle,
 } from "@wyattjoh/rfc-core";
 import { McpServer, type CallToolResult } from "@modelcontextprotocol/server";
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { Schema } from "effect";
-import { rfcAgentToolMetadata, rfcMcpAgentReferenceUri, rfcMcpInstructions } from "./agent-surface";
+import {
+  rfcAgentParameterDescriptions as descriptions,
+  rfcAgentToolMetadata,
+  rfcMcpAgentReferenceUri,
+  rfcMcpInstructions,
+} from "./agent-surface";
 import { AuthStatusSchema } from "./credentials";
 import {
   executeAuthStatus,
@@ -130,55 +137,38 @@ const describedString = (description: string) =>
   Schema.NonEmptyString.pipe(Schema.annotate({ description }));
 
 const KnownRfcResearchInputSchema = Schema.Struct({
-  question: describedString("One independently answerable RFC question"),
-  rfc: describedString("Exact published RFC identifier, for example RFC9110"),
+  question: describedString(descriptions.knownQuestion),
+  rfc: describedString(descriptions.rfc),
 });
 
 const TopicSearchTermSchema = Schema.String.check(
   Schema.isMinLength(1),
   Schema.isMaxLength(datatrackerTopicSearchTermMaximumCharacters),
-).pipe(
-  Schema.annotate({
-    description:
-      "Deliberate topic-discovery term sent verbatim in Datatracker query URLs and upstream logs",
-  }),
-);
+).pipe(Schema.annotate({ description: descriptions.searchTerm }));
 
 const TopicResearchInputSchema = Schema.Struct({
-  question: describedString("One independently answerable topic question"),
+  question: describedString(descriptions.topicQuestion),
   searchTerms: Schema.Array(TopicSearchTermSchema)
     .check(Schema.isMinLength(1), Schema.isMaxLength(datatrackerTopicSearchTermLimit))
-    .pipe(
-      Schema.annotate({
-        description:
-          "One to four ordered topic-discovery terms matched as literal substrings of RFC titles and abstracts; preserve caller order",
-      }),
-    ),
+    .pipe(Schema.annotate({ description: descriptions.searchTerms })),
 });
 
 const CitationInputSchema = Schema.Struct({
-  rfc: describedString("Exact published RFC identifier containing the quotation"),
-  claim: describedString("One factual claim to check"),
-  quote: describedString("Exact unchanged RFC quotation"),
+  rfc: describedString(descriptions.citationRfc),
+  claim: describedString(descriptions.claim),
+  quote: describedString(descriptions.quote),
   offset: Schema.optionalKey(
-    Schema.Natural.pipe(
-      Schema.annotate({
-        description:
-          "Absolute UTF-8 byte offset copied from research provenance; omit for a unique quotation",
-      }),
-    ),
+    Schema.Natural.pipe(Schema.annotate({ description: descriptions.offset })),
   ),
 });
 
 const RfcInputSchema = Schema.Struct({
-  rfc: describedString("Exact named RFC source-cache entry, for example RFC9110"),
+  rfc: describedString(descriptions.cacheRfc),
 });
 
 const SourceCacheRemoveInputSchema = Schema.Struct({
-  rfc: describedString("Exact named RFC source-cache entry, for example RFC9110"),
-  confirm: Schema.Literal(true).pipe(
-    Schema.annotate({ description: "Must be true to confirm removal of the named cache entry" }),
-  ),
+  rfc: describedString(descriptions.cacheRfc),
+  confirm: Schema.Literal(true).pipe(Schema.annotate({ description: descriptions.confirm })),
 });
 
 const EmptyInputSchema = Schema.Struct({});
@@ -196,6 +186,12 @@ const toMcpSchema = <S extends Schema.ConstraintDecoder<unknown> & Schema.Constr
     },
   };
 };
+
+const renderAgentEvidence = (value: EvidenceBundle): string =>
+  renderEvidenceBundle(value, { audience: "agent" });
+
+const renderAgentCitation = (value: CitationVerificationResult): string =>
+  renderCitationVerification(value, { audience: "agent" });
 
 const warningContent = (warnings: ReadonlyArray<RfcOperationWarning>) =>
   warnings.map((warning) => ({ type: "text" as const, text: JSON.stringify(warning) }));
@@ -270,7 +266,7 @@ export const createRfcMcpServer = (
       try {
         return semanticSuccess(
           await executeResearch({ schemaVersion, question, rfc }, options, dependencies),
-          renderEvidenceBundle,
+          renderAgentEvidence,
         );
       } catch (error) {
         return toolError(error);
@@ -295,7 +291,7 @@ export const createRfcMcpServer = (
             options,
             dependencies,
           ),
-          renderEvidenceBundle,
+          renderAgentEvidence,
         );
       } catch (error) {
         return toolError(error);
@@ -320,7 +316,7 @@ export const createRfcMcpServer = (
             options,
             dependencies,
           ),
-          renderCitationVerification,
+          renderAgentCitation,
         );
       } catch (error) {
         return toolError(error);

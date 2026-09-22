@@ -4,25 +4,68 @@
 export const rfcMcpAgentReferenceUri = "rfc://docs/agent-workflow" as const;
 
 /**
- * Cross-tool instructions shared by MCP and native agent integrations.
+ * Clients may truncate MCP server instructions; Claude Code keeps about 2 KB.
  */
-export const rfcMcpInstructions = `For an ordinary known-RFC answer, call rfc_research_known_rfc exactly once, then answer and stop. Do not call rfc_verify_citation after research to re-check returned evidence, including when status is needs_review. Do not run preflight tools. Do not read the agent-workflow resource.
+export const rfcMcpInstructionsCharacterBudget = 2_000;
 
-Use this server as the complete backend for published IETF RFC questions. Do not answer RFC claims from memory or another provider. When the RFC identifier is unknown, call rfc_research_topic with { question, searchTerms } using one to four deliberate ordered technical terms. Use rfc_verify_citation only when the user supplied a quotation or explicitly requested a distinct paraphrase check.
+/**
+ * Build the cross-tool workflow for one agent surface.
+ *
+ * Each rule is stated once. Search-term privacy lives in the `searchTerms`
+ * parameter description and citation-verification limits in the
+ * `rfc_verify_citation` description. The MCP variant adds the preflight,
+ * secret-path, and resource rules; Pi has none of those tools or paths. Rules
+ * that bound tool calls come first and the resource rule last, opening with
+ * "Skip", so a client that truncates the instructions drops only guidance whose
+ * absence is already the intended default.
+ *
+ * @param surface Agent surface the instructions are delivered to.
+ * @returns Paragraphs of model-facing workflow instructions.
+ */
+const rfcAgentInstructions = (surface: "mcp" | "pi"): string =>
+  [
+    `For an ordinary known-RFC answer, call rfc_research_known_rfc exactly once, then answer and stop. Never call rfc_verify_citation to re-check research results, even under needs_review; use it only for a user-supplied quotation or an explicitly requested distinct paraphrase check.${surface === "mcp" ? " Do not run preflight tools." : ""}`,
+    `Answer published IETF RFC questions only from ${surface === "mcp" ? "this server" : "these tools"}, never from memory or another provider. For an unknown RFC, call rfc_research_topic with one to four deliberate ordered technical search terms.`,
+    "One simple atomic question gets one research call; only if it has neither usable accepted evidence nor a review candidate may you make at most one targeted follow-up. Never rephrase valid results to chase answered status or higher confidence. Research up to two explicit independent questions in separate calls; do not invent a split for an ambiguous request.",
+    "Preserve the research status exactly. Accepted evidence may support an answer; quote a review candidate (canonical but unaccepted) only as qualified review material. Keep requested and current RFC contexts distinct; never silently substitute a successor.",
+    "needs_split is an instruction, not a failure. The result names the RFC it selected and returns the canonical review candidates it already retrieved. Split the request yourself into one atomic question per requested fact, then research each in its own call against that RFC; the one-follow-up budget applies per sub-question, not to the compound request. Never rephrase and retry the compound request, never re-research an RFC this session already researched, and never refuse the whole request when the result already carries usable material.",
+    `Tool errors are not research statuses: keep the typed error code and stop; never substitute stale text, another provider, or memory. For a missing credential, ask the human operator to run rfc auth login; never request or accept the secret${surface === "mcp" ? " through MCP" : ""}. Never retry a successful paid operation over a usage-accounting warning.`,
+    ...(surface === "mcp"
+      ? [
+          `Skip ${rfcMcpAgentReferenceUri} for ordinary research; read it only for a non-answer status, operational failure, citation repair, or a provenance, privacy, cost, or cache question.`,
+        ]
+      : []),
+  ].join("\n");
 
-For one simple atomic question, call one research tool once. Only when that result contains neither usable accepted evidence nor a review candidate may you make at most one targeted follow-up research call. Do not rephrase valid results to chase answered status or higher confidence. For up to two explicit independent questions, keep them as separate research calls; do not invent a split for an ambiguous request.
+/**
+ * Cross-tool instructions sent as the MCP server's initialization instructions.
+ */
+export const rfcMcpInstructions = rfcAgentInstructions("mcp");
 
-Topic search terms are transmitted verbatim in Datatracker URLs and may appear in upstream logs; never derive hidden terms or send the full question as a search term unless the user explicitly chose it.
+/**
+ * Cross-tool instructions injected into the Pi system prompt, without the
+ * MCP-only preflight, secret-path, and resource rules.
+ */
+export const rfcPiInstructions = rfcAgentInstructions("pi");
 
-Preserve research status exactly: answered, partial, unsupported, needs_review, or needs_split. Accepted evidence may support an answer. A review candidate is canonical but unaccepted and must be quoted only as qualified review material. Keep requested and current RFC contexts distinct and never silently substitute a successor.
-
-needs_split is an instruction, not a failure. The result names the RFC it selected and returns the canonical review candidates it already retrieved. Split the request yourself into one atomic question per requested fact, then research each in its own call against that RFC; the one-follow-up budget applies per sub-question, not to the compound request. Never rephrase and retry the compound request, never re-research an RFC this session already researched, and never refuse the whole request when the result already carries usable material.
-
-Exact reproduction of accepted evidence needs no citation call. Verify at most two paraphrased claims once each with rfc_verify_citation, using the exact returned quote and its UTF-8 byte offset. If a direct verification verdict is fabricated, use at most one research call to locate current wording and one verification call for that replacement. Never guess wording or offsets. Unsupported, contradicted, or fabricated verdicts cannot support an unqualified claim.
-
-Operational tool errors are not research statuses. Preserve their typed error code and stop rather than substituting stale text, another provider, or memory. If a tool error reports a missing credential, ask the human operator to run rfc auth login; never request or accept the secret through MCP. A usage-accounting warning follows a successful paid operation and must not trigger a retry.
-
-Do not read the agent-workflow resource for ordinary research. Read ${rfcMcpAgentReferenceUri} only when handling a non-answer status, operational failure, citation-repair workflow, or a provenance, privacy, cost, or cache question.`;
+/**
+ * Model-facing tool parameter descriptions shared by the MCP and Pi schemas.
+ */
+export const rfcAgentParameterDescriptions = {
+  knownQuestion: "One independently answerable RFC question",
+  topicQuestion: "One independently answerable topic question",
+  rfc: "Exact published RFC identifier, for example RFC9110",
+  searchTerms:
+    "One to four ordered topic-discovery terms; preserve caller order. Never derive hidden terms or send the full question as a term unless the user explicitly chose it.",
+  searchTerm:
+    'Deliberate topic-discovery term sent verbatim in Datatracker query URLs and upstream logs. Matched as a literal case-insensitive substring of an RFC title or abstract, so use a short noun phrase such as "DNS over TLS"; a sentence fragment such as "DNS over TLS default port" matches nothing.',
+  citationRfc: "Exact published RFC identifier containing the quotation",
+  claim: "One factual claim to check",
+  quote: "Exact unchanged RFC quotation",
+  offset: "Absolute UTF-8 byte offset copied from research provenance; omit for a unique quotation",
+  cacheRfc: "Exact named RFC source-cache entry, for example RFC9110",
+  confirm: "Must be true to confirm removal of the named cache entry",
+} as const;
 
 const rfcAgentToolAnnotations = {
   semantic: {
@@ -53,21 +96,21 @@ export const rfcAgentToolMetadata = {
     name: "rfc_research_known_rfc",
     title: "Research a known RFC",
     description:
-      "Inputs: question, rfc. Research one atomic question against a known published RFC. If evidence or a review candidate is returned, answer from it without a verification call. Includes bounded RFC currency traversal, provenance, status, and diagnostics.",
+      "Inputs: question, rfc. Research one atomic question against a known published RFC. Includes bounded RFC currency traversal, provenance, status, and diagnostics.",
     annotations: rfcAgentToolAnnotations.semantic,
   },
   researchTopic: {
     name: "rfc_research_topic",
     title: "Discover and research RFCs",
     description:
-      "Inputs: question, searchTerms (1-4). Research one atomic topic question. If evidence or a review candidate is returned, answer from it without a verification call. Terms are sent verbatim to Datatracker; results include provenance, status, and diagnostics.",
+      "Inputs: question, searchTerms (1-4). Research one atomic topic question. Results include provenance, status, and diagnostics.",
     annotations: rfcAgentToolAnnotations.semantic,
   },
   verifyCitation: {
     name: "rfc_verify_citation",
     title: "Verify an RFC citation",
     description:
-      "Inputs: rfc, claim, quote; optional offset. Check one factual claim against one exact RFC quotation. Returns a verified, unsupported, contradicted, or fabricated verdict with canonical provenance.",
+      "Inputs: rfc, claim, quote; optional offset. Check one factual claim against one exact RFC quotation. Returns a verified, unsupported, contradicted, or fabricated verdict with canonical provenance. Verify at most two paraphrased claims, once each, using the exact returned quote and its UTF-8 byte offset; never guess wording or offsets. If a direct verification verdict is fabricated, use at most one research call to locate current wording and one verification call for that replacement. Unsupported, contradicted, or fabricated verdicts cannot support an unqualified claim.",
     annotations: rfcAgentToolAnnotations.semantic,
   },
   sourceCacheStatus: {

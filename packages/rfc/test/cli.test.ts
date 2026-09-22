@@ -1382,5 +1382,145 @@ describe("evidence bundle rendering", () => {
         stubEvidenceBundle as unknown as Parameters<typeof renderEvidenceBundle>[0],
       ),
     ).not.toContain("Next step:");
+
+    // The agent audience carries the same guidance, unchanged.
+    const agentSplit = renderEvidenceBundle(
+      { ...stubEvidenceBundle, status: "needs_split" } as unknown as Parameters<
+        typeof renderEvidenceBundle
+      >[0],
+      { audience: "agent" },
+    );
+    expect(agentSplit.split("\n")[2]).toBe(split.split("\n")[2]!);
+  });
+});
+
+describe("agent evidence bundle rendering", () => {
+  const sourceUrl = "https://www.rfc-editor.org/rfc/rfc9110.txt";
+  const successorUrl = "https://www.rfc-editor.org/rfc/rfc9999.txt";
+  // Quote bytes a formatter could plausibly disturb: a line break, runs of
+  // spaces, trailing whitespace, and non-ASCII.
+  const evidenceQuote = "The client MUST send\n   a request  containing the target — resource. ";
+  const candidateQuote = "A server MAY  reject the request.\n";
+  const successorQuote = "Successors SHOULD mention “this”.";
+  const provenance = (
+    identifier: string,
+    url: string,
+    section: string | null,
+    startOffset: number,
+    endOffset: number,
+  ) => ({ identifier, sourceUrl: url, section, startOffset, endOffset, offsetUnit: "utf8-byte" });
+  const bundle = (overrides: object = {}) =>
+    ({
+      ...stubEvidenceBundle,
+      status: "needs_review",
+      question: "Which section says what the client must send?",
+      contexts: [
+        { role: "requested", document: { identifier: "RFC9110" }, state: "researched" },
+        { role: "current", document: { identifier: "RFC9999" }, state: "researched" },
+      ],
+      evidence: [
+        {
+          quote: evidenceQuote,
+          context: "requested",
+          provenance: provenance("RFC9110", sourceUrl, "3.1.  Requests", 120, 193),
+        },
+      ],
+      reviewCandidates: [
+        {
+          quote: candidateQuote,
+          context: "requested",
+          provenance: provenance("RFC9110", sourceUrl, null, 400, 434),
+        },
+        {
+          quote: successorQuote,
+          context: "current",
+          provenance: provenance("RFC9999", successorUrl, "2.  Updates", 50, 87),
+        },
+      ],
+      ...overrides,
+    }) as unknown as Parameters<typeof renderEvidenceBundle>[0];
+
+  test("keeps quote bytes, offsets, sections, and candidate labels exact", () => {
+    const rendered = renderEvidenceBundle(bundle(), { audience: "agent" });
+
+    expect(rendered).toStartWith("Status: needs_review\nRFC: RFC9110\n");
+    expect(rendered).toContain(
+      `Evidence | RFC9110 | §3.1.  Requests | requested context | offsets 120-193 (utf8-byte)\nQuote: ${evidenceQuote}\n`,
+    );
+    expect(rendered).toContain(
+      `Review candidate, not accepted evidence | RFC9110 | section unknown | requested context | offsets 400-434 (utf8-byte)\nQuote: ${candidateQuote}\n`,
+    );
+    expect(rendered).toContain(
+      `Review candidate, not accepted evidence | RFC9999 | §2.  Updates | current context | offsets 50-87 (utf8-byte)\nQuote: ${successorQuote}`,
+    );
+    expect(rendered.split("not accepted evidence").length - 1).toBe(2);
+  });
+
+  test("names each source URL once, on its context line", () => {
+    const rendered = renderEvidenceBundle(bundle(), { audience: "agent" });
+
+    expect(rendered).toContain(`Context: requested RFC9110 (researched) ${sourceUrl}\n`);
+    expect(rendered).toContain(`Context: current RFC9999 (researched) ${successorUrl}\n`);
+    expect(rendered.split(sourceUrl).length - 1).toBe(1);
+
+    // A topic bundle can carry passages without context lines.
+    const withoutContexts = renderEvidenceBundle(bundle({ contexts: [] }), { audience: "agent" });
+    expect(withoutContexts).toContain(`Source: RFC9110 ${sourceUrl}\n`);
+    expect(withoutContexts).toContain(`Source: RFC9999 ${successorUrl}\n`);
+    expect(withoutContexts.split(sourceUrl).length - 1).toBe(1);
+  });
+
+  test("drops the usage and cost footer only for agents", () => {
+    const agent = renderEvidenceBundle(bundle(), { audience: "agent" });
+    expect(agent).not.toContain("Input tokens");
+    expect(agent).not.toContain("Estimated input cost");
+
+    const human = renderEvidenceBundle(bundle());
+    expect(human).toContain("Input tokens: 20");
+    expect(human).toContain("Estimated input cost (USD): $0.000000840");
+    expect(human).toContain(`Source: ${sourceUrl}`);
+    expect(human).toContain("Review candidate: not accepted evidence");
+  });
+
+  test("keeps the no-RFC reason", () => {
+    const rendered = renderEvidenceBundle(
+      bundle({
+        rfc: null,
+        contexts: [],
+        evidence: [],
+        reviewCandidates: [],
+        diagnostics: {
+          ...stubEvidenceBundle.diagnostics,
+          candidates: { documentCandidates: 0, acceptedDocuments: 0 },
+        },
+      }),
+      { audience: "agent" },
+    );
+    expect(rendered).toContain("RFC: no RFC matched the search terms");
+  });
+
+  test("warns a section-seeking question that the defining section is unconfirmed", () => {
+    const note =
+      "Note: none of the returned passages is confirmed to be the section that defines this; do not cite a section number that is not shown above.";
+
+    expect(renderEvidenceBundle(bundle(), { audience: "agent" })).toEndWith(`\n${note}`);
+    expect(renderEvidenceBundle(bundle({ status: "partial" }), { audience: "agent" })).toEndWith(
+      `\n${note}`,
+    );
+    // Accepted answers, questions that name no section, and the human format
+    // render without it.
+    expect(
+      renderEvidenceBundle(bundle({ status: "answered" }), { audience: "agent" }),
+    ).not.toContain(note);
+    expect(
+      renderEvidenceBundle(bundle({ question: "What must the client send?" }), {
+        audience: "agent",
+      }),
+    ).not.toContain(note);
+    expect(renderEvidenceBundle(bundle())).not.toContain(note);
+    // With no passages there is nothing to mistake for the defining section.
+    expect(
+      renderEvidenceBundle(bundle({ evidence: [], reviewCandidates: [] }), { audience: "agent" }),
+    ).not.toContain(note);
   });
 });

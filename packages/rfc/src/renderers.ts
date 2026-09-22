@@ -1,6 +1,8 @@
 import type {
   CitationVerificationResult,
   EvidenceBundle,
+  EvidencePassage,
+  ReviewCandidate,
   RfcSourceCacheRemoveResult,
   RfcSourceCacheStatus,
 } from "@wyattjoh/rfc-core";
@@ -56,12 +58,110 @@ const splitGuidance =
   "Next step: this request asks for more than one fact. Split it into one atomic question per requested fact and research each in its own call against the RFC named above. The passages below are review candidates, not accepted evidence; reuse them rather than researching this RFC again.";
 
 /**
+ * Warn that a section-seeking question may not have reached the defining section.
+ *
+ * The engine does not know which section a question asks for, and it accepts
+ * nearby sections as direct answers, so the caller cannot tell from a
+ * `needs_review` or `partial` bundle whether the section it was asked to cite
+ * is among the passages. An agent then cited a section number it never saw.
+ */
+const sectionCaveat =
+  "Note: none of the returned passages is confirmed to be the section that defines this; do not cite a section number that is not shown above.";
+
+const needsSectionCaveat = (result: EvidenceBundle, passages: number): boolean =>
+  passages > 0 &&
+  (result.status === "needs_review" || result.status === "partial") &&
+  /\bsections?\b/i.test(result.question);
+
+/**
+ * Who reads rendered text: a model through MCP or Pi, or a person at the CLI.
+ */
+export type RenderAudience = "agent" | "human";
+
+/**
+ * Options shared by the evidence and citation renderers.
+ */
+export type RenderOptions = {
+  /**
+   * `agent` renders compact passage headers without usage or cost lines;
+   * `human` renders the labelled CLI format.
+   */
+  readonly audience: RenderAudience;
+};
+
+const humanAudience: RenderOptions = { audience: "human" };
+
+type RenderedPassage = EvidencePassage | ReviewCandidate;
+
+/**
+ * Collect each document's source URLs once, in first-seen order.
+ */
+const sourceUrlsByDocument = (
+  passages: ReadonlyArray<RenderedPassage>,
+): ReadonlyMap<string, ReadonlyArray<string>> =>
+  passages.reduce((sources, { provenance: { identifier, sourceUrl } }) => {
+    const urls = sources.get(identifier) ?? [];
+    return urls.includes(sourceUrl) ? sources : sources.set(identifier, [...urls, sourceUrl]);
+  }, new Map<string, ReadonlyArray<string>>());
+
+const agentPassageHeader = (label: string, passage: RenderedPassage): string =>
+  [
+    label,
+    passage.provenance.identifier,
+    passage.provenance.section === null ? "section unknown" : `§${passage.provenance.section}`,
+    `${passage.context} context`,
+    `offsets ${passage.provenance.startOffset}-${passage.provenance.endOffset} (${passage.provenance.offsetUnit})`,
+  ].join(" | ");
+
+/**
+ * Render an evidence bundle for a model: one header line per passage and each
+ * source URL once, with the quote bytes, offsets, and qualifications unchanged.
+ */
+const renderAgentEvidenceBundle = (result: EvidenceBundle): string => {
+  const candidates = result.reviewCandidates ?? [];
+  const sources = sourceUrlsByDocument([...result.evidence, ...candidates]);
+  const contexts = result.contexts ?? [];
+  const contextDocuments = new Set(contexts.map(({ document }) => document.identifier));
+  return [
+    `Status: ${result.status}`,
+    `RFC: ${result.rfc?.identifier ?? noRfcReason(result)}`,
+    ...(result.status === "needs_split" ? [splitGuidance] : []),
+    ...contexts.map(({ role, document, state }) =>
+      [
+        `Context: ${role} ${document.identifier} (${state})`,
+        ...(sources.get(document.identifier) ?? []),
+      ].join(" "),
+    ),
+    ...[...sources]
+      .filter(([identifier]) => !contextDocuments.has(identifier))
+      .map(([identifier, urls]) => `Source: ${identifier} ${urls.join(" ")}`),
+    ...result.evidence.flatMap((passage) => [
+      agentPassageHeader("Evidence", passage),
+      `Quote: ${passage.quote}`,
+    ]),
+    ...candidates.flatMap((candidate) => [
+      agentPassageHeader("Review candidate, not accepted evidence", candidate),
+      `Quote: ${candidate.quote}`,
+    ]),
+    ...(needsSectionCaveat(result, result.evidence.length + candidates.length)
+      ? [sectionCaveat]
+      : []),
+  ].join("\n");
+};
+
+/**
  * Render one evidence bundle for concise agent or human consumption.
  *
  * @param result Version-two evidence bundle.
- * @returns Multi-line text preserving statuses, qualifications, provenance, and cost.
+ * @param options Target audience; defaults to the human CLI format.
+ * @returns Multi-line text preserving statuses, qualifications, and provenance,
+ * plus usage and cost for a human reader.
  */
-export const renderEvidenceBundle = (result: EvidenceBundle): string => {
+export const renderEvidenceBundle = (
+  result: EvidenceBundle,
+  options: RenderOptions = humanAudience,
+): string => {
+  if (options.audience === "agent") return renderAgentEvidenceBundle(result);
   const lines = [
     `Status: ${result.status}`,
     `RFC: ${result.rfc?.identifier ?? noRfcReason(result)}`,
@@ -100,9 +200,14 @@ export const renderEvidenceBundle = (result: EvidenceBundle): string => {
  * Render one citation-verification result for concise agent or human consumption.
  *
  * @param result Version-two citation verdict.
- * @returns Multi-line text preserving verdict, provenance, and cost.
+ * @param options Target audience; defaults to the human CLI format.
+ * @returns Multi-line text preserving verdict and provenance, plus usage and
+ * cost for a human reader.
  */
-export const renderCitationVerification = (result: CitationVerificationResult): string =>
+export const renderCitationVerification = (
+  result: CitationVerificationResult,
+  options: RenderOptions = humanAudience,
+): string =>
   [
     `Verdict: ${result.verdict}`,
     `RFC: ${result.rfc.identifier}`,
@@ -110,8 +215,12 @@ export const renderCitationVerification = (result: CitationVerificationResult): 
     `Offsets: ${result.provenance.startOffset ?? "unknown"}-${result.provenance.endOffset ?? "unknown"}`,
     `Section: ${result.provenance.section ?? "unknown"}`,
     `Source: ${result.provenance.sourceUrl}`,
-    `Input tokens: ${renderTokenCount(result.diagnostics.usage.inputTokens)}`,
-    `Estimated input cost (USD): ${renderEstimatedUsd(result.diagnostics.inputCost.estimatedUsd)}`,
+    ...(options.audience === "agent"
+      ? []
+      : [
+          `Input tokens: ${renderTokenCount(result.diagnostics.usage.inputTokens)}`,
+          `Estimated input cost (USD): ${renderEstimatedUsd(result.diagnostics.inputCost.estimatedUsd)}`,
+        ]),
   ].join("\n");
 
 /**

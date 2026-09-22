@@ -3,7 +3,12 @@ export {
   datatrackerTopicSearchTermMaximumCharacters,
   schemaVersion,
 } from "@wyattjoh/rfc-core/protocol";
-export { rfcAgentToolMetadata, rfcMcpInstructions } from "./agent-surface";
+export {
+  rfcAgentParameterDescriptions,
+  rfcAgentToolMetadata,
+  rfcMcpInstructions,
+  rfcPiInstructions,
+} from "./agent-surface";
 export {
   renderAuthStatus,
   renderCitationVerification,
