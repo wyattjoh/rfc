@@ -72,6 +72,11 @@ export const retrievalPolicy = {
   sectionPreviewCharacters: 120,
   chapterPreviewCharacters: 600,
   paragraphStateCharacters: 60_000,
+  // Paragraph-question pairs judged in one request: each is one Choice label
+  // and one verdict decision. TypeSafe rejects a System One request near 64k
+  // tokens with max_tokens_exceeded; 250 short paragraphs times two questions
+  // crossed it, so this bounds the request independently of paragraph length.
+  maxParagraphJudgments: 100,
   existsFloor: 0.35,
   maxCurrencyTraversalDepth: datatrackerCurrencyDepthLimit,
   maxCurrencyContexts: datatrackerCurrencyContextLimit,
@@ -1028,9 +1033,15 @@ const judgeParagraphs = Effect.fnUntraced(function* (
   DecisionModel.DecisionModel
 > {
   // Fill the shared state in section-rank order across questions until the
-  // character budget or the Choice option limit is reached.
+  // character budget, the Choice option limit, or the judgment budget is
+  // reached. A paragraph costs one judgment for every question whose chosen
+  // sections contain it, since each such question gets a label and a verdict.
+  const chosenSections = [...sections.values()].map(
+    (picked) => new Set(picked.map(({ section }) => section.index)),
+  );
   const included = new Map<number, RfcParagraph>();
   let characters = 0;
+  let judgments = 0;
   const depth = Math.max(0, ...[...sections.values()].map((picked) => picked.length));
   fill: for (let rank = 0; rank < depth; rank += 1) {
     for (const picked of sections.values()) {
@@ -1038,14 +1049,17 @@ const judgeParagraphs = Effect.fnUntraced(function* (
       if (section === undefined) continue;
       for (const paragraph of rfc.paragraphsBySection.get(section.index) ?? []) {
         if (included.has(paragraph.index)) continue;
+        const cost = chosenSections.filter((chosen) => chosen.has(section.index)).length;
         if (
           included.size >= retrievalPolicy.maxChoiceOptions ||
-          characters + paragraph.text.length > retrievalPolicy.paragraphStateCharacters
+          characters + paragraph.text.length > retrievalPolicy.paragraphStateCharacters ||
+          judgments + cost > retrievalPolicy.maxParagraphJudgments
         ) {
           break fill;
         }
         included.set(paragraph.index, paragraph);
         characters += paragraph.text.length;
+        judgments += cost;
       }
     }
   }

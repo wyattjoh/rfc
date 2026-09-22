@@ -443,6 +443,49 @@ describe("researchQuestions sections and paragraphs", () => {
     });
   });
 
+  // Regression: RFC 821 has hundreds of short paragraphs, so 250 fit the
+  // character budget, and one verdict per paragraph per question pushed the
+  // request past TypeSafe's token limit (400 max_tokens_exceeded).
+  test("bounds paragraph judgments across questions sharing a long section", async () => {
+    const short = rfcText(7777, [
+      {
+        heading: "1.  Commands",
+        paragraphs: [
+          "The command line is at most 512 octets.",
+          ...Array.from({ length: 299 }, (_, index) => `Short note ${index + 1}.`),
+        ],
+      },
+    ]);
+    const calls: Array<RecordedCall> = [];
+    const questions = ["How long is a command line?", "Which note?", "What else?", "Anything?"];
+    const result = await runPipeline(
+      questions,
+      [candidate(makeRfc(7777), "requested", "RFC7777")],
+      makeRoutingModel(
+        { paragraph: (_, text) => (text.includes("512 octets") ? 1 : 0.001) },
+        calls,
+      ),
+      { RFC7777: short },
+    );
+    const paragraphCall = calls.find(({ decisions }) =>
+      Object.keys(decisions).some((key) => key.startsWith("paragraph_")),
+    );
+    const names = Object.keys(paragraphCall?.decisions ?? {});
+    const labels = names
+      .filter((key) => key.startsWith("paragraph_"))
+      .reduce(
+        (sum, key) => sum + Object.keys(paragraphCall?.decisions[key]?.criteria ?? {}).length - 1,
+        0,
+      );
+    expect(names.filter((key) => key.startsWith("verdict_")).length).toBeLessThanOrEqual(
+      retrievalPolicy.maxParagraphJudgments,
+    );
+    expect(labels).toBeLessThanOrEqual(retrievalPolicy.maxParagraphJudgments);
+    expect(result.answers[0]?.hits[0]?.passages[0]?.quote).toBe(
+      "The command line is at most 512 octets.",
+    );
+  });
+
   test("drops an RFC whose paragraphs do not answer the question", async () => {
     const result = await runPipeline(
       ["Is it here?"],
