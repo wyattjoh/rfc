@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { listTaskIds, loadTask, parseClaims } from "../src/tasks";
+import { listCohortTaskIds, listTaskIds, loadTask, parseClaims } from "../src/tasks";
 
 describe("tasks", () => {
   test("parses numbered claims with their continuation lines and stops at notes", () => {
@@ -20,11 +20,18 @@ describe("tasks", () => {
     ]);
   });
 
-  test("every committed task loads and the suite has 47 claims", () => {
-    const ids = listTaskIds();
+  test("the baseline retains its 15 tasks and 47 claims", () => {
+    const ids = listCohortTaskIds("baseline");
     expect(ids[0]).toBe("q1");
     expect(ids.at(-1)).toBe("q15");
     const claims = ids.map((id) => loadTask(id).claims.length);
     expect(claims).toEqual([2, 4, 4, 3, 3, 3, 4, 2, 4, 2, 4, 3, 3, 3, 3]);
+  });
+
+  test("recorded token-exchange queries load as a separate cohort", () => {
+    const ids = listCohortTaskIds("token-exchange");
+    expect(ids).toEqual(["te1", "te2", "te3", "te4", "te5", "te6"]);
+    expect(ids.map((id) => loadTask(id).claims.length)).toEqual([1, 2, 3, 2, 2, 2]);
+    expect(listTaskIds()).toEqual([...listCohortTaskIds("baseline"), ...ids]);
   });
 });

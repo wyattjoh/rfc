@@ -14,7 +14,7 @@ Everything runs through `bun run eval <command>` from the repo root. Runs are sl
 
 1. Read `evals/config.ts` and check `git status`. The `web-rfc` arm loads `packages/` from the working tree, so uncommitted changes there are measured too, and only then does the run id get a `-dirty` suffix. Changes outside `packages/` (including `evals/` itself) don't mark a run dirty.
 2. Ask with AskUserQuestion, one call with up to four questions, the recommended option first:
-   - **Scope**: all tasks (recommended), a subset (list them), or a quick smoke (`--tasks q1,q5 --trials 1`).
+   - **Scope**: the 15-task baseline (recommended), the recorded token-exchange cohort (`--cohort token-exchange`), a subset (list them), or a quick smoke (`--tasks q1,q5 --trials 1`).
    - **Trials**: the configured default, or 3+ to separate time or cost differences from noise.
    - **Arms**: both (recommended), or `web-rfc` only when the web arm is unchanged and the baseline covers it.
    - **Model**: the configured model and thinking level, or an override.
@@ -29,7 +29,7 @@ Everything runs through `bun run eval <command>` from the repo root. Runs are sl
 - **Dashboard**: `bun run eval report --open` rebuilds `evals/results/index.html` over every complete run. Runs still running or grading are left out.
 - **Regrade** after editing a `key.md` or `src/judge.ts`: `bun run eval grade <run> --regrade`.
 - **Override a verdict**: after reading the transcript, add `"<arm>/<task>/t<N>/<claim>": { "verdict": "correct", "note": "<why>" }` to `evals/results/<run>/overrides.json`, then run `bun run eval report <run>`. If the key was missing an acceptable alternate, fix `key.md` instead (mark it _(Added during grading)_) and regrade.
-- **Add a task**: follow "Adding a task" in `evals/README.md`. Every fact must come from the canonical rfc-editor.org text saved in `evals/rfc-text/`, never from memory or the rfc tool under test. Ask the user to confirm the claims before committing them.
+- **Add a task**: follow "Adding a task" in `evals/README.md`. Baseline `qN` tasks run by default; recorded `teN` tasks run with `--cohort token-exchange`. Every fact must come from the canonical rfc-editor.org text saved in `evals/rfc-text/`, never from memory or the rfc tool under test. Ask the user to confirm the claims before committing them.
 - **Promote**: `bun run eval promote <run>` replaces `evals/baseline/summary.json`. Confirm first, and only promote a run whose incorrect verdicts have all been reviewed.
 
 ## Updating defaults

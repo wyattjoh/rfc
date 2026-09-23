@@ -19,7 +19,7 @@ import {
 } from "./results";
 import { newRunId, resumeSettings, runSuite } from "./run";
 import { type Summary, summarizeAll, summarizeRun } from "./summary";
-import { listTaskIds, loadTasks } from "./tasks";
+import { listCohortTaskIds, listTaskIds, loadTasks } from "./tasks";
 import { extractToolCalls, readSession } from "./transcript";
 
 const usage = `usage: bun run eval <command> [options]
@@ -37,7 +37,8 @@ with a run selector over every complete run plus the committed baseline.
 
 run options:
   --arms <ids>        comma-separated: ${arms.map((a) => a.id).join(", ")} (default: both)
-  --tasks <ids>       comma-separated task ids (default: all)
+  --tasks <ids>       comma-separated task ids (default: baseline cohort)
+  --cohort <name>     baseline or token-exchange (default: baseline; cannot combine with --tasks)
   --trials <n>        trials per task per arm (default: ${defaults.trials})
   --model <p/id>      model under test (default: ${defaults.model})
   --thinking <level>  thinking level (default: ${defaults.thinking})
@@ -59,6 +60,7 @@ const { values, positionals } = parseArgs({
   options: {
     arms: { type: "string" },
     tasks: { type: "string" },
+    cohort: { type: "string" },
     trials: { type: "string" },
     model: { type: "string" },
     thinking: { type: "string" },
@@ -123,7 +125,14 @@ const commands: Record<string, () => Promise<void>> = {
     const armIds = list(values.arms) ?? arms.map((a) => a.id);
     const unknownArm = armIds.find((id) => !isArmId(id));
     if (unknownArm !== undefined) throw new Error(`unknown arm ${unknownArm}`);
-    const taskIds = list(values.tasks);
+    if (values.cohort !== undefined && !["baseline", "token-exchange"].includes(values.cohort))
+      throw new Error(`unknown cohort ${values.cohort}`);
+    if (values.cohort !== undefined && values.tasks !== undefined)
+      throw new Error("--cohort and --tasks cannot be combined");
+    const taskIds =
+      values.cohort === undefined
+        ? list(values.tasks)
+        : listCohortTaskIds(values.cohort as "baseline" | "token-exchange");
     const known = new Set(listTaskIds());
     const unknownTask = taskIds?.find((id) => !known.has(id));
     if (unknownTask !== undefined) throw new Error(`unknown task ${unknownTask}`);
@@ -151,7 +160,7 @@ const commands: Record<string, () => Promise<void>> = {
       {
         runId,
         arms: (resumed?.settings.arms ?? armIds) as Array<ArmId>,
-        tasks: loadTasks(resumed?.settings.tasks ?? taskIds),
+        tasks: loadTasks(resumed?.settings.tasks ?? taskIds ?? listCohortTaskIds("baseline")),
         trials: resumed?.settings.trials ?? trials ?? defaults.trials,
         model: resumed?.settings.model ?? values.model ?? defaults.model,
         thinking: resumed?.settings.thinking ?? values.thinking ?? defaults.thinking,

@@ -64,13 +64,23 @@ export const parseClaims = (key: string): Array<string> => {
 const taskNumber = (id: string): number => Number(id.replace(/^\D+/, ""));
 
 /**
- * Every task id under `evals/tasks/`, in numeric order.
+ * Every task id under `evals/tasks/`, grouped by prefix and in numeric order.
  */
 export const listTaskIds = (): Array<string> =>
   readdirSync(tasksDir, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
-    .sort((left, right) => taskNumber(left) - taskNumber(right));
+    .sort(
+      (left, right) =>
+        left.replace(/\d+$/, "").localeCompare(right.replace(/\d+$/, "")) ||
+        taskNumber(left) - taskNumber(right),
+    );
+
+/**
+ * Baseline tasks stay the default; recorded token-exchange queries are opt-in.
+ */
+export const listCohortTaskIds = (cohort: "baseline" | "token-exchange"): Array<string> =>
+  listTaskIds().filter((id) => (cohort === "baseline" ? /^q\d+$/.test(id) : /^te\d+$/.test(id)));
 
 /**
  * Loads one task from its directory.
