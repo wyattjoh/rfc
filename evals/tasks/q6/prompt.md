@@ -1,0 +1,1 @@
+In the WebSocket opening handshake, what fixed GUID string is concatenated with the Sec-WebSocket-Key value to compute Sec-WebSocket-Accept, which hash function is applied to that concatenation, and what value must the client send in the Sec-WebSocket-Version header field? Give the RFC number and section for each answer.

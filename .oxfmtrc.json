@@ -1,4 +1,13 @@
 {
   "$schema": "./node_modules/oxfmt/configuration_schema.json",
-  "ignorePatterns": [".pi/**", ".scratch/**", "**/node_modules/**", "**/dist/**", "**/CHANGELOG.md"]
+  "ignorePatterns": [
+    ".pi/**",
+    ".scratch/**",
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/CHANGELOG.md",
+    "evals/results/**",
+    "evals/rfc-text/**",
+    "evals/test/fixtures/**"
+  ]
 }

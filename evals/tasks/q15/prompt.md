@@ -1,0 +1,1 @@
+According to the HTTP semantics specification, how should an origin server respond to a request method it does not recognize, versus a method it recognizes and implements but that is not allowed for the target resource? What header field must the second kind of response include? Give the RFC number and sections.

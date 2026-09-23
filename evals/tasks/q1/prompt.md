@@ -1,0 +1,1 @@
+When a client exchanges one security token for another using the standard OAuth 2.0 token exchange extension, what exact value must the grant_type request parameter be set to, and what does the issued_token_type response parameter indicate? Give the RFC number and the section for each answer.

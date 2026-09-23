@@ -1,0 +1,1 @@
+What ALPN protocol identifiers are used for HTTP/2 over TLS and for HTTP/3, and which RFC and section defines each? Which earlier RFC did the current HTTP/2 specification obsolete? Give RFC numbers and sections.

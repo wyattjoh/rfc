@@ -1,0 +1,5 @@
+{
+  "title": "OAuth token exchange",
+  "label": "Token exch.",
+  "factors": ["noNumber"]
+}

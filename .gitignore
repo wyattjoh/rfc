@@ -5,3 +5,4 @@ dist/
 .pi/
 .claude/worktrees/
 .claude/settings.local.json
+evals/results/

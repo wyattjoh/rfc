@@ -11,7 +11,8 @@
   "workspaces": [
     "packages/rfc-core",
     "packages/rfc",
-    "packages/rfc-pi"
+    "packages/rfc-pi",
+    "evals"
   ],
   "scripts": {
     "build": "bun run --cwd packages/rfc-core build && bun run --cwd packages/rfc build",
@@ -19,9 +20,10 @@
     "format:check": "oxfmt --check",
     "lint": "oxlint --no-error-on-unmatched-pattern",
     "benchmark:topic": "bun run --cwd packages/rfc-core benchmark:topic",
-    "test": "bun test packages",
-    "typecheck": "bun run --cwd packages/rfc-core typecheck && bun run --cwd packages/rfc typecheck && bun run --cwd packages/rfc-pi typecheck",
-    "hooks:install": "lefthook install"
+    "test": "bun test packages evals",
+    "typecheck": "bun run --cwd packages/rfc-core typecheck && bun run --cwd packages/rfc typecheck && bun run --cwd packages/rfc-pi typecheck && bun run --cwd evals typecheck",
+    "hooks:install": "lefthook install",
+    "eval": "bun evals/src/cli.ts"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.87.0",

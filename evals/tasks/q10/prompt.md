@@ -1,0 +1,1 @@
+For JSON Web Tokens, what does the exp claim mean and what kind of value must it hold? Separately, what is a JWS that uses the alg value none called, and what must implementations do before accepting one? Give RFC numbers and sections.

@@ -1,0 +1,1 @@
+What minimum UDP payload size must a QUIC client expand datagrams carrying Initial packets to, and what 32-bit version number identifies the version of QUIC defined in the core QUIC transport specification? Give the RFC number and section for each answer.

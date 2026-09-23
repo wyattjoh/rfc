@@ -1,0 +1,5 @@
+{
+  "title": "IPv6 Hop-by-Hop change",
+  "label": "IPv6 HBH",
+  "factors": ["rfcs2", "currency", "compare"]
+}

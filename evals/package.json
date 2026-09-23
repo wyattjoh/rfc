@@ -1,0 +1,19 @@
+{
+  "name": "@wyattjoh/rfc-evals",
+  "private": true,
+  "description": "Agent evals comparing Pi with web access alone against web access plus the rfc extension.",
+  "type": "module",
+  "scripts": {
+    "eval": "bun src/cli.ts",
+    "test": "bun test test",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.2",
+    "pi-web-access": "0.30.0",
+    "typescript": "7.0.2"
+  },
+  "engines": {
+    "bun": ">=1.4.2"
+  }
+}

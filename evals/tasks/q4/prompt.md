@@ -1,0 +1,1 @@
+What does the HTTP specification require a recipient to do when a message contains both a Content-Length header field and a Transfer-Encoding header field? Give the RFC number and section, state which earlier RFC that document obsoletes for this rule, and say whether the requirement changed between them.

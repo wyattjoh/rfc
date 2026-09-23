@@ -1,0 +1,1 @@
+For DNS over TLS and DNS over HTTPS, what default port or URI template does each use, and which RFC defines each one? Also identify the RFC that defines the EDNS(0) padding option used to mitigate traffic analysis for both, and the RFC that gives recommendations for choosing padding lengths. Give RFC numbers and sections.

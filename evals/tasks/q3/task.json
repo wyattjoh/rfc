@@ -1,0 +1,5 @@
+{
+  "title": "Encrypted DNS and padding",
+  "label": "Encr. DNS",
+  "factors": ["rfcs3", "noNumber"]
+}

@@ -1,0 +1,1 @@
+What did the original IPv6 specification, RFC 2460, require of nodes along a packet's delivery path regarding the Hop-by-Hop Options header? Which RFC obsoletes RFC 2460, did it change that requirement, and did the minimum link MTU change between the two? Give RFC numbers and sections.

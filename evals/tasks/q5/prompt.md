@@ -1,0 +1,1 @@
+Which RFC defines the HTTP 103 Early Hints status code, in which section, what is that RFC's category, and what MUST a client not do with the header fields it carries? Give the RFC number and section.

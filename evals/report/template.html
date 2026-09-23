@@ -1,0 +1,1402 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RFC research evals · web vs web + rfc</title>
+    <style>
+      /* Catppuccin Mocha surfaces and text. The two series hues are Catppuccin blue
+     and red stepped into the dark lightness band; validated with
+     validate_palette.js --mode dark --surface #1e1e2e (all checks pass). */
+      :root {
+        color-scheme: dark;
+        --crust: #11111b;
+        --mantle: #181825;
+        --surface-1: #1e1e2e;
+        --grid: #313244;
+        --axis: #45475a;
+        --text-primary: #cdd6f4;
+        --text-secondary: #a6adc8;
+        --text-muted: #7f849c;
+        --good: #a6e3a1;
+        --warn: #f9e2af;
+        --series-1: #5480c7;
+        --series-2: #c6375e;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--crust);
+        color: var(--text-primary);
+        font:
+          14px/1.45 ui-sans-serif,
+          system-ui,
+          -apple-system,
+          "Segoe UI",
+          sans-serif;
+      }
+      .bar {
+        position: sticky;
+        top: 0;
+        z-index: 5;
+        background: color-mix(in oklab, var(--crust) 88%, transparent);
+        backdrop-filter: blur(8px);
+        border-bottom: 1px solid var(--grid);
+      }
+      .bar-inner {
+        max-width: 1240px;
+        margin: 0 auto;
+        padding: 12px 24px;
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        flex-wrap: wrap;
+      }
+      .bar-title {
+        font-weight: 600;
+        margin-right: auto;
+      }
+      .bar-label {
+        color: var(--text-muted);
+        font-size: 12px;
+      }
+      .legend {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      /* Legend entry: filled with its series color, code and name split by a lighter rule of the same hue. */
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        height: 28px;
+        padding: 0 12px;
+        border-radius: 999px;
+        background: var(--badge-color);
+        color: #fff;
+        font-size: 13px;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+      .chip .code {
+        font-weight: 800;
+        letter-spacing: 0.02em;
+      }
+      /* Run selector: a native select dressed as the prompt picker's button. */
+      .dd-button.run-select {
+        appearance: none;
+        padding-right: 30px;
+        background-image:
+          linear-gradient(45deg, transparent 50%, var(--text-muted) 50%),
+          linear-gradient(135deg, var(--text-muted) 50%, transparent 50%);
+        background-position:
+          calc(100% - 16px) 16px,
+          calc(100% - 11px) 16px;
+        background-size: 5px 5px;
+        background-repeat: no-repeat;
+      }
+      .run-select[hidden] {
+        display: none;
+      }
+      /* Prompt picker: a neutral listbox, so it never reads as an arm. */
+      .dd {
+        position: relative;
+      }
+      .dd-button {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        height: 38px;
+        padding: 0 12px;
+        border-radius: 10px;
+        background: var(--surface-1);
+        border: 1px solid var(--axis);
+        color: var(--text-primary);
+        font: inherit;
+        font-size: 13px;
+        cursor: pointer;
+        min-width: 190px;
+      }
+      .dd-button:focus-visible {
+        outline: 2px solid var(--text-primary);
+        outline-offset: 2px;
+      }
+      .dd-button .dd-label {
+        margin-right: auto;
+      }
+      .dd-button .chev {
+        color: var(--text-muted);
+        font-size: 10px;
+      }
+      .dd-menu {
+        position: absolute;
+        top: calc(100% + 6px);
+        left: 0;
+        z-index: 20;
+        margin: 0;
+        padding: 4px;
+        min-width: max(100%, 480px);
+        max-height: min(88vh, 860px);
+        overflow: auto;
+        list-style: none;
+        background: var(--mantle);
+        border: 1px solid var(--axis);
+        border-radius: 10px;
+        box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+      }
+      .dd-menu:focus {
+        outline: none;
+      }
+      .dd-menu[hidden] {
+        display: none;
+      }
+      .dd-option {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 11px 14px;
+        border-radius: 8px;
+        font-size: 14px;
+        color: var(--text-secondary);
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .dd-option .qid {
+        color: var(--text-muted);
+        font-variant-numeric: tabular-nums;
+        min-width: 26px;
+      }
+      .dd-option .name {
+        margin-right: auto;
+        padding-right: 16px;
+      }
+      .dd-option.active {
+        background: var(--surface-1);
+        color: var(--text-primary);
+      }
+      .dd-option[aria-selected="true"] {
+        color: var(--text-primary);
+      }
+      .dd-option[aria-selected="true"] .qid {
+        color: var(--text-secondary);
+      }
+      .dd-sep {
+        height: 1px;
+        margin: 4px 6px;
+        background: var(--grid);
+      }
+      /* Checkbox hit target: toggles one prompt; the rest of the row selects only that prompt. */
+      .cb {
+        flex: none;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 16px;
+        height: 16px;
+        margin: -4px;
+        padding: 4px;
+        box-sizing: content-box;
+        border-radius: 4px;
+      }
+      .cb::before {
+        content: "";
+        width: 16px;
+        height: 16px;
+        border-radius: 4px;
+        box-sizing: border-box;
+        border: 1.5px solid var(--text-muted);
+        background: transparent;
+      }
+      .cb:hover::before {
+        border-color: var(--text-secondary);
+      }
+      .dd-option[aria-selected="true"] .cb::before,
+      .cb.mixed::before {
+        border-color: var(--text-primary);
+        background: var(--text-primary);
+      }
+      .dd-option[aria-selected="true"] .cb::after,
+      .cb.mixed::after {
+        content: "";
+        position: absolute;
+        width: 8px;
+        height: 4px;
+        margin-top: -2px;
+        border: solid var(--mantle);
+        border-width: 0 0 2px 2px;
+        transform: rotate(-45deg);
+      }
+      .cb.mixed::after {
+        width: 8px;
+        height: 0;
+        margin-top: 0;
+        border-width: 0 0 2px 0;
+        transform: none;
+      }
+      .cb {
+        position: relative;
+      }
+      .cb.locked {
+        cursor: not-allowed;
+        opacity: 0.55;
+      }
+      .dd-option .only {
+        color: var(--text-muted);
+        font-size: 11px;
+        visibility: hidden;
+      }
+      .dd-option.active .only {
+        visibility: visible;
+      }
+      /* Difficulty meter: five discrete segments; each filled segment keeps its own step of the green-to-red ramp. */
+      .meter {
+        display: inline-flex;
+        gap: 2px;
+        flex: none;
+      }
+      .meter i {
+        display: block;
+        width: 9px;
+        height: 13px;
+        border-radius: 2px;
+        background: var(--axis);
+      }
+      .meter i.on:nth-child(1) {
+        background: #a6e3a1;
+      }
+      .meter i.on:nth-child(2) {
+        background: color-mix(in oklab, #a6e3a1 50%, #f9e2af);
+      }
+      .meter i.on:nth-child(3) {
+        background: #f9e2af;
+      }
+      .meter i.on:nth-child(4) {
+        background: #fab387;
+      }
+      .meter i.on:nth-child(5) {
+        background: #f38ba8;
+      }
+      header .prompt-text {
+        margin: -14px 0 24px;
+        color: var(--text-muted);
+        font-size: 13px;
+        max-width: 110ch;
+      }
+      .chip .sep {
+        width: 1.5px;
+        height: 14px;
+        margin: 0 9px;
+        background: #fff;
+        border-radius: 1px;
+      }
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 26px;
+        height: 20px;
+        padding: 0 6px;
+        border-radius: 6px;
+        background: var(--badge-color);
+        color: var(--crust);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+      }
+      .viz-root {
+        max-width: 1240px;
+        margin: 0 auto;
+        padding: 28px 24px 64px;
+      }
+      header p {
+        margin: 0 0 24px;
+        color: var(--text-secondary);
+      }
+      .card {
+        background: var(--surface-1);
+        border-radius: 12px;
+        padding: 20px 22px;
+      }
+      .hero {
+        display: grid;
+        grid-template-columns: 1fr 2fr;
+        gap: 16px;
+        margin-bottom: 16px;
+      }
+      .hero-figure .label {
+        color: var(--text-secondary);
+        font-size: 13px;
+      }
+      .hero-figure .value {
+        font-size: 60px;
+        font-weight: 600;
+        line-height: 1.05;
+        margin: 12px 0 8px;
+      }
+      .hero-figure .sub {
+        color: var(--text-muted);
+        font-size: 13px;
+        max-width: 34ch;
+      }
+      .tiles {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 16px;
+      }
+      .tile .label {
+        color: var(--text-secondary);
+        font-size: 13px;
+        margin-bottom: 4px;
+      }
+      .tile .rows {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px 20px;
+      }
+      .tile .row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin: 6px -10px 0;
+        padding: 4px 10px;
+        border-radius: 8px;
+      }
+      .tile .row .v {
+        font-weight: 600;
+        font-size: 20px;
+      }
+      .tile .row .win {
+        color: var(--good);
+        font-weight: 700;
+        font-size: 16px;
+      }
+      /* A winning row gets the same faint wash of its hue as the chart rows. */
+      .tile .row.won {
+        background: color-mix(in oklab, var(--row-color) 12%, transparent);
+      }
+      h2 {
+        font-size: 15px;
+        font-weight: 600;
+        margin: 0 0 2px;
+      }
+      .card .sub {
+        color: var(--text-muted);
+        font-size: 12.5px;
+        margin: 0 0 14px;
+      }
+      /* Five measures: three across, then two wider cards filling the row. */
+      .multiples {
+        display: grid;
+        grid-template-columns: repeat(6, 1fr);
+        gap: 16px;
+        margin-bottom: 16px;
+      }
+      .multiples > :nth-child(-n + 3) {
+        grid-column: span 2;
+      }
+      .multiples > :nth-child(n + 4) {
+        grid-column: span 3;
+      }
+      .grid-2 {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+        margin-bottom: 16px;
+      }
+      .stack {
+        display: grid;
+        gap: 16px;
+        margin-bottom: 16px;
+      }
+      svg {
+        display: block;
+        width: 100%;
+        height: auto;
+        overflow: visible;
+      }
+      svg text {
+        fill: var(--text-secondary);
+        font-size: 11px;
+        font-family: inherit;
+      }
+      svg .val {
+        fill: var(--text-primary);
+        font-weight: 600;
+      }
+      svg .muted {
+        fill: var(--text-muted);
+      }
+      svg .win {
+        fill: var(--good);
+        font-weight: 700;
+        font-size: 13px;
+      }
+      svg .arm-code {
+        font-weight: 800;
+        font-size: 12px;
+      }
+      .arm-code {
+        display: inline-block;
+        min-width: 24px;
+        font-weight: 800;
+        font-size: 13px;
+        letter-spacing: 0.02em;
+      }
+      .hit {
+        fill: transparent;
+      }
+      .tip {
+        position: fixed;
+        pointer-events: none;
+        z-index: 10;
+        opacity: 0;
+        transition: opacity 80ms;
+        background: var(--mantle);
+        border: 1px solid var(--axis);
+        border-radius: 8px;
+        padding: 8px 10px;
+        font-size: 12px;
+        color: var(--text-primary);
+        min-width: 150px;
+      }
+      .tip .t {
+        color: var(--text-secondary);
+        margin-bottom: 6px;
+      }
+      .tip .tip-muted {
+        color: var(--text-muted);
+      }
+      .tip .r {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 4px;
+        font-variant-numeric: tabular-nums;
+      }
+      .tip .arm-code {
+        min-width: 20px;
+        font-size: 12px;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-variant-numeric: tabular-nums;
+      }
+      th,
+      td {
+        padding: 8px;
+        border-bottom: 1px solid var(--grid);
+        text-align: right;
+      }
+      th {
+        color: var(--text-secondary);
+        font-weight: 500;
+        font-size: 12px;
+      }
+      th:first-child,
+      td:first-child {
+        text-align: left;
+      }
+      .acc td.c,
+      .acc th.c {
+        text-align: center;
+      }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 1px 8px;
+        border-radius: 999px;
+        font-size: 12px;
+      }
+      .pill.full {
+        background: rgba(166, 227, 161, 0.12);
+        color: var(--good);
+      }
+      .pill.miss {
+        background: rgba(249, 226, 175, 0.12);
+        color: var(--warn);
+      }
+      details {
+        margin-top: 16px;
+      }
+      summary {
+        cursor: pointer;
+        color: var(--text-secondary);
+      }
+      footer {
+        color: var(--text-muted);
+        font-size: 12px;
+        margin-top: 24px;
+      }
+      @media (max-width: 1000px) {
+        .hero,
+        .grid-2 {
+          grid-template-columns: 1fr;
+        }
+        .multiples {
+          grid-template-columns: 1fr;
+        }
+        .multiples > * {
+          grid-column: auto !important;
+        }
+      }
+      @media (max-width: 640px) {
+        .tiles,
+        .tile .rows {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <nav class="bar" aria-label="Prompt selection">
+      <div class="bar-inner">
+        <span class="bar-title">RFC research evals</span>
+        <label class="bar-label" for="run-select" id="run-label" hidden>Run</label>
+        <select class="dd-button run-select" id="run-select" hidden></select>
+        <span class="bar-label" id="prompt-label">Prompts</span>
+        <div class="dd" id="prompt-picker"></div>
+        <div class="legend" id="legend" aria-label="Arms"></div>
+      </div>
+    </nav>
+    <div class="viz-root">
+      <header>
+        <p id="lede"></p>
+        <p class="prompt-text" id="prompt-text" hidden></p>
+      </header>
+
+      <section class="hero">
+        <div class="card hero-figure">
+          <div class="label" id="hero-label"></div>
+          <div class="value" id="hero"></div>
+          <div class="sub" id="hero-sub"></div>
+        </div>
+        <div class="tiles" id="tiles"></div>
+      </section>
+
+      <section class="multiples" id="totals"></section>
+
+      <!-- Per-prompt charts run full width: 15 prompt groups need the room. -->
+      <section class="stack">
+        <div class="card">
+          <h2>Wall time per prompt</h2>
+          <p class="sub">
+            Seconds from prompt to final answer; bars are the mean, dots are individual trials
+          </p>
+          <svg id="lat"></svg>
+        </div>
+        <div class="card">
+          <h2>Tool output per prompt</h2>
+          <p class="sub">KB of tool-result text placed in the agent's context</p>
+          <svg id="out"></svg>
+        </div>
+        <div class="card">
+          <h2>Tool calls per prompt</h2>
+          <p class="sub">research, web search, and fetch calls combined</p>
+          <svg id="calls"></svg>
+        </div>
+        <div class="card acc">
+          <h2>Claims correct per prompt</h2>
+          <p class="sub">
+            Graded per claim against each task's key.md; one pill per trial, hover for claim
+            verdicts
+          </p>
+          <table id="acc"></table>
+        </div>
+      </section>
+
+      <details class="card">
+        <summary>Table view: every trial</summary>
+        <table id="raw"></table>
+      </details>
+
+      <footer id="footer"></footer>
+    </div>
+    <div class="tip" id="tip" role="tooltip"></div>
+
+    <script>
+      // Inlined by evals/src/report.ts: { runs: [summary, ...] }, newest first.
+      // A bare summary (reports written before multi-run support) is one run.
+      const INLINED = /*DATA*/ null;
+      const ALL_RUNS = INLINED.runs ?? [INLINED];
+      const params = new URLSearchParams(location.search);
+      // ?run=<id> selects a run; the first (newest) is the default.
+      const DATA = ALL_RUNS.find((r) => r.run.id === params.get("run")) ?? ALL_RUNS[0];
+      const runConfig = (r) =>
+        `${r.run.harness ?? "pi"} · ${r.run.model.split("/").at(-1)} · ${r.run.thinking}`;
+      const runDate = (r) =>
+        new Date(r.run.startedAt).toLocaleString(undefined, {
+          dateStyle: "medium",
+          timeStyle: "short",
+        });
+
+      const TASKS = DATA.tasks;
+      const QALL = TASKS.map((t) => t.id);
+      const TASK = Object.fromEntries(TASKS.map((t) => [t.id, t]));
+      const CLAIMS = Object.fromEntries(TASKS.map((t) => [t.id, t.claims]));
+      const QLABEL = Object.fromEntries(TASKS.map((t) => [t.id, t.label]));
+      const PTITLE = Object.fromEntries(TASKS.map((t) => [t.id, t.title]));
+      // Color follows the arm's position in the fixed arm list, never its rank.
+      const ARMS = DATA.arms.map((a, i) => ({
+        id: a.code,
+        key: a.id,
+        name: a.name,
+        color: `var(--series-${i + 1})`,
+        runs: [...new Set(DATA.trials.filter((t) => t.arm === a.id).map((t) => t.trial))]
+          .sort((x, y) => x - y)
+          .map((n) => `${a.code}${n}`),
+      }));
+      // RUNS["W1.q3"] = one trial; cost includes the TypeSafe charge, kept separately as ts.
+      const RUNS = {};
+      for (const t of DATA.trials) {
+        const arm = ARMS.find((a) => a.key === t.arm);
+        RUNS[`${arm.id}${t.trial}.${t.task}`] = { ...t, cost: t.cost + t.ts };
+      }
+      // Only arms with a trial for every task are shown.
+      const shown = ARMS.filter(
+        (a) => a.runs.length > 0 && QALL.every((q) => a.runs.every((r) => RUNS[`${r}.${q}`])),
+      );
+
+      // Difficulty comes from each task's retrieval-difficulty design factors, not from run results.
+      const FACTOR = {
+        rfcs2: { label: "2 RFCs", weight: 1 },
+        rfcs3: { label: "3+ RFCs", weight: 2 },
+        currency: { label: "currency or successor", weight: 1 },
+        compare: { label: "requested vs current", weight: 1 },
+        noNumber: { label: "no RFC number given", weight: 1 },
+        large: { label: "RFC over 250 sections", weight: 1 },
+        appendix: { label: "answer in an appendix", weight: 1 },
+        alias: { label: "title differs from common name", weight: 1 },
+      };
+      const DIFFICULTY_LEVELS = 5;
+      const difficulty = (q) =>
+        Math.max(
+          1,
+          Math.min(
+            DIFFICULTY_LEVELS,
+            TASK[q].factors.reduce((s, f) => s + (FACTOR[f]?.weight ?? 1), 0),
+          ),
+        );
+      const factorText = (q) => TASK[q].factors.map((f) => FACTOR[f]?.label ?? f).join(", ");
+      const meter = (q) => {
+        const level = difficulty(q);
+        const segments = Array.from({ length: DIFFICULTY_LEVELS }, (_, i) =>
+          i < level ? '<i class="on"></i>' : "<i></i>",
+        ).join("");
+        return `<span class="meter" role="img" aria-label="Difficulty ${level} of ${DIFFICULTY_LEVELS}">${segments}</span>`;
+      };
+      const requestedPrompts = (params.get("prompts") ?? "")
+        .split(",")
+        .filter((q) => QALL.includes(q));
+      const chosen = new Set(requestedPrompts.length > 0 ? requestedPrompts : QALL);
+      let Q = QALL.filter((q) => chosen.has(q));
+      const claimsTotal = () => Q.reduce((s, q) => s + CLAIMS[q], 0);
+      const promptsPhrase = () =>
+        Q.length === 1
+          ? "this prompt"
+          : Q.length === QALL.length
+            ? `all ${Q.length} prompts`
+            : `${Q.length} selected prompts`;
+      const METRICS = {
+        correct: { label: "Claims correct", fmt: (v) => v.toFixed(v % 1 ? 1 : 0), better: "high" },
+        lat: { label: "Wall time", fmt: (v) => v.toFixed(0) + " s", better: "low" },
+        calls: { label: "Tool calls", fmt: (v) => v.toFixed(v % 1 ? 1 : 0), better: "low" },
+        cost: { label: "Cost", fmt: (v) => "$" + v.toFixed(3), better: "low" },
+        out: { label: "Tool output", fmt: (v) => v.toFixed(v < 20 ? 1 : 0) + " KB", better: "low" },
+      };
+      const active = () => shown;
+
+      const runsOf = (arm) => ARMS.find((a) => a.id === arm).runs;
+      const mean = (values) => values.reduce((a, b) => a + b, 0) / values.length;
+      const value = (arm, q, key) => mean(runsOf(arm).map((r) => RUNS[`${r}.${q}`][key]));
+      const total = (run, key) => Q.reduce((s, q) => s + RUNS[`${run}.${q}`][key], 0);
+      const armTotal = (arm, key) => {
+        const runs = runsOf(arm).map((r) => total(r, key));
+        return { mean: mean(runs), runs };
+      };
+      // Filled chips belong to the legend only; everywhere else an arm is its
+      // letter code in a lightened step of its series hue so small text clears 4.5:1.
+      const codeColor = (a) => `color-mix(in oklab, ${a.color} 85%, white)`;
+      const badge = (a) => `<span class="arm-code" style="color:${codeColor(a)}">${a.id}</span>`;
+      const escapeHtml = (s) =>
+        s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+      const NS = "http://www.w3.org/2000/svg";
+      const el = (tag, attrs = {}, parent) => {
+        const node = document.createElementNS(NS, tag);
+        for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+        if (parent) parent.appendChild(node);
+        return node;
+      };
+      const svgBadge = (svg, a, x, cy) => {
+        el(
+          "text",
+          { x, y: cy + 4, class: "arm-code", style: `fill:${codeColor(a)}` },
+          svg,
+        ).textContent = a.id;
+      };
+
+      const tip = document.getElementById("tip");
+      const showTip = (evt, title, rows) => {
+        tip.innerHTML =
+          `<div class="t">${title}</div>` +
+          rows.map(([a, t]) => `<div class="r">${badge(a)}${t}</div>`).join("");
+        tip.style.opacity = 1;
+        tip.style.left = Math.min(evt.clientX + 14, window.innerWidth - tip.offsetWidth - 8) + "px";
+        tip.style.top = evt.clientY + 14 + "px";
+      };
+      const hideTip = () => (tip.style.opacity = 0);
+      const bindTip = (node, title, rows) => {
+        node.setAttribute("tabindex", "0");
+        node.addEventListener("mousemove", (e) => showTip(e, title, rows));
+        node.addEventListener("mouseleave", hideTip);
+        node.addEventListener("focus", () => {
+          const r = node.getBoundingClientRect();
+          showTip({ clientX: r.right, clientY: r.top }, title, rows);
+        });
+        node.addEventListener("blur", hideTip);
+      };
+      // Bar with 4px rounded data-end, square at the baseline.
+      const barPath = (x, y, w, h, horizontal) => {
+        const r = Math.min(4, horizontal ? w : h, horizontal ? h / 2 : w / 2);
+        if (horizontal)
+          return `M${x},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + h - r}Q${x + w},${y + h} ${x + w - r},${y + h}H${x}Z`;
+        return `M${x},${y + h}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + h}Z`;
+      };
+      // Round up so four gridline steps land on clean values.
+      const niceMax = (v) => {
+        if (v <= 0) return 4;
+        const raw = v / 4,
+          mag = 10 ** Math.floor(Math.log10(raw));
+        return (
+          [1, 1.25, 1.5, 2, 2.5, 3, 4, 5, 7.5, 10].map((m) => m * mag).find((s) => s >= raw) * 4
+        );
+      };
+      // Faint white line spanning the lowest to highest trial, drawn under the dots.
+      const runRange = (svg, x1, y1, x2, y2) =>
+        el(
+          "line",
+          {
+            x1,
+            y1,
+            x2,
+            y2,
+            stroke: "#fff",
+            "stroke-opacity": 0.35,
+            "stroke-width": 1.5,
+            "stroke-linecap": "round",
+          },
+          svg,
+        );
+      const runDot = (svg, cx, cy) =>
+        el(
+          "circle",
+          {
+            cx,
+            cy,
+            r: 4,
+            fill: "var(--text-primary)",
+            stroke: "var(--surface-1)",
+            "stroke-width": 2,
+          },
+          svg,
+        );
+
+      // The prompt selection round-trips through ?prompts= so a view can be shared.
+      const setPrompts = (prompts) => {
+        chosen.clear();
+        for (const q of prompts) chosen.add(q);
+        Q = QALL.filter((q) => chosen.has(q));
+        const url = new URL(location.href);
+        if (Q.length === QALL.length) url.searchParams.delete("prompts");
+        else url.searchParams.set("prompts", Q.join(","));
+        history.replaceState(null, "", url);
+        render();
+      };
+
+      // Rows are "all" plus each prompt. The picker is built once and synced on every
+      // render, so it stays open while prompts are toggled.
+      const ROWS = ["all", ...QALL];
+      let syncPromptPicker = () => {};
+
+      // A multi-select listbox rather than a native select, so rows can carry a checkbox and a difficulty meter.
+      const buildPromptPicker = () => {
+        const host = document.getElementById("prompt-picker");
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "dd-button";
+        button.setAttribute("aria-haspopup", "listbox");
+        button.setAttribute("aria-expanded", "false");
+        button.setAttribute("aria-labelledby", "prompt-label prompt-current");
+
+        const menu = document.createElement("ul");
+        menu.className = "dd-menu";
+        menu.id = "prompt-menu";
+        menu.setAttribute("role", "listbox");
+        menu.setAttribute("aria-multiselectable", "true");
+        menu.setAttribute("aria-labelledby", "prompt-label");
+        menu.tabIndex = -1;
+        menu.hidden = true;
+        button.setAttribute("aria-controls", menu.id);
+
+        let activeIndex = 0;
+        const rows = [];
+        const setActive = (index) => {
+          activeIndex = (index + ROWS.length) % ROWS.length;
+          rows.forEach(({ li }, i) => li.classList.toggle("active", i === activeIndex));
+          menu.setAttribute("aria-activedescendant", rows[activeIndex].li.id);
+          rows[activeIndex].li.scrollIntoView({ block: "nearest" });
+        };
+        const outside = (event) => {
+          if (!host.contains(event.target)) close(false);
+        };
+        const open = () => {
+          menu.hidden = false;
+          button.setAttribute("aria-expanded", "true");
+          setActive(Q.length === QALL.length ? 0 : ROWS.indexOf(Q[0]));
+          menu.focus();
+          document.addEventListener("pointerdown", outside);
+        };
+        const close = (refocus) => {
+          menu.hidden = true;
+          button.setAttribute("aria-expanded", "false");
+          document.removeEventListener("pointerdown", outside);
+          if (refocus) button.focus();
+        };
+        // Checkbox: add or remove one prompt, keeping at least one selected.
+        const toggle = (id) => {
+          if (id === "all") return Q.length === QALL.length ? undefined : setPrompts(QALL);
+          if (chosen.has(id) && chosen.size === 1) return;
+          setPrompts(chosen.has(id) ? Q.filter((q) => q !== id) : [...Q, id]);
+        };
+        // Row: select only this prompt, or every prompt for the "all" row.
+        const only = (id) => {
+          close(true);
+          setPrompts(id === "all" ? QALL : [id]);
+        };
+
+        for (const id of ROWS) {
+          const li = document.createElement("li");
+          li.className = "dd-option";
+          li.id = `prompt-option-${id}`;
+          li.setAttribute("role", "option");
+          const box = document.createElement("span");
+          box.className = "cb";
+          box.setAttribute("aria-hidden", "true");
+          box.addEventListener("click", (event) => {
+            event.stopPropagation();
+            toggle(id);
+          });
+          li.append(box);
+          if (id === "all") {
+            li.insertAdjacentHTML(
+              "beforeend",
+              `<span class="name">All ${QALL.length} prompts</span><span class="only">all</span>`,
+            );
+          } else {
+            li.title = `Difficulty ${difficulty(id)} of ${DIFFICULTY_LEVELS}: ${factorText(id)}`;
+            li.insertAdjacentHTML(
+              "beforeend",
+              `<span class="qid">${id.toUpperCase()}</span><span class="name">${escapeHtml(PTITLE[id])}</span><span class="only">only</span>${meter(id)}`,
+            );
+          }
+          li.addEventListener("click", () => only(id));
+          li.addEventListener("mousemove", () => {
+            if (activeIndex !== ROWS.indexOf(id) || !li.classList.contains("active"))
+              setActive(ROWS.indexOf(id));
+          });
+          menu.appendChild(li);
+          rows.push({ id, li, box });
+          if (id === "all") {
+            const sep = document.createElement("li");
+            sep.className = "dd-sep";
+            sep.setAttribute("role", "presentation");
+            menu.appendChild(sep);
+          }
+        }
+
+        button.addEventListener("click", () => (menu.hidden ? open() : close(true)));
+        button.addEventListener("keydown", (event) => {
+          if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+          event.preventDefault();
+          open();
+        });
+        menu.addEventListener("keydown", (event) => {
+          if (event.key === "Tab") return close(false);
+          const keys = {
+            ArrowDown: () => setActive(activeIndex + 1),
+            ArrowUp: () => setActive(activeIndex - 1),
+            Home: () => setActive(0),
+            End: () => setActive(ROWS.length - 1),
+            " ": () => toggle(ROWS[activeIndex]),
+            Enter: () => only(ROWS[activeIndex]),
+            Escape: () => close(true),
+          };
+          if (!keys[event.key]) return;
+          event.preventDefault();
+          keys[event.key]();
+        });
+
+        syncPromptPicker = () => {
+          const all = Q.length === QALL.length;
+          const label = all
+            ? `All ${QALL.length} prompts`
+            : Q.length === 1
+              ? `${Q[0].toUpperCase()} · ${escapeHtml(PTITLE[Q[0]])}`
+              : `${Q.length} prompts: ${Q.map((q) => q.toUpperCase()).join(", ")}`;
+          button.innerHTML = `<span class="dd-label" id="prompt-current">${label}</span>${Q.length === 1 ? meter(Q[0]) : ""}<span class="chev" aria-hidden="true">▼</span>`;
+          for (const { id, li, box } of rows) {
+            const on = id === "all" ? all : chosen.has(id);
+            li.setAttribute("aria-selected", String(on));
+            box.classList.toggle("mixed", id === "all" && !all);
+            const locked = id === "all" ? all : on && chosen.size === 1;
+            box.classList.toggle("locked", locked);
+            box.title = locked
+              ? id === "all"
+                ? "Every prompt is already shown"
+                : "At least one prompt stays selected"
+              : on
+                ? "Hide this prompt"
+                : id === "all"
+                  ? "Show every prompt"
+                  : "Also show this prompt";
+          }
+        };
+        host.append(button, menu);
+      };
+
+      // A static legend: both arms are always shown.
+      // Run selector: each option names the harness, model, and effort that
+      // produced the run. Switching reloads the page with ?run=, keeping ?prompts=.
+      const renderRunSelect = () => {
+        if (ALL_RUNS.length < 2) return;
+        const select = document.getElementById("run-select");
+        select.hidden = false;
+        document.getElementById("run-label").hidden = false;
+        for (const r of ALL_RUNS) {
+          const option = document.createElement("option");
+          option.value = r.run.id;
+          option.textContent =
+            r.run.id === "baseline"
+              ? `Baseline · ${runConfig(r)}`
+              : `${runConfig(r)} · ${runDate(r)}`;
+          option.title = r.run.id;
+          option.selected = r === DATA;
+          select.appendChild(option);
+        }
+        select.addEventListener("change", () => {
+          const url = new URL(location.href);
+          url.searchParams.set("run", select.value);
+          location.assign(url);
+        });
+      };
+
+      const renderLegend = () => {
+        document.getElementById("legend").innerHTML = shown
+          .map(
+            (a) =>
+              `<span class="chip" style="--badge-color:${a.color}"><span class="code">${a.id}</span><span class="sep" aria-hidden="true"></span>${escapeHtml(a.name)}</span>`,
+          )
+          .join("");
+      };
+
+      const renderHero = () => {
+        const arms = active();
+        const [base, ...others] = arms;
+        const label = document.getElementById("hero-label");
+        const hero = document.getElementById("hero");
+        const sub = document.getElementById("hero-sub");
+        if (base === undefined) return;
+        if (others.length === 0) {
+          label.textContent = "Tool output the agent had to read";
+          hero.textContent = METRICS.out.fmt(armTotal(base.id, "out").mean);
+          sub.innerHTML = `${badge(base)} across ${promptsPhrase()}, with ${METRICS.correct.fmt(armTotal(base.id, "correct").mean)}/${claimsTotal()} claims correct (mean of trials)`;
+          return;
+        }
+        const other = others[0];
+        const outBase = armTotal(base.id, "out").mean,
+          outOther = armTotal(other.id, "out").mean;
+        const ratio = outBase >= outOther ? outBase / outOther : outOther / outBase;
+        label.textContent = `Tool output the agent had to read, ${other.id} vs ${base.id}`;
+        hero.textContent = `${ratio.toFixed(1)}× ${outOther <= outBase ? "less" : "more"}`;
+        sub.innerHTML = `${badge(other)} ${outOther.toFixed(1)} KB vs ${badge(base)} ${outBase.toFixed(0)} KB across ${promptsPhrase()}, with ${METRICS.correct.fmt(armTotal(other.id, "correct").mean)} vs ${METRICS.correct.fmt(armTotal(base.id, "correct").mean)} of ${claimsTotal()} claims correct (mean of trials)`;
+      };
+
+      const renderTiles = () => {
+        const tiles = document.getElementById("tiles");
+        tiles.innerHTML = "";
+        for (const key of ["correct", "lat", "calls", "cost"]) {
+          const m = METRICS[key];
+          const card = document.createElement("div");
+          card.className = "card tile";
+          // Same rule as the charts: the best mean wins, ties all win, one arm alone wins nothing.
+          const arms = active();
+          const means = arms.map((a) => armTotal(a.id, key).mean);
+          const best = m.better === "high" ? Math.max(...means) : Math.min(...means);
+          const wins = (value) => arms.length > 1 && Math.abs(value - best) < 1e-9;
+          card.innerHTML =
+            `<div class="label">${m.label}${key === "correct" ? ` (of ${claimsTotal()})` : Q.length === 1 ? `, ${Q[0].toUpperCase()}` : `, ${Q.length} prompts`}</div><div class="rows">` +
+            arms
+              .map(
+                (a, i) =>
+                  `<div class="row${wins(means[i]) ? " won" : ""}" style="--row-color:${a.color}">${badge(a)}<span class="v">${m.fmt(means[i])}</span>${wins(means[i]) ? `<span class="win" title="Best ${m.label.toLowerCase()} among the compared arms">✓</span>` : ""}</div>`,
+              )
+              .join("") +
+            "</div>";
+          tiles.appendChild(card);
+        }
+      };
+
+      // Small multiples: one horizontal bar chart per measure; each trial is a dot.
+      const renderTotals = () => {
+        const host = document.getElementById("totals");
+        host.innerHTML = "";
+        const arms = active();
+        ["correct", "lat", "calls", "cost", "out"].forEach((key, index) => {
+          const m = METRICS[key];
+          const card = document.createElement("div");
+          card.className = "card";
+          card.innerHTML = `<h2>${m.label}</h2><p class="sub">${key === "cost" ? "model + TypeSafe (darker end); lower is better" : m.better === "high" ? "higher is better" : "lower is better"}</p>`;
+          // The last two cards span half the row, so their charts get a wider viewBox.
+          const W = index < 3 ? 340 : 520,
+            rowH = 36,
+            left = 32,
+            right = 70,
+            H = arms.length * rowH;
+          const svg = el("svg", {
+            viewBox: `0 0 ${W} ${H}`,
+            role: "img",
+            "aria-label": `${m.label} by arm`,
+          });
+          const max =
+            key === "correct"
+              ? claimsTotal()
+              : Math.max(...arms.map((a) => Math.max(...armTotal(a.id, key).runs))) || 1;
+          const scale = (v) => ((W - left - right) * v) / max;
+          // The best mean among the compared arms wins; ties all win. One arm alone has nothing to beat.
+          const means = arms.map((a) => armTotal(a.id, key).mean);
+          const best = m.better === "high" ? Math.max(...means) : Math.min(...means);
+          const wins = (value) => arms.length > 1 && Math.abs(value - best) < 1e-9;
+          el(
+            "line",
+            { x1: left, x2: left, y1: 0, y2: H, stroke: "var(--axis)", "stroke-width": 1 },
+            svg,
+          );
+          arms.forEach((a, i) => {
+            const t = armTotal(a.id, key);
+            const y = i * rowH + (rowH - 16) / 2;
+            // A winning row gets a faint wash of its own hue behind the whole row.
+            if (wins(t.mean))
+              el(
+                "rect",
+                {
+                  x: -8,
+                  y: i * rowH + 2,
+                  width: W + 16,
+                  height: rowH - 4,
+                  rx: 6,
+                  style: `fill:${a.color};fill-opacity:0.12`,
+                },
+                svg,
+              );
+            svgBadge(svg, a, 0, y + 8);
+            const tsMean = key === "cost" ? armTotal(a.id, "ts").mean : 0;
+            if (tsMean > 0) {
+              // Model share, 2px surface gap, then the TypeSafe share as a darker data-end.
+              const modelWidth = scale(t.mean - tsMean);
+              el(
+                "rect",
+                { x: left, y, width: Math.max(modelWidth, 1), height: 16, fill: a.color },
+                svg,
+              );
+              el(
+                "path",
+                {
+                  d: barPath(left + modelWidth + 2, y, Math.max(scale(tsMean) - 2, 4), 16, true),
+                  fill: `color-mix(in oklab, ${a.color} 70%, black)`,
+                },
+                svg,
+              );
+            } else {
+              el(
+                "path",
+                { d: barPath(left, y, Math.max(scale(t.mean), 1), 16, true), fill: a.color },
+                svg,
+              );
+            }
+            if (t.runs.length > 1) {
+              runRange(
+                svg,
+                left + scale(Math.min(...t.runs)),
+                y + 8,
+                left + scale(Math.max(...t.runs)),
+                y + 8,
+              );
+              t.runs.forEach((r) => runDot(svg, left + scale(r), y + 8));
+            }
+            const label = el(
+              "text",
+              { class: "val", x: left + scale(Math.max(...t.runs)) + 8, y: y + 12 },
+              svg,
+            );
+            label.textContent = m.fmt(t.mean);
+            if (wins(t.mean)) {
+              const mark = el("tspan", { class: "win", dx: 6 }, label);
+              mark.textContent = "✓";
+              el("title", {}, label).textContent =
+                `Best ${m.label.toLowerCase()} among the compared arms`;
+            }
+            // Drawn last so hovering the bar, its trial dots, or its label all reach it.
+            const hit = el(
+              "rect",
+              { class: "hit", x: -8, y: i * rowH, width: W + 16, height: rowH },
+              svg,
+            );
+            bindTip(
+              hit,
+              `${escapeHtml(a.name)} · ${m.label}`,
+              runsOf(a.id).map((run, j) => {
+                const prefix = t.runs.length > 1 ? "Trial " + (j + 1) + ": " : "";
+                if (key !== "cost") return [a, prefix + m.fmt(t.runs[j])];
+                const typeSafe = total(run, "ts");
+                const breakdown =
+                  typeSafe > 0
+                    ? ` <span class="tip-muted">(model ${m.fmt(t.runs[j] - typeSafe)} + TypeSafe $${typeSafe.toFixed(4)})</span>`
+                    : "";
+                return [a, `${prefix}${m.fmt(t.runs[j])}${breakdown}`];
+              }),
+            );
+          });
+          card.appendChild(svg);
+          host.appendChild(card);
+        });
+      };
+
+      // Grouped columns per prompt.
+      const renderGrouped = (id, key) => {
+        const svg = document.getElementById(id);
+        svg.innerHTML = "";
+        const arms = active();
+        const W = 1160,
+          H = 250,
+          top = 12,
+          bottom = 54,
+          left = 34,
+          right = 8;
+        svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+        svg.setAttribute("role", "img");
+        svg.setAttribute("aria-label", `${METRICS[key].label} per prompt, by arm`);
+        const max = niceMax(
+          Math.max(
+            ...Q.flatMap((q) =>
+              arms.flatMap((a) => runsOf(a.id).map((r) => RUNS[`${r}.${q}`][key])),
+            ),
+          ),
+        );
+        const plotH = H - top - bottom,
+          band = (W - left - right) / Q.length;
+        const y = (v) => top + plotH - (plotH * v) / max;
+        for (let i = 0; i <= 4; i++) {
+          const v = (max / 4) * i;
+          el(
+            "line",
+            {
+              x1: left,
+              x2: W - right,
+              y1: y(v),
+              y2: y(v),
+              stroke: i === 0 ? "var(--axis)" : "var(--grid)",
+              "stroke-width": 1,
+            },
+            svg,
+          );
+          el(
+            "text",
+            { x: left - 6, y: y(v) + 4, "text-anchor": "end", class: "muted" },
+            svg,
+          ).textContent = Number.isInteger(v) ? v : +v.toFixed(2);
+        }
+        const barW = Math.min(24, (band - 20) / arms.length - 2);
+        Q.forEach((q, qi) => {
+          const x0 = left + qi * band + (band - (barW * arms.length + 2 * (arms.length - 1))) / 2;
+          // Per prompt, the lowest mean wins (every per-prompt measure is lower-is-better); ties all win.
+          const values = arms.map((a) => value(a.id, q, key));
+          const best = Math.min(...values);
+          const wins = (v) => arms.length > 1 && Math.abs(v - best) < 1e-9;
+          arms.forEach((a, ai) => {
+            if (!wins(values[ai])) return;
+            const x = x0 + ai * (barW + 2);
+            el(
+              "rect",
+              {
+                x: x - 3,
+                y: top,
+                width: barW + 6,
+                height: plotH + 16,
+                rx: 5,
+                style: `fill:${a.color};fill-opacity:0.12`,
+              },
+              svg,
+            );
+          });
+          arms.forEach((a, ai) => {
+            const v = value(a.id, q, key);
+            const x = x0 + ai * (barW + 2);
+            el(
+              "path",
+              { d: barPath(x, y(v), barW, Math.max(top + plotH - y(v), 1), false), fill: a.color },
+              svg,
+            );
+            el(
+              "text",
+              {
+                x: x + barW / 2,
+                y: top + plotH + 12,
+                "text-anchor": "middle",
+                class: "muted",
+                "font-size": 9,
+              },
+              svg,
+            ).textContent = a.id;
+            if (runsOf(a.id).length > 1) {
+              const ys = runsOf(a.id).map((r) => y(RUNS[`${r}.${q}`][key]));
+              runRange(svg, x + barW / 2, Math.min(...ys), x + barW / 2, Math.max(...ys));
+              ys.forEach((cy) => runDot(svg, x + barW / 2, cy));
+            }
+            if (wins(v)) {
+              const peak = Math.min(y(v), ...runsOf(a.id).map((r) => y(RUNS[`${r}.${q}`][key])));
+              el(
+                "text",
+                { x: x + barW / 2, y: peak - 8, "text-anchor": "middle", class: "win" },
+                svg,
+              ).textContent = "✓";
+            }
+          });
+          el(
+            "text",
+            { x: left + qi * band + band / 2, y: H - bottom + 30, "text-anchor": "middle" },
+            svg,
+          ).textContent = q.toUpperCase();
+          el(
+            "text",
+            {
+              x: left + qi * band + band / 2,
+              y: H - bottom + 44,
+              "text-anchor": "middle",
+              class: "muted",
+            },
+            svg,
+          ).textContent = QLABEL[q];
+          const hit = el(
+            "rect",
+            { class: "hit", x: left + qi * band, y: top - 16, width: band, height: plotH + 16 },
+            svg,
+          );
+          bindTip(
+            hit,
+            `${q.toUpperCase()} · ${escapeHtml(QLABEL[q])}`,
+            arms.map((a) => [
+              a,
+              runsOf(a.id)
+                .map((r) => METRICS[key].fmt(RUNS[`${r}.${q}`][key]))
+                .join(" / "),
+            ]),
+          );
+        });
+      };
+
+      const VERDICT_MARK = { correct: "✓", incorrect: "✗", unknown: "?" };
+      const claimTitle = (run) =>
+        run.claims === null
+          ? "Hand-graded total"
+          : run.claims.map((v, i) => `Claim ${i + 1}: ${v ?? "ungraded"}`).join("\n");
+
+      const renderTables = () => {
+        const arms = active();
+        const pill = (run, of) =>
+          `<span class="pill ${run.correct === of ? "full" : "miss"}" title="${escapeHtml(claimTitle(run))}">${run.correct === of ? "✓" : "△"} ${run.correct}/${of}</span>`;
+        document.getElementById("acc").innerHTML =
+          `<thead><tr><th>Prompt</th>${arms.map((a) => `<th class="c">${badge(a)}</th>`).join("")}</tr></thead><tbody>` +
+          Q.map(
+            (q) =>
+              `<tr><td>${q.toUpperCase()} · ${escapeHtml(QLABEL[q])}</td>${arms
+                .map(
+                  (a) =>
+                    `<td class="c">${runsOf(a.id)
+                      .map((r) => pill(RUNS[`${r}.${q}`], CLAIMS[q]))
+                      .join(" ")}</td>`,
+                )
+                .join("")}</tr>`,
+          ).join("") +
+          `<tr><td><strong>Total</strong></td>${arms
+            .map(
+              (a) =>
+                `<td class="c"><strong>${runsOf(a.id)
+                  .map((r) => total(r, "correct") + "/" + claimsTotal())
+                  .join(" · ")}</strong></td>`,
+            )
+            .join("")}</tr></tbody>`;
+        document.getElementById("raw").innerHTML =
+          `<thead><tr><th>Trial</th><th>Prompt</th><th>Status</th><th>Claims</th><th>Time (s)</th><th>Calls</th><th>Cost ($)</th><th>Output (KB)</th></tr></thead><tbody>` +
+          arms
+            .flatMap((a) =>
+              runsOf(a.id).flatMap((r) =>
+                Q.map((q) => {
+                  const d = RUNS[`${r}.${q}`];
+                  const claims =
+                    d.claims === null
+                      ? ""
+                      : " " + d.claims.map((v) => VERDICT_MARK[v] ?? "·").join("");
+                  return `<tr><td>${badge(a)} ${r}</td><td>${q.toUpperCase()}</td><td>${d.status}</td><td>${d.correct}/${CLAIMS[q]}${claims}</td><td>${d.lat.toFixed(1)}</td><td>${d.calls}</td><td>${d.cost.toFixed(4)}</td><td>${d.out.toFixed(1)}</td></tr>`;
+                }),
+              ),
+            )
+            .join("") +
+          "</tbody>";
+      };
+
+      const renderFooter = () => {
+        const r = DATA.run;
+        const parts = [
+          `Run ${r.id}`,
+          `git ${r.gitSha}${r.gitDirty ? " (dirty)" : ""}`,
+          `Pi ${r.piVersion}, pi-web-access ${r.webAccessVersion}`,
+          `${r.trials} trial${r.trials === 1 ? "" : "s"} per task per arm`,
+          r.judgeModel === null ? "hand-graded" : `judge ${r.judgeModel}`,
+          "tool output is the UTF-8 size of tool-result text; cost is model cost plus the TypeSafe charge each rfc call reports",
+        ];
+        document.getElementById("footer").textContent =
+          parts.join(" · ") + "." + (r.note ? ` ${r.note}` : "");
+      };
+
+      const render = () => {
+        hideTip();
+        document.getElementById("lede").textContent =
+          `${Q.length === 1 ? `${Q[0].toUpperCase()} · ${PTITLE[Q[0]]}` : Q.length === QALL.length ? `${Q.length} RFC prompts` : `${Q.length} of ${QALL.length} RFC prompts`} · ${DATA.run.harness === "pi" || DATA.run.harness === undefined ? "Pi" : DATA.run.harness} on ${DATA.run.model} (${DATA.run.thinking} thinking) · ${claimsTotal()} graded claims per trial`;
+        const promptText = document.getElementById("prompt-text");
+        promptText.hidden = Q.length !== 1;
+        promptText.textContent =
+          Q.length === 1
+            ? `“${TASK[Q[0]].prompt}” Difficulty ${difficulty(Q[0])} of ${DIFFICULTY_LEVELS}: ${factorText(Q[0])}.`
+            : "";
+        syncPromptPicker();
+        renderHero();
+        renderTiles();
+        renderTotals();
+        renderGrouped("lat", "lat");
+        renderGrouped("out", "out");
+        renderGrouped("calls", "calls");
+        renderTables();
+      };
+      buildPromptPicker();
+      renderRunSelect();
+      renderLegend();
+      renderFooter();
+      render();
+    </script>
+  </body>
+</html>

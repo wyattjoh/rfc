@@ -1,0 +1,5 @@
+{
+  "title": "JWT exp and alg none",
+  "label": "JWT / JWS",
+  "factors": ["rfcs2", "noNumber"]
+}

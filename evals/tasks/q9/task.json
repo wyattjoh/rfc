@@ -1,0 +1,5 @@
+{
+  "title": "SMTP line limits",
+  "label": "SMTP",
+  "factors": ["rfcs2", "currency", "noNumber"]
+}

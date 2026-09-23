@@ -5,6 +5,9 @@
     ".scratch/**",
     ".claude/worktrees/**",
     "**/node_modules/**",
-    "**/dist/**"
+    "**/dist/**",
+    "evals/results/**",
+    "evals/rfc-text/**",
+    "evals/test/fixtures/**"
   ]
 }
