@@ -24,7 +24,8 @@
   "types": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./protocol": "./src/protocol.ts"
+    "./protocol": "./src/protocol.ts",
+    "./policy": "./src/policy.ts"
   },
   "publishConfig": {
     "access": "public"

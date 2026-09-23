@@ -142,6 +142,11 @@ const runTool = (tool: ToolDefinition<never, never, never>, toolCallId: string, 
   );
 
 describe("Pi RFC extension", () => {
+  test("does not import the engine entry point when Pi starts", async () => {
+    const source = await Bun.file(extensionPath).text();
+    expect(source).not.toMatch(/^import (?!type\b)[^;]+ from ["']@wyattjoh\/rfc-core["'];/m);
+  });
+
   test("loads through Pi's Node extension loader", () => {
     const nodeScript = `
       const { loadExtensions } = await import(${JSON.stringify(piExtensionLoaderUrl)});

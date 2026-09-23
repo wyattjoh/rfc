@@ -17,7 +17,7 @@ import {
   rfcPiInstructions,
   schemaVersion,
 } from "@wyattjoh/rfc/agent";
-import { retrievalPolicy } from "@wyattjoh/rfc-core";
+import { retrievalPolicy } from "@wyattjoh/rfc-core/policy";
 import { Type } from "typebox";
 import rfcPiPackage from "../package.json" with { type: "json" };
 
