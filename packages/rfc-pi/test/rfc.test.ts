@@ -398,7 +398,10 @@ describe("RFC_CLI_COMMAND override", () => {
         withCliCommand(JSON.stringify(["bun", rfcCliEntry]), () => runTool(tool, "override-1", {})),
     );
 
-    expect(error?.message).toBeUndefined();
+    // Where the platform credential store is unavailable (Linux CI), the local
+    // CLI still answers, with its typed error envelope; either way bunx never ran.
+    expect(error?.message ?? "").not.toContain("bunx was used");
+    if (error !== undefined) expect(error.message).toContain('"schemaVersion":3');
   });
 
   test("accepts a bare executable and reports an unusable value", async () => {
