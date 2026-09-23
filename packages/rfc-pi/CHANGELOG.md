@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.3.0](https://github.com/wyattjoh/rfc/compare/rfc-pi-v0.2.2...rfc-pi-v0.3.0) (2026-09-23)
+
+
+### ⚠ BREAKING CHANGES
+
+* **rfc:** expose one rfc_research tool over the ranked-retrieval contract
+
+### Features
+
+* **rfc-core:** add opt-in full-text topic discovery with Datatracker fallback ([03d3a6e](https://github.com/wyattjoh/rfc/commit/03d3a6e3cf5a78e8b7194181ec4f6d8bf006367f))
+* **rfc-core:** make needs_split actionable instead of a bare refusal ([da85ecb](https://github.com/wyattjoh/rfc/commit/da85ecb535ed88dacc057aa65472221c7d260a7f))
+* **rfc-pi:** allow RFC_CLI_COMMAND to run a local CLI ([dae34dd](https://github.com/wyattjoh/rfc/commit/dae34dd49e0f0e842e8d3baf7b4abf1928d4f55d))
+* **rfc-pi:** return compact JSON from the Pi tools ([b4d8c5f](https://github.com/wyattjoh/rfc/commit/b4d8c5fc85630c4cfc6c8714032b8de8cfb13177))
+* **rfc:** expose one rfc_research tool over the ranked-retrieval contract ([e560383](https://github.com/wyattjoh/rfc/commit/e560383911ddf3dd7766b7287daab005ce50d20d))
+* **rfc:** lean agent-facing instructions, tool surface, and research output ([f28d09c](https://github.com/wyattjoh/rfc/commit/f28d09c5489892086952cb218a7a4a4d0a65fb22))
+* **rfc:** return research answers positionally without echoing questions ([2801b1f](https://github.com/wyattjoh/rfc/commit/2801b1f4a11b745a0147f93ff76533ab0df7829c))
+
+
+### Bug Fixes
+
+* **rfc-core:** drop the heuristic compound-question splitter ([099446a](https://github.com/wyattjoh/rfc/commit/099446a6af8e5eeaf35d18ee6e73ef1772ce0754))
+* **rfc-pi:** repair the auth tool and preserve CLI failure diagnostics ([7302ac8](https://github.com/wyattjoh/rfc/commit/7302ac81b124a0f680be09dad6a6988967b054ed))
+* **rfc:** allow standard technical search terms while keeping private details out ([f3ed5a7](https://github.com/wyattjoh/rfc/commit/f3ed5a7b9581a985ea4a75d92bb6f16f8f9c55f2))
+* **rfc:** tell callers that topic search terms are literal substrings ([60dccbc](https://github.com/wyattjoh/rfc/commit/60dccbcae4a359da56880068af2161775a5b0a88))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @wyattjoh/rfc bumped from 0.3.2 to 0.4.0
+    * @wyattjoh/rfc-core bumped from 0.1.2 to 0.2.0
+
 ## [0.2.2](https://github.com/wyattjoh/rfc/compare/rfc-pi-v0.2.1...rfc-pi-v0.2.2) (2026-09-22)
 
 
