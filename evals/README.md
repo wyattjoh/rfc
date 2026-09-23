@@ -70,7 +70,7 @@ When the judge is wrong after you read the transcript, add an override to the ru
 
 Then run `bun run eval report <run>`. If the key itself was missing an acceptable alternate, fix `key.md` instead and mark the addition _(Added during grading)_.
 
-Calibration: the baseline was graded by hand. Over those 60 transcripts the judge matched the hand totals after two rules were added, both now in the judge prompt: require only what the question asked for, and accept any citation for currency or obsoletion claims.
+Calibration: the baseline was graded by hand. Over those 60 transcripts the judge matched the hand totals after two rules were added: require only what the question asked for, and accept any citation for currency or obsoletion claims. A third rule accepts a direct parent or subsection of an accepted section (§2.2 for §2.2.1).
 
 ## Adding a task
 

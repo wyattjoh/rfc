@@ -52,6 +52,8 @@ export const judgePrompt = (task: Task, claim: number, answer: string): string =
     "  parenthetical explanations, related values the question did not ask about) is not required.",
     "- For a claim about which RFC is current, or which RFC obsoletes or is obsoleted by another, naming the right",
     "  RFC numbers is enough; any section or the RFC header is an acceptable citation.",
+    "- A section that is the direct parent or a direct subsection of an accepted section, in the same RFC, is an",
+    "  acceptable citation (for example §2.2 for §2.2.1, or §15.1 for §15). A different section or RFC is not.",
     "- A paraphrase counts when it means the same thing. Normative strength matters: SHOULD is not MUST.",
     "- An answer that declines, hedges without committing, or says it could not find the fact is incorrect.",
     "- Ignore other claims. Errors elsewhere in the answer only matter if the key says they do for this claim.",
