@@ -24,7 +24,7 @@ Terms follow Anthropic's [Demystifying evals for AI agents](https://www.anthropi
 ```sh
 bun run eval run                          # both arms, all tasks, defaults from config.ts
 bun run eval run --tasks q1,q5 --trials 1 # quick smoke run
-bun run eval run --resume latest          # continue an interrupted run
+bun run eval run --resume latest          # continue an interrupted run with its recorded settings
 bun run eval grade latest --regrade       # re-grade after editing a key or the judge
 bun run eval report --open                # rebuild the dashboard of every run and open it
 bun run eval answers latest q10 --calls   # read every trial's answer and tool calls

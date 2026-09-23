@@ -8,8 +8,16 @@ import { type ArmId, arms, isArmId } from "./arms";
 import { gradeRun } from "./grade";
 import { baselineDir, resultsDir } from "./paths";
 import { writeReport } from "./report";
-import { type TrialRecord, readJson, resolveRunId, runDir, trialDir, writeJson } from "./results";
-import { newRunId, runSuite } from "./run";
+import {
+  type RunInfo,
+  type TrialRecord,
+  readJson,
+  resolveRunId,
+  runDir,
+  trialDir,
+  writeJson,
+} from "./results";
+import { newRunId, resumeSettings, runSuite } from "./run";
 import { type Summary, summarizeAll, summarizeRun } from "./summary";
 import { listTaskIds, loadTasks } from "./tasks";
 import { extractToolCalls, readSession } from "./transcript";
@@ -34,7 +42,7 @@ run options:
   --model <p/id>      model under test (default: ${defaults.model})
   --thinking <level>  thinking level (default: ${defaults.thinking})
   --concurrency <n>   trials in flight (default: ${defaults.concurrency})
-  --resume <run>      continue a run, keeping trials that finished ok
+  --resume <run>      continue a run with its recorded settings, keeping trials that finished ok
   --no-grade          skip grading and the report
 
 grade options:
@@ -119,20 +127,38 @@ const commands: Record<string, () => Promise<void>> = {
     const known = new Set(listTaskIds());
     const unknownTask = taskIds?.find((id) => !known.has(id));
     if (unknownTask !== undefined) throw new Error(`unknown task ${unknownTask}`);
-    const runId = values.resume === undefined ? await newRunId() : resolveRunId(values.resume);
-    console.log(`run ${runId} -> ${runDir(runId)}`);
+    const trials =
+      values.trials === undefined ? undefined : positiveInt(values.trials, 1, "trials");
+    // A resumed run always continues with the settings recorded in its run.json.
+    const resumed =
+      values.resume === undefined
+        ? undefined
+        : (() => {
+            const runId = resolveRunId(values.resume);
+            const info = readJson<RunInfo>(join(runDir(runId), "run.json"))!;
+            const settings = resumeSettings(info, {
+              model: values.model,
+              thinking: values.thinking,
+              trials,
+              tasks: taskIds,
+              arms: list(values.arms),
+            });
+            return { runId, settings };
+          })();
+    const runId = resumed?.runId ?? (await newRunId());
+    console.log(`run ${runId} -> ${runDir(runId)}${resumed === undefined ? "" : " (resumed)"}`);
     await runSuite(
       {
         runId,
-        arms: armIds as Array<ArmId>,
-        tasks: loadTasks(taskIds),
-        trials: positiveInt(values.trials, defaults.trials, "trials"),
-        model: values.model ?? defaults.model,
-        thinking: values.thinking ?? defaults.thinking,
+        arms: (resumed?.settings.arms ?? armIds) as Array<ArmId>,
+        tasks: loadTasks(resumed?.settings.tasks ?? taskIds),
+        trials: resumed?.settings.trials ?? trials ?? defaults.trials,
+        model: resumed?.settings.model ?? values.model ?? defaults.model,
+        thinking: resumed?.settings.thinking ?? values.thinking ?? defaults.thinking,
         concurrency: positiveInt(values.concurrency, defaults.concurrency, "concurrency"),
         trialTimeoutMs: defaults.trialTimeoutMs,
       },
-      values.resume !== undefined,
+      resumed !== undefined,
     );
     if (values["no-grade"]) return;
     await gradeRun(runId, judgeOptions());

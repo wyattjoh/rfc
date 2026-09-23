@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { type JudgeOptions, gradeClaim } from "./judge";
+import { type ClaimGrade, type JudgeOptions, gradeClaim } from "./judge";
 import { pool } from "./pool";
 import {
   type GradeRecord,
@@ -36,31 +36,32 @@ export const gradeRun = async (
         pending.push({ record, path });
       }
 
+  // Each trial's grade.json is written as soon as its last claim is graded, so
+  // an interrupted grading run keeps every trial it finished.
+  const slots = pending.map(({ record }) =>
+    Array.from<ClaimGrade | undefined>({ length: tasks.get(record.task)!.claims.length }),
+  );
   const jobs = pending.flatMap(({ record }, trialIndex) =>
-    tasks.get(record.task)!.claims.map((_, i) => ({ trialIndex, record, claim: i + 1 })),
+    slots[trialIndex]!.map((_, i) => ({ trialIndex, record, claim: i + 1 })),
   );
   let done = 0;
-  const grades = await pool(jobs, options.concurrency, async ({ record, claim }) => {
-    const grade =
+  await pool(jobs, options.concurrency, async ({ trialIndex, record, claim }) => {
+    const grade: ClaimGrade =
       record.answer === null
-        ? { verdict: "incorrect" as const, reason: `no answer (${record.status})`, cost: 0 }
+        ? { verdict: "incorrect", reason: `no answer (${record.status})`, cost: 0 }
         : await gradeClaim(options, tasks.get(record.task)!, claim, record.answer);
     done++;
     console.log(
       `[${done}/${jobs.length}] ${record.arm} ${record.task} t${record.trial} claim ${claim}: ${grade.verdict}`,
     );
-    return grade;
-  });
-
-  pending.forEach(({ path }, trialIndex) => {
-    const own = jobs.flatMap((job, i) =>
-      job.trialIndex === trialIndex ? [{ claim: job.claim, ...grades[i]! }] : [],
-    );
-    const record: GradeRecord = {
+    const own = slots[trialIndex]!;
+    own[claim - 1] = grade;
+    if (own.some((g) => g === undefined)) return;
+    const graded = own as Array<ClaimGrade>;
+    writeJson(pending[trialIndex]!.path, {
       judgeModel: options.model,
-      judgeCost: Number(own.reduce((sum, g) => sum + g.cost, 0).toFixed(4)),
-      claims: own.map(({ claim, verdict, reason }) => ({ claim, verdict, reason })),
-    };
-    writeJson(path, record);
+      judgeCost: Number(graded.reduce((sum, g) => sum + g.cost, 0).toFixed(4)),
+      claims: graded.map(({ verdict, reason }, i) => ({ claim: i + 1, verdict, reason })),
+    } satisfies GradeRecord);
   });
 };

@@ -58,7 +58,8 @@ export type GradeRecord = {
 };
 
 /**
- * A human verdict that replaces the judge's for one claim, keyed `arm/task/tN/claimN`.
+ * A human verdict that replaces the judge's for one claim, keyed `<arm>/<task>/t<trial>/<claim>`
+ * (for example `web-rfc/q10/t1/2`).
  */
 export type Overrides = Record<string, { verdict: Verdict; note: string }>;
 

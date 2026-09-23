@@ -80,4 +80,12 @@ describe("transcript", () => {
     expect(extractAnswer(entries)).toBeUndefined();
     expect(measure(entries)?.lat).toBe(4);
   });
+
+  test("skips a last line cut short when a timed-out trial was killed", () => {
+    const jsonl = [
+      JSON.stringify({ timestamp: at(0), message: { role: "user", content: [] } }),
+      '{"timestamp":"2026-01-01T00:00:09.000Z","message":{"role":"assis',
+    ].join("\n");
+    expect(parseSession(jsonl)).toHaveLength(1);
+  });
 });

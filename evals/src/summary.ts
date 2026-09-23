@@ -108,22 +108,47 @@ export const summarizeRun = (runId: string): Summary => {
   };
 };
 
-// Every trial ran and every claim has a verdict (grading writes all grades at the end).
-const isComplete = (summary: Summary): boolean =>
-  summary.trials.length ===
-    summary.run.trials * summary.run.tasks.length * summary.run.arms.length &&
-  summary.trials.every((t) => t.claims === null || t.claims.every((v) => v !== null));
+/**
+ * Why a run can't be shown yet, or undefined when every trial ran and every
+ * claim has a verdict. Hand-graded trials (claims null) count as graded.
+ */
+export const incompleteReason = (summary: Summary): string | undefined => {
+  const expected = summary.run.trials * summary.run.tasks.length * summary.run.arms.length;
+  if (summary.trials.length < expected) return `${summary.trials.length}/${expected} trials ran`;
+  const ungraded = summary.trials.filter(
+    (t) => t.claims !== null && t.claims.some((v) => v === null),
+  ).length;
+  return ungraded === 0
+    ? undefined
+    : `${ungraded} trials have ungraded claims; run "bun run eval grade" on it`;
+};
+
+// A run that fails to summarize (for example, it names a task that no longer
+// exists) or is incomplete is left off the dashboard with a warning instead of
+// breaking the rebuild.
+const summarizeForDashboard = (runId: string): Array<Summary> => {
+  try {
+    const summary = summarizeRun(runId);
+    const reason = incompleteReason(summary);
+    if (reason === undefined) return [summary];
+    console.warn(`dashboard: skipping ${runId}: ${reason}`);
+  } catch (error) {
+    console.warn(
+      `dashboard: skipping ${runId}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  return [];
+};
 
 /**
  * Every complete run under `evals/results/`, newest first, followed by the
- * committed baseline under the id `baseline`. Runs still in progress are left out.
+ * committed baseline under the id `baseline`. Skipped runs are reported on stderr.
  */
 export const summarizeAll = (): Array<Summary> => {
   const runs = existsSync(resultsDir)
     ? readdirSync(resultsDir)
         .filter((id) => existsSync(join(runDir(id), "run.json")))
-        .map(summarizeRun)
-        .filter(isComplete)
+        .flatMap(summarizeForDashboard)
         .sort((left, right) => right.run.startedAt.localeCompare(left.run.startedAt))
     : [];
   const baseline = readJson<Summary>(join(baselineDir, "summary.json"));

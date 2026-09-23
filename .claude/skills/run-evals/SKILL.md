@@ -19,7 +19,7 @@ Everything runs through `bun run eval <command>` from the repo root. Runs are sl
    - **Arms**: both (recommended), or `web-rfc` only when the web arm is unchanged and the baseline covers it.
    - **Model**: the configured model and thinking level, or an override.
 3. State the estimate before starting: trials = tasks × arms × trials. The baseline averaged about $0.06 and 30 s of agent time per trial, plus about $0.007 per judged claim. Wall time is roughly trials × 30 s ÷ concurrency.
-4. Run `bun run eval run [flags]` in the background and wait for the completion notification. Don't poll. If it dies partway, continue with `--resume <run-id>`.
+4. Run `bun run eval run [flags]` in the background and wait for the completion notification. Don't poll. If it dies partway, continue with `--resume <run-id>`; the run keeps the model, thinking, tasks, arms, and trials recorded in its `run.json`.
 5. When it finishes, open the dashboard at this run with `bun run eval report <run> --open`. Its run selector lists every complete run and the baseline by harness, model, and thinking level. Summarize against `evals/baseline/summary.json`: claims correct, wall time, tool calls, cost, and tool output per arm. Also list every task whose claims changed.
 6. For every claim the judge marked incorrect or unknown, read that trial with `bun run eval answers <run> <task> --calls` before reporting it as a regression. Judges make mistakes. If a verdict is wrong, offer an override (below) and don't blame the agent.
 7. Offer next steps: more trials for noisy deltas, overrides, or promoting the run to baseline.

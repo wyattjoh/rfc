@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { piBinary } from "./paths";
+import { waitWithTimeout } from "./process";
 import type { Verdict } from "./results";
 import type { Task } from "./tasks";
 
@@ -70,15 +71,29 @@ const verdicts: ReadonlyArray<Verdict> = ["correct", "incorrect", "unknown"];
  * reply holds no valid one.
  */
 export const parseVerdict = (text: string): { verdict: Verdict; reason: string } | undefined => {
-  const match = /\{[\s\S]*\}/.exec(text);
-  if (match === null) return undefined;
-  try {
-    const parsed = JSON.parse(match[0]) as { verdict?: unknown; reason?: unknown };
-    if (!verdicts.includes(parsed.verdict as Verdict)) return undefined;
+  // The whole outermost {...} first, then each flat {...} group, so a reply
+  // with prose braces around the verdict still parses.
+  const candidates = [
+    ...(/\{[\s\S]*\}/.exec(text) ?? []),
+    ...[...text.matchAll(/\{[^{}]*\}/g)].map((match) => match[0]),
+  ];
+  for (const candidate of candidates) {
+    const parsed = parseObject(candidate);
+    if (parsed === undefined || !verdicts.includes(parsed.verdict as Verdict)) continue;
     return {
       verdict: parsed.verdict as Verdict,
       reason: typeof parsed.reason === "string" ? parsed.reason : "",
     };
+  }
+  return undefined;
+};
+
+const parseObject = (text: string): Record<string, unknown> | undefined => {
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return typeof parsed === "object" && parsed !== null
+      ? (parsed as Record<string, unknown>)
+      : undefined;
   } catch {
     return undefined;
   }
@@ -93,12 +108,19 @@ type JsonEvent = {
   }>;
 };
 
-// Pi's JSON mode streams events; `agent_end` carries the whole conversation.
-const finalReply = (stdout: string): { text: string; cost: number } => {
+/**
+ * The judge's final reply text and model cost from Pi's JSON-mode output, where
+ * the `agent_end` event carries the whole conversation. Lines that are not
+ * valid JSON are skipped.
+ */
+export const finalReply = (stdout: string): { text: string; cost: number } => {
   const end = stdout
     .split("\n")
     .filter((line) => line.startsWith("{"))
-    .map((line) => JSON.parse(line) as JsonEvent)
+    .flatMap((line) => {
+      const event = parseObject(line);
+      return event === undefined ? [] : [event as JsonEvent];
+    })
     .findLast((event) => event.type === "agent_end");
   const assistant = (end?.messages ?? []).filter((m) => m.role === "assistant");
   const text = (assistant.at(-1)?.content ?? [])
@@ -115,7 +137,8 @@ const callJudge = async (
 ): Promise<{ text: string; cost: number } | undefined> => {
   const cwd = mkdtempSync(join(tmpdir(), "rfc-eval-judge-"));
   try {
-    // Bun.spawn rather than Bun.$ for the hard timeout.
+    // Bun.spawn rather than Bun.$ for the hard timeout. stderr is ignored so an
+    // undrained pipe can never block the judge.
     const proc = Bun.spawn(
       [
         piBinary,
@@ -134,11 +157,17 @@ const callJudge = async (
         options.thinking,
         prompt,
       ],
-      { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", timeout: options.timeoutMs },
+      { cwd, stdin: "ignore", stdout: "pipe", stderr: "ignore" },
     );
-    const [stdout, exitCode] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-    if (exitCode !== 0) return undefined;
+    const [stdout, end] = await Promise.all([
+      new Response(proc.stdout).text(),
+      waitWithTimeout(proc, options.timeoutMs),
+    ]);
+    if (end.timedOut || end.exitCode !== 0) return undefined;
     return finalReply(stdout);
+  } catch {
+    // A spawn failure counts as a failed attempt; gradeClaim retries once.
+    return undefined;
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

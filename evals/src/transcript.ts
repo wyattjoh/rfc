@@ -44,15 +44,24 @@ export type TrialMetrics = {
   tools: ReadonlyArray<string>;
 };
 
+const parseLine = (line: string): Array<Entry> => {
+  try {
+    return [JSON.parse(line) as Entry];
+  } catch {
+    return [];
+  }
+};
+
 /**
- * Parses a Pi session JSONL file into entries.
+ * Parses a Pi session JSONL file into entries. Lines that are not valid JSON,
+ * such as a last line cut short when a timed-out trial was killed, are skipped.
  */
 export const parseSession = (jsonl: string): Array<Entry> =>
   jsonl
     .trim()
     .split("\n")
     .filter((line) => line.length > 0)
-    .map((line) => JSON.parse(line) as Entry);
+    .flatMap(parseLine);
 
 /**
  * Reads the session JSONL Pi wrote into `sessionDir`, if any.
