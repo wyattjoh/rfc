@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/wyattjoh/rfc/compare/rfc-core-v0.2.0...rfc-core-v0.2.1) (2026-09-23)
+
+
+### Bug Fixes
+
+* **rfc-pi:** avoid Redis import during Pi startup ([d108ee6](https://github.com/wyattjoh/rfc/commit/d108ee62d194e20945f5b058a099f513039b5541))
+
 ## [0.2.0](https://github.com/wyattjoh/rfc/compare/rfc-core-v0.1.2...rfc-core-v0.2.0) (2026-09-23)
 
 
