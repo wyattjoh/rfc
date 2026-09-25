@@ -4,6 +4,7 @@ import {
   InvalidInputError,
   RfcSourceCacheRemoveResultSchema,
   RfcSourceCacheStatusSchema,
+  RfcSourceTextResultSchema,
   datatrackerTopicSearchTermLimit,
   datatrackerTopicSearchTermMaximumCharacters,
   retrievalPolicy,
@@ -27,11 +28,13 @@ import {
   executeResearch,
   executeSourceCacheRemove,
   executeSourceCacheStatus,
+  executeSourceText,
   renderAuthStatus,
   renderCitationVerification,
   renderResearchResult,
   renderSourceCacheRemove,
   renderSourceCacheStatus,
+  renderSourceText,
   toRfcOperationErrorEnvelope,
   type RfcOperationDependencies,
   type RfcOperationOptions,
@@ -82,6 +85,10 @@ Verify one factual claim against one exact RFC quotation. Inputs are \`rfc\`, \`
 - \`unsupported\`: the quotation does not establish the claim.
 - \`contradicted\`: the quotation conflicts with the claim.
 - \`fabricated\`: the supplied quotation is absent from the authoritative source.
+
+### rfc_source_text
+
+Read an authoritative RFC Editor plain-text source only when the full RFC text is explicitly required or requested; for ordinary questions prefer \`rfc_research\` and \`rfc_verify_citation\`. An identifier-only request returns a parsed heading index with half-open UTF-8 byte ranges, source hash, and total bytes but no text. Supply both \`startOffset\` (inclusive) and \`endOffset\` (exclusive) to retrieve exactly that byte slice, without truncation. Ranges from citations use the same offsets. On later pages supply \`expectedSourceHash\`; if revalidation changes the source, the request fails rather than mixing snapshots. Large ranges produce correspondingly large results.
 
 ### rfc_source_cache_status
 
@@ -147,6 +154,17 @@ const CitationInputSchema = Schema.Struct({
   offset: Schema.optionalKey(
     Schema.Natural.pipe(Schema.annotate({ description: descriptions.offset })),
   ),
+});
+
+const SourceTextInputSchema = Schema.Struct({
+  rfc: describedString(descriptions.sourceRfc),
+  startOffset: Schema.optionalKey(
+    Schema.Natural.pipe(Schema.annotate({ description: descriptions.sourceStart })),
+  ),
+  endOffset: Schema.optionalKey(
+    Schema.Natural.pipe(Schema.annotate({ description: descriptions.sourceEnd })),
+  ),
+  expectedSourceHash: Schema.optionalKey(describedString(descriptions.expectedSourceHash)),
 });
 
 const RfcInputSchema = Schema.Struct({
@@ -288,6 +306,37 @@ export const createRfcMcpServer = (
             dependencies,
           ),
           renderAgentCitation,
+        );
+      } catch (error) {
+        return toolError(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    rfcAgentToolMetadata.sourceText.name,
+    {
+      title: rfcAgentToolMetadata.sourceText.title,
+      description: rfcAgentToolMetadata.sourceText.description,
+      inputSchema: toMcpSchema(SourceTextInputSchema),
+      outputSchema: toMcpSchema(RfcSourceTextResultSchema),
+      annotations: rfcAgentToolMetadata.sourceText.annotations,
+    },
+    async ({ rfc, startOffset, endOffset, expectedSourceHash }) => {
+      try {
+        return plainSuccess(
+          await executeSourceText(
+            {
+              schemaVersion,
+              rfc,
+              ...(startOffset === undefined ? {} : { startOffset }),
+              ...(endOffset === undefined ? {} : { endOffset }),
+              ...(expectedSourceHash === undefined ? {} : { expectedSourceHash }),
+            },
+            options,
+            dependencies,
+          ),
+          renderSourceText,
         );
       } catch (error) {
         return toolError(error);

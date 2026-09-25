@@ -18,7 +18,7 @@ from memory or a second provider.
 Launch the local stdio server with `rfc mcp`. A model connected through MCP does
 not need this skill or direct CLI access: initialization instructions contain the
 workflow, and `rfc://docs/agent-workflow` contains the complete agent reference.
-The typed tools are `rfc_research`, `rfc_verify_citation`,
+The typed tools are `rfc_research`, `rfc_verify_citation`, `rfc_source_text`,
 `rfc_source_cache_status`, `rfc_source_cache_remove`, and `rfc_auth_status`.
 
 Successful calls return concise text plus complete version-three structured
@@ -212,6 +212,24 @@ occurs only once. If the quote is `fabricated`, use at most one research call to
 locate current wording and at most one verification call for the replacement.
 Remove or qualify claims whose verdict is `unsupported`, `contradicted`, or
 `fabricated`; never repair quote wording or replace a gap with recall.
+
+## Exact RFC source text
+
+Use `rfc_source_text` or `rfc source-text` only when the full RFC text is explicitly
+required or requested; otherwise prefer `rfc_research` and `rfc_verify_citation`.
+An identifier-only call returns the authoritative source hash, total UTF-8 bytes,
+and parsed headings with half-open byte ranges, but no text. Request the exact
+untruncated text with both `startOffset` (inclusive) and `endOffset` (exclusive),
+using citation ranges or heading ranges directly. On later calls provide the
+`expectedSourceHash` from the initial response; if the cached source is
+revalidated and changes, start again from fresh metadata instead of mixing
+snapshots. A full RFC can be read with the range `[0,totalBytes)`, although
+large results consume substantial context.
+
+```sh
+rfc source-text RFC9110 --format json
+rfc source-text RFC9110 --start-offset 0 --end-offset 2048 --expected-source-hash <hash>
+```
 
 ## RFC source-cache operations
 

@@ -305,6 +305,7 @@ describe("RFC MCP agent surface", () => {
       expect(tools.map(({ name }) => name)).toEqual([
         "rfc_research",
         "rfc_verify_citation",
+        "rfc_source_text",
         "rfc_source_cache_status",
         "rfc_source_cache_remove",
         "rfc_auth_status",
@@ -323,6 +324,9 @@ describe("RFC MCP agent surface", () => {
       expect(research?.inputSchema.required).toEqual(["questions"]);
       expect(tools.find(({ name }) => name === "rfc_verify_citation")?.description).toStartWith(
         "Inputs: rfc, claim, quote; optional offset.",
+      );
+      expect(tools.find(({ name }) => name === "rfc_source_text")?.description).toContain(
+        "only when full RFC text is explicitly required or requested",
       );
       expect(
         tools.find(({ name }) => name === "rfc_source_cache_remove")?.annotations,
@@ -351,6 +355,71 @@ describe("RFC MCP agent surface", () => {
     }
   });
 
+  test("routes metadata and exact source ranges with a source-hash guard", async () => {
+    const requests: Array<unknown> = [];
+    const createClient = (async () =>
+      ({
+        sourceText: async (request: unknown) => {
+          requests.push(request);
+          return {
+            schemaVersion: 3 as const,
+            kind: "source_text" as const,
+            rfc: "RFC9110",
+            sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+            sourceHash: "hash",
+            offsetUnit: "utf8-byte" as const,
+            totalBytes: 12,
+            startOffset:
+              request && typeof request === "object" && "startOffset" in request ? 0 : null,
+            endOffset: request && typeof request === "object" && "endOffset" in request ? 4 : null,
+            text:
+              request && typeof request === "object" && "startOffset" in request ? "Text" : null,
+            headings: [],
+          };
+        },
+        sourceCacheStatus: async () => {
+          throw new Error("Unexpected cache call");
+        },
+        sourceCacheRemove: async () => {
+          throw new Error("Unexpected cache call");
+        },
+        research: async () => {
+          throw new Error("Unexpected research call");
+        },
+        verifyCitation: async () => {
+          throw new Error("Unexpected citation call");
+        },
+        close: async () => undefined,
+        [Symbol.asyncDispose]: async () => undefined,
+      }) satisfies RfcClient) as RfcOperationDependencies["createClient"];
+    const connection = await connect(makeDependencies({ createClient }));
+    try {
+      const metadata = await connection.client.callTool({
+        name: "rfc_source_text",
+        arguments: { rfc: "RFC9110" },
+      });
+      expect(metadata.structuredContent).toMatchObject({ text: null, sourceHash: "hash" });
+      const range = await connection.client.callTool({
+        name: "rfc_source_text",
+        arguments: { rfc: "RFC9110", startOffset: 0, endOffset: 4, expectedSourceHash: "hash" },
+      });
+      expect(textContent(range)).toBe("Text");
+      expect(range.structuredContent).toMatchObject({ text: "Text", startOffset: 0, endOffset: 4 });
+      expect(requests).toEqual([
+        { schemaVersion: 3, rfc: "RFC9110" },
+        {
+          schemaVersion: 3,
+          rfc: "RFC9110",
+          startOffset: 0,
+          endOffset: 4,
+          expectedSourceHash: "hash",
+        },
+      ]);
+    } finally {
+      await connection.close();
+    }
+  });
+
   test("routes safe local tools and requires explicit cache-removal confirmation", async () => {
     const operations: Array<string> = [];
     let closes = 0;
@@ -373,6 +442,9 @@ describe("RFC MCP agent surface", () => {
             rfc,
             removed: true,
           };
+        },
+        sourceText: async () => {
+          throw new Error("Unexpected source call");
         },
         research: async () => stubResearchResult,
         verifyCitation: async () => {
@@ -433,6 +505,9 @@ describe("RFC MCP agent surface", () => {
         },
         sourceCacheRemove: async () => {
           throw new Error("Unexpected cache call");
+        },
+        sourceText: async () => {
+          throw new Error("Unexpected source call");
         },
         research: async (request: ResearchRequest) => {
           requests.push(request);
@@ -543,6 +618,9 @@ describe("RFC MCP agent surface", () => {
         sourceCacheRemove: async () => {
           throw new Error("Unexpected cache call");
         },
+        sourceText: async () => {
+          throw new Error("Unexpected source call");
+        },
         research: async () => {
           throw new Error("Unexpected research call");
         },
@@ -638,6 +716,9 @@ describe("RFC MCP agent surface", () => {
           },
           sourceCacheRemove: async () => {
             throw new Error("Unexpected cache call");
+          },
+          sourceText: async () => {
+            throw new Error("Unexpected source call");
           },
           research: async () => {
             throw new Error("Unexpected research call");

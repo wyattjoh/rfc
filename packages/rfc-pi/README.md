@@ -1,6 +1,6 @@
 # `@wyattjoh/rfc-pi`
 
-Native [Pi](https://pi.dev) integration for the RFC Evidence Engine. The package registers the `rfc_research` and `rfc_verify_citation` tools, adds the RFC lookup workflow to the system prompt, and includes the `/rfc-lookup` skill.
+Native [Pi](https://pi.dev) integration for the RFC Evidence Engine. The package registers the `rfc_research`, `rfc_verify_citation`, and `rfc_source_text` tools, adds the RFC lookup workflow to the system prompt, and includes the `/rfc-lookup` skill.
 
 Tool results reach the model as compact JSON: per question, `found`, and ranked hits with RFC, title, role, relevance, verdict, and passages (`section`, `verdict`, exact `quote`, and UTF-8 `bytes` range). The complete version-three result, including diagnostics and provenance, stays in the tool result details.
 
@@ -20,6 +20,10 @@ bunx @wyattjoh/rfc@latest auth
 ```
 
 Each tool call runs the CLI through `bunx`, pinned to the exact `@wyattjoh/rfc` version this package depends on rather than a dist-tag, so a call never re-resolves against the registry and never runs a CLI this package was not tested against. Credentials remain in the OS credential manager and are never exposed to Pi or accepted through tool input.
+
+## Full RFC source text
+
+Use `rfc_source_text` only when the full RFC text is explicitly required or requested; prefer the research and citation tools for ordinary questions. With just `rfc`, it returns the source hash, total UTF-8 byte length, and parsed headings with half-open byte ranges, not the text. Give both `startOffset` and `endOffset` to retrieve that exact, untruncated slice (citation ranges use the same offsets). Pass `expectedSourceHash` on later reads so a revalidated source change fails rather than mixing snapshots.
 
 ## Local cache and credential tools
 

@@ -79,7 +79,7 @@ claude --plugin-dir .
 
 ## Install the Pi package
 
-The published `@wyattjoh/rfc-pi` Pi package registers the MCP server's `rfc_research` and `rfc_verify_citation` tools with the same names, labels, descriptions, and input constraints, plus bounded workflow instructions without the MCP-only rules; set `RFC_PI_LOCAL_TOOLS=1` to also register the cache and credential tools. It invokes the latest published CLI directly for each tool call rather than running an MCP transport, so Bun 1.4.2 or newer must be available. It also includes the RFC lookup skill:
+The published `@wyattjoh/rfc-pi` Pi package registers the MCP server's `rfc_research`, `rfc_verify_citation`, and `rfc_source_text` tools with the same names, labels, descriptions, and input constraints, plus bounded workflow instructions without the MCP-only rules; set `RFC_PI_LOCAL_TOOLS=1` to also register the cache and credential tools. It invokes the exact CLI version pinned by the package for each tool call rather than running an MCP transport, so Bun 1.4.2 or newer must be available. It also includes the RFC lookup skill:
 
 ```sh
 pi install npm:@wyattjoh/rfc-pi
@@ -114,7 +114,7 @@ Claude Code, Claude Desktop, and other MCP hosts launch that command directly:
 }
 ```
 
-The server describes its own workflow in its initialization instructions, so a connected model needs nothing else from this repository. It exposes `rfc_research`, `rfc_verify_citation`, `rfc_source_cache_status`, `rfc_source_cache_remove` and `rfc_auth_status`. The credential is outside the model-facing surface entirely: a model can ask whether one is configured and can never read, set, or remove it.
+The server describes its own workflow in its initialization instructions, so a connected model needs nothing else from this repository. It exposes `rfc_research`, `rfc_verify_citation`, `rfc_source_text`, `rfc_source_cache_status`, `rfc_source_cache_remove` and `rfc_auth_status`. The credential is outside the model-facing surface entirely: a model can ask whether one is configured and can never read, set, or remove it.
 
 [`packages/rfc/README.md`](packages/rfc/README.md) is the full reference for the CLI protocol, the MCP surface, credential handling, and configuration.
 

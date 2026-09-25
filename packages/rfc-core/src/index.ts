@@ -67,6 +67,12 @@ import {
   makeRfcSourceUrl,
 } from "./source";
 import type { RfcSourceFetcher } from "./source";
+import {
+  RfcSourceTextRequestSchema,
+  sourceTextResult,
+  type RfcSourceTextRequest,
+  type RfcSourceTextResult,
+} from "./source-text";
 import { estimateInputTokenCost } from "./pricing";
 import {
   datatrackerTopicSearchTermLimit,
@@ -101,6 +107,13 @@ export {
 export type { LiveRetrievalTrace, RetrievalRequestTrace, RfcDocument } from "./discovery";
 export { RfcSourceRevalidationError } from "./live-source";
 export type { LiveSourceCacheOutcome, LiveRfcSourceResult } from "./live-source";
+export {
+  RfcSourceHeadingSchema,
+  RfcSourceTextRequestSchema,
+  RfcSourceTextResultSchema,
+  type RfcSourceTextRequest,
+  type RfcSourceTextResult,
+} from "./source-text";
 export * from "./offsets";
 export { InputTokenCostSchema, estimateInputTokenCost, type InputTokenCost } from "./pricing";
 export {
@@ -539,6 +552,10 @@ export interface RfcClient {
    */
   readonly sourceCacheRemove: (rfc: string) => Promise<RfcSourceCacheRemoveResult>;
   /**
+   * Read exact RFC source metadata or a half-open UTF-8 byte range.
+   */
+  readonly sourceText: (request: RfcSourceTextRequest) => Promise<RfcSourceTextResult>;
+  /**
    * Research up to four questions against named RFCs, topic terms, or both.
    */
   readonly research: (request: ResearchRequest) => Promise<ResearchResult>;
@@ -752,6 +769,33 @@ const normalizeRfcCacheKey = (
   }
   return { identifier: `RFC${rfcNumber}`, rfcNumber };
 };
+
+const sourceTextProgram = Effect.fnUntraced(function* (
+  options: RfcClientOptions,
+  request: RfcSourceTextRequest,
+) {
+  const { startOffset, endOffset } = request;
+  if (
+    (startOffset === undefined) !== (endOffset === undefined) ||
+    (startOffset !== undefined &&
+      endOffset !== undefined &&
+      (!Number.isSafeInteger(startOffset) ||
+        !Number.isSafeInteger(endOffset) ||
+        startOffset >= endOffset))
+  ) {
+    return yield* new InvalidInputError({
+      reason: "Provide both safe UTF-8 byte offsets with startOffset < endOffset",
+    });
+  }
+  const discovery = yield* RfcDiscovery;
+  const lookup = yield* discovery.lookupExactRfc(request.rfc);
+  const sourceDirectory = yield* resolveSourceDirectory(options);
+  const { source } = yield* loadLiveRfcSource(lookup.document, sourceDirectory);
+  return yield* Effect.try({
+    try: () => sourceTextResult(source, request),
+    catch: (error) => new InvalidInputError({ reason: String(error) }),
+  });
+});
 
 const sourceCacheStatusProgram = (options: RfcClientOptions, rfc: string) =>
   Effect.gen(function* () {
@@ -1318,6 +1362,19 @@ export const createRfcClient = async (
     sourceCacheRemove: async (rfc) => {
       assertOpen();
       return runtime.runPromise(sourceCacheRemoveProgram(options, rfc));
+    },
+    sourceText: async (request) => {
+      assertOpen();
+      let decoded: RfcSourceTextRequest;
+      try {
+        decoded = Schema.decodeUnknownSync(RfcSourceTextRequestSchema)(request);
+      } catch {
+        throw new InvalidInputError({
+          reason:
+            "Source text input must use schema version 3 with a named RFC and optional byte range",
+        });
+      }
+      return runtime.runPromise(sourceTextProgram(options, decoded));
     },
     research: async (request) => {
       assertOpen();
