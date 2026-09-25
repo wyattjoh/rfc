@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/wyattjoh/rfc/compare/rfc-v0.5.0...rfc-v0.5.1) (2026-09-25)
+
+
+### Bug Fixes
+
+* **deps:** update dependencies to latest ([#11](https://github.com/wyattjoh/rfc/issues/11)) ([941a15e](https://github.com/wyattjoh/rfc/commit/941a15eb4eebb778844bbb094f4878caa2ba4d89))
+
 ## [0.5.0](https://github.com/wyattjoh/rfc/compare/rfc-v0.4.1...rfc-v0.5.0) (2026-09-25)
 
 
