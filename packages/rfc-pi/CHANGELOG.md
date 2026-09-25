@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.4.0](https://github.com/wyattjoh/rfc/compare/rfc-pi-v0.3.1...rfc-pi-v0.4.0) (2026-09-25)
+
+
+### Features
+
+* **rfc:** add exact source text access ([9336fba](https://github.com/wyattjoh/rfc/commit/9336fba3d41cb50fcf1b46733bf08623a6b5827e))
+* **rfc:** add exact source text access ([40274b3](https://github.com/wyattjoh/rfc/commit/40274b3ae9eeb86c49919585c7e0f0b67b65e161))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @wyattjoh/rfc bumped from 0.4.1 to 0.5.0
+    * @wyattjoh/rfc-core bumped from 0.2.1 to 0.3.0
+
 ## [0.3.1](https://github.com/wyattjoh/rfc/compare/rfc-pi-v0.3.0...rfc-pi-v0.3.1) (2026-09-23)
 
 

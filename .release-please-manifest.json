@@ -1,5 +1,5 @@
 {
-  "packages/rfc-core": "0.2.1",
-  "packages/rfc": "0.4.1",
-  "packages/rfc-pi": "0.3.1"
+  "packages/rfc-core": "0.3.0",
+  "packages/rfc": "0.5.0",
+  "packages/rfc-pi": "0.4.0"
 }
