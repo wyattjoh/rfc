@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.0](https://github.com/wyattjoh/rfc/compare/rfc-core-v0.2.1...rfc-core-v0.3.0) (2026-09-25)
+
+
+### Features
+
+* **rfc:** add exact source text access ([9336fba](https://github.com/wyattjoh/rfc/commit/9336fba3d41cb50fcf1b46733bf08623a6b5827e))
+* **rfc:** add exact source text access ([40274b3](https://github.com/wyattjoh/rfc/commit/40274b3ae9eeb86c49919585c7e0f0b67b65e161))
+
 ## [0.2.1](https://github.com/wyattjoh/rfc/compare/rfc-core-v0.2.0...rfc-core-v0.2.1) (2026-09-23)
 
 
