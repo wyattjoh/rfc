@@ -302,6 +302,64 @@ describe("rfc process protocol", () => {
     expect(closed).toBe(2);
   });
 
+  test("reads source metadata and exact UTF-8 ranges without truncation", async () => {
+    const requests: Array<unknown> = [];
+    const createClient = (async () => ({
+      sourceText: async (request: unknown) => {
+        requests.push(request);
+        return {
+          schemaVersion: 3 as const,
+          kind: "source_text" as const,
+          rfc: "RFC9110",
+          sourceUrl,
+          sourceHash: "hash",
+          offsetUnit: "utf8-byte" as const,
+          totalBytes: 4,
+          startOffset:
+            request && typeof request === "object" && "startOffset" in request ? 0 : null,
+          endOffset: request && typeof request === "object" && "endOffset" in request ? 4 : null,
+          text: request && typeof request === "object" && "startOffset" in request ? "Text" : null,
+          headings: [],
+        };
+      },
+      close: async () => undefined,
+    })) as unknown as RfcCliDependencies["createClient"];
+    const metadata = await runCli(
+      ["source-text", "RFC9110", "--format", "json"],
+      undefined,
+      makeFixtureCredentialStore(null),
+      createClient,
+    );
+    expect(metadata.exitCode).toBe(0);
+    expect(JSON.parse(metadata.stdout)).toMatchObject({ text: null, sourceHash: "hash" });
+    const range = await runCli(
+      [
+        "source-text",
+        "RFC9110",
+        "--start-offset",
+        "0",
+        "--end-offset",
+        "4",
+        "--expected-source-hash",
+        "hash",
+      ],
+      undefined,
+      makeFixtureCredentialStore(null),
+      createClient,
+    );
+    expect(range).toEqual({ exitCode: 0, stdout: "Text", stderr: "" });
+    expect(requests).toEqual([
+      { schemaVersion: 3, rfc: "RFC9110" },
+      {
+        schemaVersion: 3,
+        rfc: "RFC9110",
+        startOffset: 0,
+        endOffset: 4,
+        expectedSourceHash: "hash",
+      },
+    ]);
+  });
+
   test("accepts version 3 JSON and repeatable convenience flags", async () => {
     const requests: Array<unknown> = [];
     let closed = 0;

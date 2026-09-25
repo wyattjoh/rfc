@@ -29,11 +29,12 @@ type RegisteredExtension = {
 };
 
 /**
- * Tools registered without `RFC_PI_LOCAL_TOOLS`: research only.
+ * Tools registered without `RFC_PI_LOCAL_TOOLS`: research and explicit source reads.
  */
 const researchToolNames = [
   rfcAgentToolMetadata.research.name,
   rfcAgentToolMetadata.verifyCitation.name,
+  rfcAgentToolMetadata.sourceText.name,
 ];
 
 /**
@@ -178,7 +179,7 @@ describe("Pi RFC extension", () => {
     expect(output.tools).toEqual(researchToolNames);
   });
 
-  test("registers only the research tools by default", () => {
+  test("registers research and explicit source text tools by default", () => {
     const { tools } = registerExtension();
 
     expect(tools.map((tool) => tool.name)).toEqual(researchToolNames);
@@ -201,6 +202,51 @@ describe("Pi RFC extension", () => {
     expect(rfcPiInstructions).not.toContain("MCP");
     expect(rfcPiInstructions).not.toContain("rfc://");
     expect(rfcPiInstructions).not.toContain("preflight");
+  });
+});
+
+describe("source text output", () => {
+  test("returns an explicitly requested range larger than the old CLI output limit", async () => {
+    const { tools } = registerExtension();
+    const tool = findTool(tools, rfcAgentToolMetadata.sourceText.name);
+    const directory = await mkdtemp(join(tmpdir(), "rfc-pi-source-"));
+    const dataPath = join(directory, "source.json");
+    const cliPath = join(directory, "source-cli");
+    const body = "a".repeat(1_100_000);
+    await writeFile(
+      dataPath,
+      JSON.stringify({
+        schemaVersion: 3,
+        kind: "source_text",
+        rfc: "RFC9110",
+        sourceUrl: "https://www.rfc-editor.org/rfc/rfc9110.txt",
+        sourceHash: "hash",
+        offsetUnit: "utf8-byte",
+        totalBytes: body.length,
+        startOffset: 0,
+        endOffset: body.length,
+        text: body,
+        headings: [],
+      }),
+    );
+    await writeFile(cliPath, `#!/bin/sh\ncat ${JSON.stringify(dataPath)}\n`, { mode: 0o755 });
+    const execute = tool.execute as unknown as (
+      toolCallId: string,
+      params: object,
+      signal: AbortSignal | undefined,
+      onUpdate: undefined,
+      ctx: ExtensionContext,
+    ) => Promise<{ readonly content: ReadonlyArray<{ readonly text: string }> }>;
+    const result = await withCliCommand(cliPath, () =>
+      execute(
+        "source-large",
+        { rfc: "RFC9110", startOffset: 0, endOffset: body.length },
+        undefined,
+        undefined,
+        executionContext,
+      ),
+    );
+    expect(JSON.parse(result.content[0]?.text ?? "{}").text).toBe(body);
   });
 });
 
@@ -440,6 +486,10 @@ describe("CLI argv contract", () => {
     {
       name: rfcAgentToolMetadata.verifyCitation.name,
       params: { rfc: "RFC9110", claim: "A client sends a request", quote: "request" },
+    },
+    {
+      name: rfcAgentToolMetadata.sourceText.name,
+      params: { rfc: "not-an-rfc", startOffset: 0, endOffset: 4 },
     },
     { name: rfcAgentToolMetadata.sourceCacheStatus.name, params: { rfc: "RFC9110" } },
     {

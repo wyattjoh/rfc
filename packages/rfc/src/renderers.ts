@@ -6,6 +6,7 @@ import type {
   ResearchResult,
   RfcSourceCacheRemoveResult,
   RfcSourceCacheStatus,
+  RfcSourceTextResult,
 } from "@wyattjoh/rfc-core";
 import type { AuthStatus } from "./credentials";
 
@@ -227,6 +228,25 @@ export const renderSourceCacheStatus = (result: RfcSourceCacheStatus): string =>
  */
 export const renderSourceCacheRemove = (result: RfcSourceCacheRemoveResult): string =>
   `RFC: ${result.rfc}\nCache: ${result.removed ? "removed" : "missing"}`;
+
+/**
+ * Render source navigation metadata or the exact requested source text.
+ *
+ * @param result Source text result from the canonical RFC source.
+ * @returns Readable metadata or the unaltered text slice.
+ */
+export const renderSourceText = (result: RfcSourceTextResult): string =>
+  result.text === null
+    ? [
+        `RFC: ${result.rfc}`,
+        `Source: ${result.sourceUrl}`,
+        `Hash: ${result.sourceHash}`,
+        `Bytes: ${result.totalBytes}`,
+        ...result.headings.map((heading) =>
+          `${heading.number ?? ""} ${heading.title} [${heading.startOffset}-${heading.endOffset}]`.trim(),
+        ),
+      ].join("\n")
+    : result.text;
 
 /**
  * Render safe credential status metadata.

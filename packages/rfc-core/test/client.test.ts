@@ -308,6 +308,51 @@ describe("createRfcClient", () => {
     await rm(cacheDirectory, { recursive: true, force: true });
   });
 
+  test("loads canonical text without provider credentials and rejects a changed cached source", async () => {
+    const cacheDirectory = await makeCacheDirectory();
+    let sourceRequests = 0;
+    const datatracker = makeDatatrackerHttpClient((url) =>
+      url.pathname.endsWith("/document/rfc9110/")
+        ? Response.json(datatrackerDocument)
+        : new Response("not found", { status: 404 }),
+    );
+    const client = await createRfcClient({
+      cacheDirectory,
+      datatrackerHttpClient: datatracker.client,
+      modelAlias: undefined,
+      typeSafeApiKey: undefined,
+      typeSafeApiUrl: undefined,
+      rfcSourceFetcher: async () => {
+        sourceRequests += 1;
+        return sourceText;
+      },
+    });
+    clients.push(client);
+    await expect(
+      client.sourceText({ schemaVersion: 3, rfc: "RFC9110", startOffset: 0 }),
+    ).rejects.toBeInstanceOf(InvalidInputError);
+    expect(datatracker.urls).toHaveLength(0);
+    const metadata = await client.sourceText({ schemaVersion: 3, rfc: "RFC9110" });
+    expect(metadata).toMatchObject({
+      kind: "source_text",
+      text: null,
+      totalBytes: Buffer.byteLength(sourceText),
+    });
+    const ranged = await client.sourceText({
+      schemaVersion: 3,
+      rfc: "RFC9110",
+      startOffset: 0,
+      endOffset: Buffer.byteLength(sourceText),
+      expectedSourceHash: metadata.sourceHash,
+    });
+    expect(ranged.text).toBe(sourceText);
+    expect(sourceRequests).toBe(1);
+    await expect(
+      client.sourceText({ schemaVersion: 3, rfc: "RFC9110", expectedSourceHash: "changed" }),
+    ).rejects.toBeInstanceOf(InvalidInputError);
+    await rm(cacheDirectory, { recursive: true, force: true });
+  });
+
   test("evicts the least recently written source-cache files once the budget is exceeded", async () => {
     const cacheDirectory = await makeCacheDirectory();
     const sourceDirectory = join(cacheDirectory, "sources", "v2");

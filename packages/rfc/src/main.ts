@@ -17,12 +17,14 @@ import {
   executeResearch,
   executeSourceCacheRemove,
   executeSourceCacheStatus,
+  executeSourceText,
   renderAuthStatus,
   renderCitationVerification,
   renderResearchResult,
   renderEstimatedUsd,
   renderSourceCacheRemove,
   renderSourceCacheStatus,
+  renderSourceText,
   toRfcOperationErrorEnvelope,
   type RfcOperationOptions,
   type RfcOperationWarning,
@@ -178,6 +180,19 @@ const quoteArgument = Argument.String("quote").pipe(
 
 const offset = Flag.String("offset").pipe(
   Flag.withDescription("Absolute UTF-8 byte offset for a repeated quotation"),
+  Flag.optional,
+);
+
+const startOffset = Flag.String("start-offset").pipe(
+  Flag.withDescription("Inclusive UTF-8 byte start of an exact RFC source range"),
+  Flag.optional,
+);
+const endOffset = Flag.String("end-offset").pipe(
+  Flag.withDescription("Exclusive UTF-8 byte end of an exact RFC source range"),
+  Flag.optional,
+);
+const expectedSourceHash = Flag.String("expected-source-hash").pipe(
+  Flag.withDescription("Reject a source changed since a previous metadata or range read"),
   Flag.optional,
 );
 
@@ -445,6 +460,67 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
     rfcSearchApiKey:
       Option.getOrUndefined(selectedRfcSearchApiKey) ?? nonEmptyEnv("RFC_SEARCH_API_KEY"),
   });
+
+  const sourceTextCommand = Command.make(
+    "source-text",
+    {
+      cacheDirectory,
+      datatrackerApiUrl,
+      format,
+      rfc: cacheRfc,
+      rfcArgument,
+      startOffset,
+      endOffset,
+      expectedSourceHash,
+    },
+    Effect.fn(function* (flags) {
+      const rfc = resolveRequiredArgumentInput("--rfc", flags.rfc, flags.rfcArgument);
+      const parseByteOffset = (value: Option.Option<string>): number | undefined => {
+        const raw = Option.getOrUndefined(value);
+        if (raw === undefined) return undefined;
+        const parsed = Number(raw);
+        if (!/^(0|[1-9]\d*)$/.test(raw) || !Number.isSafeInteger(parsed)) {
+          throw new InvalidInputError({
+            reason: "Source offsets must be non-negative safe integers",
+          });
+        }
+        return parsed;
+      };
+      const request = {
+        schemaVersion,
+        rfc,
+        ...(Option.isSome(flags.startOffset)
+          ? { startOffset: parseByteOffset(flags.startOffset) }
+          : {}),
+        ...(Option.isSome(flags.endOffset) ? { endOffset: parseByteOffset(flags.endOffset) } : {}),
+        ...(Option.isSome(flags.expectedSourceHash)
+          ? { expectedSourceHash: flags.expectedSourceHash.value }
+          : {}),
+      };
+      const result = yield* Effect.tryPromise({
+        try: () =>
+          executeSourceText(
+            request,
+            operationOptions(flags.cacheDirectory, flags.datatrackerApiUrl, Option.none()),
+            dependencies,
+          ),
+        catch: (error) => error,
+      });
+      if (resolveOutputFormat(flags.format) === "json") {
+        yield* writeStdout(JSON.stringify(result));
+      } else if (result.text === null) {
+        yield* writeStdout(renderSourceText(result));
+      } else {
+        // An exact range is emitted without an added newline.
+        const text = result.text;
+        yield* Effect.sync(() => dependencies.writeStdout(text));
+      }
+    }),
+  ).pipe(
+    Command.withDescription(
+      "Read RFC source metadata or exact UTF-8 byte ranges only when full text is explicitly required; prefer research and citation tools for questions",
+    ),
+  );
 
   const sourceCacheStatusCommand = Command.make(
     "status",
@@ -780,6 +856,7 @@ const makeApplication = (dependencies: RfcCliDependencies) => {
     Command.withSubcommands([
       authCommand,
       sourceCacheCommand,
+      sourceTextCommand,
       costsCommand,
       researchCommand,
       verifyCitationCommand,

@@ -18,6 +18,7 @@ test("the client exposes only request-local operations", async () => {
       "research",
       "sourceCacheRemove",
       "sourceCacheStatus",
+      "sourceText",
       "verifyCitation",
     ]);
     expect("catalogRefresh" in client).toBe(false);

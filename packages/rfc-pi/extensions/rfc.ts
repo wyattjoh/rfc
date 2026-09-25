@@ -5,6 +5,7 @@ import type {
   ResearchResult,
   RfcSourceCacheRemoveResult,
   RfcSourceCacheStatus,
+  RfcSourceTextResult,
 } from "@wyattjoh/rfc-core";
 import type { AuthStatus } from "@wyattjoh/rfc";
 import {
@@ -31,7 +32,8 @@ import rfcPiPackage from "../package.json" with { type: "json" };
  */
 const rfcPackageSpec = `@wyattjoh/rfc@${rfcPiPackage.dependencies["@wyattjoh/rfc"]}`;
 const commandTimeoutMilliseconds = 180_000;
-const commandOutputMaximumBytes = 1024 * 1024;
+// An 8 MiB RFC source may expand when JSON escapes control characters.
+const commandOutputMaximumBytes = 64 * 1024 * 1024;
 const commandStderrMaximumCharacters = 2_000;
 const commandFailureRetentionLimit = 32;
 
@@ -112,6 +114,16 @@ const citationParameters = Type.Object(
     claim: nonEmptyString(descriptions.claim),
     quote: nonEmptyString(descriptions.quote),
     offset: Type.Optional(Type.Integer({ description: descriptions.offset, minimum: 0 })),
+  },
+  { additionalProperties: false },
+);
+
+const sourceTextParameters = Type.Object(
+  {
+    rfc: nonEmptyString(descriptions.sourceRfc),
+    startOffset: Type.Optional(Type.Integer({ description: descriptions.sourceStart, minimum: 0 })),
+    endOffset: Type.Optional(Type.Integer({ description: descriptions.sourceEnd, minimum: 0 })),
+    expectedSourceHash: Type.Optional(nonEmptyString(descriptions.expectedSourceHash)),
   },
   { additionalProperties: false },
 );
@@ -273,7 +285,7 @@ const runRfcCommand = <A extends object>(
     const capture = (chunks: Array<Buffer>) => (chunk: Buffer) => {
       outputBytes += chunk.byteLength;
       if (outputBytes > commandOutputMaximumBytes) {
-        outputError = new Error("RFC tool output exceeded 1048576 bytes");
+        outputError = new Error(`RFC tool output exceeded ${commandOutputMaximumBytes} bytes`);
         child.kill("SIGTERM");
         return;
       }
@@ -419,6 +431,34 @@ export default function rfcExtension(pi: ExtensionAPI): void {
         citationVerificationAgentJson(result.value),
         result.warnings,
       );
+    },
+  });
+
+  pi.registerTool({
+    name: rfcAgentToolMetadata.sourceText.name,
+    label: rfcAgentToolMetadata.sourceText.title,
+    description: rfcAgentToolMetadata.sourceText.description,
+    promptSnippet: rfcAgentToolMetadata.sourceText.title,
+    parameters: sourceTextParameters,
+    async execute(toolCallId, { rfc, startOffset, endOffset, expectedSourceHash }, signal) {
+      const result = await runToolCommand<RfcSourceTextResult>(
+        toolCallId,
+        [
+          "source-text",
+          "--rfc",
+          rfc,
+          "--format",
+          "json",
+          ...(startOffset === undefined ? [] : ["--start-offset", String(startOffset)]),
+          ...(endOffset === undefined ? [] : ["--end-offset", String(endOffset)]),
+          ...(expectedSourceHash === undefined
+            ? []
+            : ["--expected-source-hash", expectedSourceHash]),
+        ],
+        undefined,
+        signal,
+      );
+      return successResult(result.value, JSON.stringify(result.value), result.warnings);
     },
   });
 

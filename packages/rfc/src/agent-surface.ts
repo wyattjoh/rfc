@@ -25,7 +25,7 @@ const rfcAgentInstructions = (surface: "mcp" | "pi"): string =>
   [
     `Answer published IETF RFC questions only from ${surface === "mcp" ? "this server" : "these tools"}, never from memory or another provider. Make one rfc_research call per user request, with each fact you need as its own entry in questions. Pass rfcs when you know the RFC numbers and searchTerms otherwise; both may be combined.`,
     "Answer from the returned passages and cite only the RFC and section shown. A passage marked current successor comes from the RFC that replaced the one named; say so rather than attributing it to the named RFC.",
-    "When a question is not found, you may make one follow-up rfc_research call with other rfcs or searchTerms; RFC titles often differ from common names. Never re-research or re-verify returned passages. Use rfc_verify_citation only for a user-supplied quotation or an explicitly requested check.",
+    "When a question is not found, you may make one follow-up rfc_research call with other rfcs or searchTerms; RFC titles often differ from common names. Never re-research or re-verify returned passages. Use rfc_verify_citation only for a user-supplied quotation or an explicitly requested check. Use rfc_source_text only when the full RFC text is explicitly required or requested; prefer research and citation tools otherwise.",
     `Tool errors are final: keep the typed error code and stop; never substitute memory or another provider. For a missing credential, ask the human operator to run rfc auth login; never request or accept the secret${surface === "mcp" ? " through MCP" : ""}. Never retry a successful paid call over a usage-accounting warning.`,
     ...(surface === "mcp"
       ? [
@@ -63,6 +63,14 @@ export const rfcAgentParameterDescriptions = {
   quote: "Exact unchanged RFC quotation",
   offset:
     "Absolute UTF-8 byte offset copied from a research quote range; omit for a unique quotation",
+  sourceRfc:
+    "Exact published RFC identifier whose authoritative source text is requested, for example RFC9110",
+  sourceStart:
+    "Inclusive absolute UTF-8 byte offset; give both startOffset and endOffset to read text",
+  sourceEnd:
+    "Exclusive absolute UTF-8 byte offset, as in citation provenance; give both offsets to read text",
+  expectedSourceHash:
+    "Hash from an earlier source-text response; reject a changed source instead of mixing pages",
   cacheRfc: "Exact named RFC source-cache entry, for example RFC9110",
   confirm: "Must be true to confirm removal of the named cache entry",
 } as const;
@@ -104,6 +112,13 @@ export const rfcAgentToolMetadata = {
     title: "Verify an RFC citation",
     description:
       "Inputs: rfc, claim, quote; optional offset. Check one factual claim against one exact RFC quotation. Returns a verified, unsupported, contradicted, or fabricated verdict with canonical provenance. Verify at most two paraphrased claims, once each, using the exact returned quote and its UTF-8 byte offset; never guess wording or offsets. If a direct verification verdict is fabricated, use at most one research call to locate current wording and one verification call for that replacement. Unsupported, contradicted, or fabricated verdicts cannot support an unqualified claim.",
+    annotations: rfcAgentToolAnnotations.semantic,
+  },
+  sourceText: {
+    name: "rfc_source_text",
+    title: "Read authoritative RFC source text",
+    description:
+      "Input: rfc; optional startOffset and endOffset (both required for text), expectedSourceHash. Without offsets, returns source hash, total UTF-8 bytes, and parsed headings with half-open byte ranges, not text. With offsets, returns the exact untruncated [startOffset,endOffset) source slice; ranges can be copied from citations. Pass expectedSourceHash on later reads to reject changed sources. Use only when full RFC text is explicitly required or requested; prefer rfc_research and rfc_verify_citation otherwise.",
     annotations: rfcAgentToolAnnotations.semantic,
   },
   sourceCacheStatus: {

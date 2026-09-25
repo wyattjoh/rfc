@@ -1,9 +1,11 @@
 import {
   ConfigurationError,
+  InvalidInputError,
   createRfcClient,
   decodeCitationVerificationRequest,
   decodeResearchRequest,
   schemaVersion,
+  RfcSourceTextRequestSchema,
   toErrorEnvelope,
   type CitationVerificationRequest,
   type CitationVerificationResult,
@@ -13,7 +15,10 @@ import {
   type RfcClient,
   type RfcSourceCacheRemoveResult,
   type RfcSourceCacheStatus,
+  type RfcSourceTextRequest,
+  type RfcSourceTextResult,
 } from "@wyattjoh/rfc-core";
+import { Schema } from "effect";
 import { readCliConfig } from "./config";
 import {
   CredentialInputError,
@@ -34,6 +39,7 @@ export {
   renderResearchResult,
   renderSourceCacheRemove,
   renderSourceCacheStatus,
+  renderSourceText,
   researchResultAgentJson,
 } from "./renderers";
 
@@ -291,6 +297,41 @@ export const executeCitationVerification = async (
       value.diagnostics.inputCost.estimatedUsd,
     ),
   };
+};
+
+/**
+ * Fetch exact canonical RFC text or a metadata-only section index.
+ *
+ * @param request Versioned RFC identifier and optional UTF-8 byte range.
+ * @param options Trusted process configuration.
+ * @param dependencies Injectable operation boundaries.
+ * @returns Source identity and either headings or the requested text.
+ */
+export const executeSourceText = (
+  request: RfcSourceTextRequest | unknown,
+  options: RfcOperationOptions,
+  dependencies: RfcOperationDependencies,
+): Promise<RfcSourceTextResult> => {
+  let decoded: RfcSourceTextRequest;
+  try {
+    decoded = Schema.decodeUnknownSync(RfcSourceTextRequestSchema)(request);
+  } catch {
+    throw new InvalidInputError({
+      reason:
+        "Source text input must use schema version 3 with a named RFC and optional byte range",
+    });
+  }
+  return withClient(
+    () =>
+      dependencies.createClient({
+        cacheDirectory: options.cacheDirectory,
+        datatrackerApiUrl: options.datatrackerApiUrl,
+        modelAlias: undefined,
+        typeSafeApiKey: undefined,
+        typeSafeApiUrl: undefined,
+      }),
+    (client) => client.sourceText(decoded),
+  );
 };
 
 /**
