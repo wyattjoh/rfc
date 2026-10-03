@@ -11,6 +11,7 @@ import {
   removeStoredCredential,
   resolveStoredCredential,
   storedCredentialStatus,
+  withEnvironmentCredential,
   type BunSecretsApi,
   type CredentialStore,
 } from "../src/credentials";
@@ -132,6 +133,34 @@ describe("Bun.secrets credential boundary", () => {
   test("rejects missing credentials without constructing a provider", async () => {
     const store = makeCredentialStore(makeNativeSecrets());
     await expect(resolveStoredCredential(store)).rejects.toBeInstanceOf(CredentialMissingError);
+  });
+
+  test("prefers a launcher-supplied key and falls back to the store when it is blank", async () => {
+    const unavailable = makeCredentialStore({
+      get: async () => {
+        throw new Error("secret service unavailable");
+      },
+      set: async () => undefined,
+      delete: async () => false,
+    });
+    const overlaid = withEnvironmentCredential(unavailable, " launcher-secret ");
+    expect(await resolveStoredCredential(overlaid)).toBe("launcher-secret");
+    expect(await storedCredentialStatus(overlaid)).toMatchObject({ configured: true });
+
+    const native = makeNativeSecrets("stored-secret");
+    const store = makeCredentialStore(native);
+    expect(withEnvironmentCredential(store, undefined)).toBe(store);
+    expect(withEnvironmentCredential(store, "  ")).toBe(store);
+
+    const withStored = withEnvironmentCredential(store, "launcher-secret");
+    expect(await resolveStoredCredential(withStored)).toBe("launcher-secret");
+    expect(await removeStoredCredential(withStored)).toMatchObject({
+      removed: true,
+      configured: true,
+    });
+    expect(await native.get({ service: credentialStoreService, name: credentialStoreName })).toBe(
+      null,
+    );
   });
 
   test("normalizes explicit stdin input and rejects multiline or empty values", () => {

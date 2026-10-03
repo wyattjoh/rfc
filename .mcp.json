@@ -2,7 +2,10 @@
   "mcpServers": {
     "rfc": {
       "command": "bunx",
-      "args": ["@wyattjoh/rfc@latest", "mcp"]
+      "args": ["@wyattjoh/rfc@latest", "mcp"],
+      "env": {
+        "RFC_TYPESAFE_API_KEY": "${user_config.typesafe_api_key}"
+      }
     }
   }
 }

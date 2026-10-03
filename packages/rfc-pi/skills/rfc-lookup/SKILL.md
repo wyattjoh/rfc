@@ -109,8 +109,9 @@ installation path, or an embedded library call.
 
 ## Authenticate once with Bun.secrets
 
-The TypeSafe key is stored only through Bun's OS credential manager. It is never
-an argv value, environment-variable authority, repository file, or output.
+The TypeSafe key is stored through Bun's OS credential manager, or supplied by a
+trusted launcher such as the Claude Code plugin as `RFC_TYPESAFE_API_KEY`. It is
+never an argv value, repository file, or output, and never yours to set.
 
 ```sh
 rfc auth

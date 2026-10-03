@@ -39,8 +39,10 @@ import {
 import {
   CredentialInputError,
   addStoredCredential,
+  credentialEnvironmentVariable,
   makeDefaultCredentialStore,
   removeStoredCredential,
+  withEnvironmentCredential,
   type CredentialStore,
 } from "./credentials";
 
@@ -284,10 +286,14 @@ const readMaskedCredential = async (): Promise<string> => {
 /**
  * Construct the production CLI side-effect boundary.
  *
- * @returns Dependencies backed by process streams and Bun's native credential manager.
+ * @returns Dependencies backed by process streams and Bun's native credential
+ * manager, overlaid by a launcher-supplied `RFC_TYPESAFE_API_KEY`.
  */
 export const makeDefaultCliDependencies = (): RfcCliDependencies => ({
-  credentialStore: makeDefaultCredentialStore(),
+  credentialStore: withEnvironmentCredential(
+    makeDefaultCredentialStore(),
+    process.env[credentialEnvironmentVariable],
+  ),
   readStandardInput: readProcessStandardInput,
   promptCredential: readMaskedCredential,
   writeStdout: (value) => process.stdout.write(value),

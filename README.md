@@ -64,11 +64,7 @@ claude plugin marketplace add wyattjoh/rfc
 claude plugin install rfc@wyattjoh-rfc --scope user
 ```
 
-Authenticate once outside Claude Code, then start a fresh session:
-
-```sh
-bunx @wyattjoh/rfc@latest auth login
-```
+Enabling the plugin prompts for your TypeSafe API key. Claude Code stores it in the system credential store and passes it only to the MCP server process as `RFC_TYPESAFE_API_KEY`; the model never sees it. Change it later from `/plugin` → **Installed** → **Configure options**, or with `claude plugin configure rfc@wyattjoh-rfc`.
 
 The plugin exposes the MCP tools automatically and registers the skill as `/rfc:rfc-lookup`. For local development, validate and load the checkout directly:
 
@@ -149,7 +145,7 @@ Using this tool sends data to third parties. Specifically:
 - **To the IETF RFC search service**, only if you enable full-text topic search: the same search terms verbatim, to a different IETF host with its own access logs. Your search key is sent as a request header and never appears in URLs, diagnostics, or traces.
 - **To the [RFC Editor](https://www.rfc-editor.org)**, for source text: RFC numbers only.
 
-RFC source text is cached on your machine (`~/Library/Caches/rfc-evidence-engine` on macOS) and is never redistributed by this package. Cumulative token and cost totals are written to `~/.config/rfc/usage.json`; no questions, quotations or provider output are recorded there. The credential lives only in the OS credential manager and never appears in output, diagnostics, or error envelopes.
+RFC source text is cached on your machine (`~/Library/Caches/rfc-evidence-engine` on macOS) and is never redistributed by this package. Cumulative token and cost totals are written to `~/.config/rfc/usage.json`; no questions, quotations or provider output are recorded there. The credential lives in the OS credential manager, or in Claude Code's credential store when the plugin supplies it, and never appears in output, diagnostics, or error envelopes.
 
 Provider endpoint overrides must use `https` outside loopback, so the credential cannot be sent in cleartext.
 

@@ -23,7 +23,7 @@ The model-facing tools are:
 
 Each successful tool call returns concise text plus the complete version-three result as validated structured content. Operational failures are MCP tool errors containing the same safe version-three error envelope as the CLI. A question that was not found and every citation verdict remain successful domain results. `rfc_source_cache_remove` requires `confirm: true` and is marked destructive and idempotent.
 
-Provider credentials are intentionally outside the model-facing mutation surface. The MCP can inspect safe credential status but can never accept, reveal, add, or remove a key. Configure the credential through `rfc auth login` before launching the server. The stored key is resolved separately for every semantic tool call.
+Provider credentials are intentionally outside the model-facing mutation surface. The MCP can inspect safe credential status but can never accept, reveal, add, or remove a key. Configure the credential through `rfc auth login`, or have the launcher set `RFC_TYPESAFE_API_KEY`, before starting the server. The stored key is resolved separately for every semantic tool call.
 
 Trusted operators may select the same deterministic test or self-hosted boundaries at process startup:
 
@@ -117,8 +117,10 @@ Bare `auth` reports only whether a key is configured and the service/name identi
 
 Bun maps the store to the host credential service: macOS Keychain, Linux Secret Service (libsecret, such as GNOME Keyring or KWallet), or Windows Credential Manager. Linux requires a running and unlocked Secret Service daemon; macOS requires Keychain access; Windows requires Credential Manager. This repository pins Bun `1.4.2` in `package.json` and tests against that version because `Bun.secrets` is experimental and may change.
 
+A trusted launcher can instead supply the key through the `RFC_TYPESAFE_API_KEY` process environment variable. A non-empty value takes precedence over the stored key for research, citation verification, and `auth` status; blank values fall back to the credential store. The Claude Code plugin uses this to pass the key it collects as sensitive user configuration to the MCP server. `auth login` and `auth remove` still act only on the stored key, so `auth remove` reports `configured: true` while the environment variable remains set. Set this variable only from a launcher or secret manager, never from a committed file: `bunfig.toml` keeps `.env` files out of the process.
+
 To migrate an existing setup, run `rfc auth login`, verify with `rfc auth`, then delete the obsolete plaintext, `.env`, Varlock, dotenv, or 1Password-backed TypeSafe API-key configuration. Research and citation verification both resolve this same credential lazily before constructing the provider.
 
 ## Configuration
 
-Non-secret model, cache, and output settings use typed defaults in the CLI composition root. They are not loaded from Varlock, dotenv, `.env` files, or ordinary environment variables. `bunfig.toml` disables Bun dotenv loading. Use explicit CLI flags for command-specific values such as cache and provider URLs; the credential store is the only authority for the TypeSafe API key.
+Non-secret model, cache, and output settings use typed defaults in the CLI composition root. They are not loaded from Varlock, dotenv, `.env` files, or ordinary environment variables. `bunfig.toml` disables Bun dotenv loading. Use explicit CLI flags for command-specific values such as cache and provider URLs; the TypeSafe API key comes only from `RFC_TYPESAFE_API_KEY` or the credential store.

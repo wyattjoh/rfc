@@ -222,6 +222,33 @@ export const makeCredentialStore = (secrets: BunSecretsApi = Bun.secrets): Crede
 export const makeDefaultCredentialStore = (): CredentialStore => makeCredentialStore();
 
 /**
+ * Environment variable through which a trusted launcher, such as the Claude
+ * Code plugin's sensitive user configuration, supplies the TypeSafe API key.
+ */
+export const credentialEnvironmentVariable = "RFC_TYPESAFE_API_KEY" as const;
+
+/**
+ * Layer a launcher-supplied TypeSafe API key over a credential store.
+ *
+ * A non-empty value takes precedence for reads, so status and provider
+ * construction never touch the OS credential manager. Writes and deletes still
+ * target the underlying store, which keeps `auth login` and `auth logout`
+ * meaningful for the keychain fallback.
+ *
+ * @param store Underlying credential boundary.
+ * @param value Raw environment value, or undefined when unset.
+ * @returns The original store when the value is blank, otherwise an overlay.
+ */
+export const withEnvironmentCredential = (
+  store: CredentialStore,
+  value: string | undefined,
+): CredentialStore => {
+  const supplied = value?.trim();
+  if (supplied === undefined || supplied.length === 0) return store;
+  return { ...store, get: async () => supplied };
+};
+
+/**
  * Validate and normalize a credential received from an explicit input source.
  *
  * @param value Raw interactive or standard-input content.
@@ -315,7 +342,8 @@ export const removeStoredCredential = async (store: CredentialStore): Promise<Au
     schemaVersion: authSchemaVersion,
     kind: "auth_remove",
     removed,
-    configured: false,
+    // A launcher-supplied key survives removal of the stored one.
+    configured: await hasStoredCredential(store),
     service: credentialStoreService,
     name: credentialStoreName,
   });

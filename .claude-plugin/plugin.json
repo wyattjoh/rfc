@@ -10,5 +10,14 @@
   "homepage": "https://github.com/wyattjoh/rfc",
   "repository": "https://github.com/wyattjoh/rfc",
   "license": "MIT",
-  "keywords": ["ietf", "mcp", "rfc", "specifications"]
+  "keywords": ["ietf", "mcp", "rfc", "specifications"],
+  "userConfig": {
+    "typesafe_api_key": {
+      "type": "string",
+      "title": "TypeSafe API key",
+      "description": "API key for TypeSafe semantic evaluation, stored in the system credential store.",
+      "sensitive": true,
+      "required": true
+    }
+  }
 }
