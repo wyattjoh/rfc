@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/wyattjoh/rfc/compare/rfc-v0.5.1...rfc-v0.6.0) (2026-10-03)
+
+
+### Features
+
+* **plugin:** collect the TypeSafe API key as plugin user config ([dc7656a](https://github.com/wyattjoh/rfc/commit/dc7656a076b4fbe413caac257985c17cb0f55505))
+
 ## [0.5.1](https://github.com/wyattjoh/rfc/compare/rfc-v0.5.0...rfc-v0.5.1) (2026-09-25)
 
 

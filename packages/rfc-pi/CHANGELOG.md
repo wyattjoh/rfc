@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.5.0](https://github.com/wyattjoh/rfc/compare/rfc-pi-v0.4.1...rfc-pi-v0.5.0) (2026-10-03)
+
+
+### Features
+
+* **plugin:** collect the TypeSafe API key as plugin user config ([dc7656a](https://github.com/wyattjoh/rfc/commit/dc7656a076b4fbe413caac257985c17cb0f55505))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @wyattjoh/rfc bumped from 0.5.1 to 0.6.0
+
 ## [0.4.1](https://github.com/wyattjoh/rfc/compare/rfc-pi-v0.4.0...rfc-pi-v0.4.1) (2026-09-25)
 
 
