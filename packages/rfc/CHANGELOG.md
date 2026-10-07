@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.6.1](https://github.com/wyattjoh/rfc/compare/rfc-v0.6.0...rfc-v0.6.1) (2026-10-07)
+
+
+### Bug Fixes
+
+* **deps:** upgrade RFC runtime dependencies to stable releases ([4f85ddb](https://github.com/wyattjoh/rfc/commit/4f85ddba586ca4c0879076f3afe9ea6c5fec2ef8))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @wyattjoh/rfc-core bumped from 0.3.0 to 0.3.1
+
 ## [0.6.0](https://github.com/wyattjoh/rfc/compare/rfc-v0.5.1...rfc-v0.6.0) (2026-10-03)
 
 
