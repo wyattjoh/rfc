@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { Clock, Effect, FileSystem, Path, Schema } from "effect";
-import { Headers } from "effect/unstable/http";
+import { Headers } from "effect/http";
 import { maxAgeMilliseconds } from "./live-source";
 
 /**

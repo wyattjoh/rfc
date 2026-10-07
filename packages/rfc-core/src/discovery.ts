@@ -13,7 +13,7 @@ import {
   Schema,
   Stream,
 } from "effect";
-import { Headers, HttpClient, HttpClientError, HttpClientResponse } from "effect/unstable/http";
+import { Headers, HttpClient, HttpClientError, HttpClientResponse } from "effect/http";
 import {
   metadataFreshnessMilliseconds,
   readFreshMetadata,

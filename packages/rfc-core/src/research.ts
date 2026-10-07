@@ -1,7 +1,7 @@
 import { Clock, Context, Effect, FileSystem, Path, Ref, Result, Schema } from "effect";
-import * as AiError from "effect/unstable/ai/AiError";
-import * as Decision from "effect/unstable/ai/Decision";
-import * as DecisionModel from "effect/unstable/ai/DecisionModel";
+import * as AiError from "effect/ai/AiError";
+import * as Decision from "effect/ai/Decision";
+import * as DecisionModel from "effect/ai/DecisionModel";
 import { LiveRetrievalTraceSchema, RfcDocumentSchema } from "./discovery";
 import { LiveRfcSource, RfcSourceRevalidationError } from "./live-source";
 import type { RfcMetadata } from "./metadata";

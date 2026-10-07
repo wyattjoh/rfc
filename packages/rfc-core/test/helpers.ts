@@ -1,6 +1,6 @@
 import { Effect } from "effect";
-import type * as Decision from "effect/unstable/ai/Decision";
-import * as DecisionModel from "effect/unstable/ai/DecisionModel";
+import type * as Decision from "effect/ai/Decision";
+import * as DecisionModel from "effect/ai/DecisionModel";
 import type { Verdict } from "../src/index";
 
 /**

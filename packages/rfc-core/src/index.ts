@@ -15,8 +15,8 @@ import {
   Result,
   Schema,
 } from "effect";
-import * as DecisionModel from "effect/unstable/ai/DecisionModel";
-import { FetchHttpClient, HttpClient } from "effect/unstable/http";
+import * as DecisionModel from "effect/ai/DecisionModel";
+import { FetchHttpClient, HttpClient } from "effect/http";
 import {
   RfcSourceRevalidationError,
   hasLiveRfcSourceCacheEntry,
@@ -647,7 +647,7 @@ const normalizeRoundedDistributions = <R extends SystemOneResponse>(response: R)
  * nothing reaches the decoded `systemOne` response before `DecisionModel`
  * validates it, so this wraps the client service and overrides `systemOne`. It
  * relies on the `TypeSafeClient` service shape of `@effect/ai-typesafe`
- * 4.0.0-rc.117; re-check the override on every upgrade.
+ * 4.0.1; re-check the override on every upgrade.
  */
 const typeSafeDecisionModelLayer = (options: RfcClientOptions) => {
   const observedClientLayer = Layer.fromBuildMemo(() =>

@@ -4,8 +4,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { Cause, Duration, Effect, Schema } from "effect";
 import { TestClock } from "effect/testing";
-import * as DecisionModel from "effect/unstable/ai/DecisionModel";
-import { HttpClient, HttpClientResponse } from "effect/unstable/http";
+import * as DecisionModel from "effect/ai/DecisionModel";
+import { HttpClient, HttpClientResponse } from "effect/http";
 import * as PublicApi from "../src/index";
 import {
   InvalidInputError,

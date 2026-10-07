@@ -3,10 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { Duration, Effect } from "effect";
-import * as AiError from "effect/unstable/ai/AiError";
-import * as DecisionModel from "effect/unstable/ai/DecisionModel";
+import * as AiError from "effect/ai/AiError";
+import * as DecisionModel from "effect/ai/DecisionModel";
 import { TestClock } from "effect/testing";
-import { HttpClient, HttpClientResponse } from "effect/unstable/http";
+import { HttpClient, HttpClientResponse } from "effect/http";
 import {
   DecisionModelError,
   InvalidInputError,

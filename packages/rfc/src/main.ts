@@ -8,7 +8,7 @@ import {
 } from "@wyattjoh/rfc-core";
 import { NodeServices } from "@effect/platform-node";
 import { Console, Effect, Option } from "effect";
-import { Argument, CliError, Command, Flag } from "effect/unstable/cli";
+import { Argument, CliError, Command, Flag } from "effect/cli";
 import packageMetadata from "../package.json" with { type: "json" };
 import { runRfcMcpServer } from "./mcp";
 import {

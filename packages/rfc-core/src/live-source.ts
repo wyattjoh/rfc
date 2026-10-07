@@ -14,7 +14,7 @@ import {
   Stream,
 } from "effect";
 import * as PlatformError from "effect/PlatformError";
-import { Headers, HttpClient, HttpClientResponse } from "effect/unstable/http";
+import { Headers, HttpClient, HttpClientResponse } from "effect/http";
 import type { RfcMetadata } from "./discovery";
 import {
   RfcSourceCacheError,

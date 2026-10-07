@@ -1,6 +1,6 @@
 import { Clock, Effect, FileSystem, Path, Ref, Schema } from "effect";
-import * as Decision from "effect/unstable/ai/Decision";
-import * as DecisionModel from "effect/unstable/ai/DecisionModel";
+import * as Decision from "effect/ai/Decision";
+import * as DecisionModel from "effect/ai/DecisionModel";
 import {
   LiveRetrievalTraceSchema,
   RfcDocumentSchema,

@@ -4,9 +4,9 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { Duration, Effect } from "effect";
 import { TestClock } from "effect/testing";
-import * as AiError from "effect/unstable/ai/AiError";
-import * as DecisionModel from "effect/unstable/ai/DecisionModel";
-import { HttpClient, HttpClientResponse } from "effect/unstable/http";
+import * as AiError from "effect/ai/AiError";
+import * as DecisionModel from "effect/ai/DecisionModel";
+import { HttpClient, HttpClientResponse } from "effect/http";
 import {
   CitationOffsetMismatchError,
   CitationQuoteAmbiguousError,
@@ -18,7 +18,7 @@ import {
   type RfcClientOptions,
   type RfcSourceFetcher,
 } from "../src/index";
-import type * as Decision from "effect/unstable/ai/Decision";
+import type * as Decision from "effect/ai/Decision";
 import type { RfcMetadata } from "../src/metadata";
 
 type RfcMetadataSource = () => Promise<ReadonlyArray<RfcMetadata>>;

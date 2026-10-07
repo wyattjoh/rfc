@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterAll, describe, expect, test } from "bun:test";
 import { NodeFileSystem, NodePath } from "@effect/platform-node";
 import { Clock, Effect, Layer } from "effect";
-import { Headers } from "effect/unstable/http";
+import { Headers } from "effect/http";
 import {
   datatrackerMetadataCacheMaximumFreshnessSeconds,
   metadataFreshnessMilliseconds,

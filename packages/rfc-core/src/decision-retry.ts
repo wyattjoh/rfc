@@ -1,5 +1,5 @@
 import { Cause, Clock, Data, Duration, Effect, Schedule, Schema } from "effect";
-import * as AiError from "effect/unstable/ai/AiError";
+import * as AiError from "effect/ai/AiError";
 
 /**
  * A typed failure from an official DecisionModel request.
