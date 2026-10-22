@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.5.2](https://github.com/wyattjoh/rfc/compare/rfc-pi-v0.5.1...rfc-pi-v0.5.2) (2026-10-22)
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @wyattjoh/rfc bumped from 0.6.1 to 0.6.2
+    * @wyattjoh/rfc-core bumped from 0.3.1 to 0.3.2
+
 ## [0.5.1](https://github.com/wyattjoh/rfc/compare/rfc-pi-v0.5.0...rfc-pi-v0.5.1) (2026-10-07)
 
 

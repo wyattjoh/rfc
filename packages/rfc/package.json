@@ -1,6 +1,6 @@
 {
   "name": "@wyattjoh/rfc",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "Agent-facing CLI and MCP server for evidence-grounded IETF RFC research.",
   "keywords": [
     "cli",
@@ -41,7 +41,7 @@
     "@effect/platform-node": "4.0.1",
     "@effect/platform-node-shared": "4.0.1",
     "@modelcontextprotocol/server": "2.3.1",
-    "@wyattjoh/rfc-core": "0.3.1",
+    "@wyattjoh/rfc-core": "0.3.2",
     "effect": "4.0.1"
   },
   "devDependencies": {
