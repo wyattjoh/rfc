@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.6.2](https://github.com/wyattjoh/rfc/compare/rfc-v0.6.1...rfc-v0.6.2) (2026-10-22)
+
+
+### Bug Fixes
+
+* **deps:** pin @effect/platform-node-shared to match effect ([#20](https://github.com/wyattjoh/rfc/issues/20)) ([f8d66b0](https://github.com/wyattjoh/rfc/commit/f8d66b003b8ba54494b78a23261a49b1f2fd3341))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @wyattjoh/rfc-core bumped from 0.3.1 to 0.3.2
+
 ## [0.6.1](https://github.com/wyattjoh/rfc/compare/rfc-v0.6.0...rfc-v0.6.1) (2026-10-07)
 
 
