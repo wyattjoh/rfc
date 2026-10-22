@@ -39,6 +39,7 @@
   "dependencies": {
     "@effect/ai-typesafe": "4.0.1",
     "@effect/platform-node": "4.0.1",
+    "@effect/platform-node-shared": "4.0.1",
     "effect": "4.0.1"
   },
   "devDependencies": {

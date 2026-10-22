@@ -26,14 +26,15 @@
     },
     "packages/rfc": {
       "name": "@wyattjoh/rfc",
-      "version": "0.6.0",
+      "version": "0.6.1",
       "bin": {
         "rfc": "./src/bin.ts",
       },
       "dependencies": {
         "@effect/platform-node": "4.0.1",
+        "@effect/platform-node-shared": "4.0.1",
         "@modelcontextprotocol/server": "2.3.1",
-        "@wyattjoh/rfc-core": "0.3.0",
+        "@wyattjoh/rfc-core": "0.3.1",
         "effect": "4.0.1",
       },
       "devDependencies": {
@@ -44,10 +45,11 @@
     },
     "packages/rfc-core": {
       "name": "@wyattjoh/rfc-core",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "dependencies": {
         "@effect/ai-typesafe": "4.0.1",
         "@effect/platform-node": "4.0.1",
+        "@effect/platform-node-shared": "4.0.1",
         "effect": "4.0.1",
       },
       "devDependencies": {
@@ -57,7 +59,7 @@
     },
     "packages/rfc-pi": {
       "name": "@wyattjoh/rfc-pi",
-      "version": "0.5.0",
+      "version": "0.5.1",
       "dependencies": {
         "@wyattjoh/rfc": "0.6.0",
         "@wyattjoh/rfc-core": "0.3.0",
