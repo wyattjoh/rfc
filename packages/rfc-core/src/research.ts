@@ -272,8 +272,16 @@ const combineUsages = (usages: ReadonlyArray<Usage>): Usage =>
 
 const noUsage: Usage = { inputTokens: undefined, outputTokens: undefined };
 
+/**
+ * Decisions research sends over text state; it never uses image `Locate` decisions.
+ */
+export type ResearchDecision =
+  | Decision.Classify<string>
+  | Decision.Rate<string>
+  | Decision.Probability;
+
 type DecisionBatch = {
-  readonly answers: Decision.Answers<Record<string, Decision.Any>>;
+  readonly answers: Decision.Answers<Record<string, ResearchDecision>>;
   readonly usage: Usage;
 };
 
@@ -284,12 +292,12 @@ const decide = Effect.fnUntraced(function* <S extends Schema.Codec<any, any, nev
   stage: DecisionStage,
   input: S,
   state: S["Type"],
-  decisions: Readonly<Record<string, Decision.Any>>,
+  decisions: Readonly<Record<string, ResearchDecision>>,
 ): Effect.fn.Return<DecisionBatch, DecisionModelError, DecisionModel.DecisionModel> {
   const model = yield* DecisionModel.DecisionModel;
   const definition = Decision.make({
     input,
-    decisions: decisions as Record<string, Decision.Any>,
+    decisions: decisions as Record<string, ResearchDecision>,
   });
   const response = yield* retryDecisionModel(
     researchRetryPolicy(stage),
@@ -637,7 +645,7 @@ const candidateKey = (index: number): string => `c${index}`;
 const rankDecisions = (
   questions: ReadonlyArray<string>,
   pool: ReadonlyArray<PoolCandidate>,
-): Record<string, Decision.Any> =>
+): Record<string, ResearchDecision> =>
   Object.fromEntries(
     questions.flatMap((_, questionIndex) => {
       const question = `\`questions.${questionKey(questionIndex)}\``;
@@ -808,7 +816,7 @@ const sectionChoice = (
   questionIndex: number,
   sections: ReadonlyArray<RfcSection>,
   identifier: string,
-): Decision.Any =>
+): ResearchDecision =>
   Decision.classify({
     instructions: `Which section of ${identifier}, listed in \`toc\`, contains the text that answers the question \`questions.${questionKey(questionIndex)}\`?`,
     criteria: Object.fromEntries([

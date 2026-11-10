@@ -1463,7 +1463,7 @@ describe("createRfcClient", () => {
           modelCalls += 1;
           return Effect.die(new Error("TypeSafe must not run for empty discovery"));
         },
-      } as DecisionModel.DecisionModel,
+      } as unknown as DecisionModel.DecisionModel,
     });
     clients.push(client);
 
@@ -1641,7 +1641,7 @@ describe("createRfcClient", () => {
             },
             usage: { inputTokens: 2, outputTokens: 1 },
           }),
-      } as DecisionModel.DecisionModel,
+      } as unknown as DecisionModel.DecisionModel,
     });
     clients.push(client);
 

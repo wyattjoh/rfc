@@ -1,5 +1,5 @@
 import { Effect } from "effect";
-import type * as Decision from "effect/ai/Decision";
+import type { ResearchDecision } from "../src/research";
 import * as DecisionModel from "effect/ai/DecisionModel";
 import type { Verdict } from "../src/index";
 
@@ -19,7 +19,7 @@ export type Route = {
  * One DecisionModel request observed by the routing stub.
  */
 export type RecordedCall = {
-  readonly decisions: Readonly<Record<string, Decision.Any>>;
+  readonly decisions: Readonly<Record<string, ResearchDecision>>;
   readonly input: {
     readonly questions: Readonly<Record<string, string>>;
     readonly candidates?: Readonly<Record<string, { readonly identifier: string }>>;
@@ -66,7 +66,7 @@ export const makeRoutingModel = (route: Route = {}, calls: Array<RecordedCall> =
   ({
     [DecisionModel.TypeId]: DecisionModel.TypeId,
     decide: (
-      definition: { readonly decisions: Readonly<Record<string, Decision.Any>> },
+      definition: { readonly decisions: Readonly<Record<string, ResearchDecision>> },
       options: { readonly input: RecordedCall["input"] },
     ) => {
       const input = options.input;
