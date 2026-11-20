@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/icon.jpg" alt="RFC MCP icon" width="160">
+</p>
+
 # rfc — an evidence engine for IETF RFCs
 
 `rfc` answers questions about published IETF RFCs from the actual specification text. It discovers candidate RFCs through the IETF Datatracker, follows `updates` and `obsoletes` relationships, retrieves the canonical RFC Editor source, ranks which RFCs and sections bear on each question, and returns the exact paragraphs with their UTF-8 byte offsets and source hash. It runs as a CLI and as a local [Model Context Protocol](https://modelcontextprotocol.io) server, so a coding agent can cite a specification instead of recalling one.
