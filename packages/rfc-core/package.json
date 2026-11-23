@@ -37,13 +37,13 @@
     "benchmark:topic": "bun run benchmark/topic-discovery.ts"
   },
   "dependencies": {
-    "@effect/ai-typesafe": "4.1.0",
-    "@effect/platform-node": "4.1.0",
-    "@effect/platform-node-shared": "4.1.0",
-    "effect": "4.1.0"
+    "@effect/ai-typesafe": "4.1.5",
+    "@effect/platform-node": "4.1.5",
+    "@effect/platform-node-shared": "4.1.5",
+    "effect": "4.1.5"
   },
   "devDependencies": {
-    "@types/bun": "1.4.4",
+    "@types/bun": "1.4.5",
     "typescript": "7.0.2"
   },
   "engines": {
